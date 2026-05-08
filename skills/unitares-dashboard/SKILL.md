@@ -7,15 +7,11 @@ description: >
   they were visible: file allowlist, Chart.js dark-theme defaults, the
   authFetch helper, the script-load chain, and the .panel layout
   contract. A repo-specific reference — not general dashboard advice.
-last_verified: "2026-04-20"
-freshness_days: 30
-source_files:
-  - unitares/dashboard/index.html
-  - unitares/dashboard/eisv-charts.js
-  - unitares/dashboard/utils.js
-  - unitares/dashboard/colors.js
-  - unitares/dashboard/styles.css
-  - unitares/src/http_api.py
+license: Apache-2.0
+compatibility: Requires UNITARES governance MCP server (gov.cirwel.org or local http://127.0.0.1:8767/mcp/)
+metadata:
+  unitares.last_verified: "2026-04-20"
+  unitares.freshness_days: "30"
 ---
 
 # Adding a Panel to the UNITARES Dashboard

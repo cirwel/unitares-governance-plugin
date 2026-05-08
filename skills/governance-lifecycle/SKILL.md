@@ -4,13 +4,11 @@ description: >
   Use when an agent is interacting with UNITARES governance for the first time, needs to
   onboard, check in, or recover from a pause/reject verdict. Covers the full agent lifecycle
   from session start through check-ins to recovery.
-last_verified: "2026-04-26"
-freshness_days: 14
-source_files:
-  - unitares/src/mcp_handlers/core.py
-  - unitares/src/mcp_handlers/identity/handlers.py
-  - unitares/src/mcp_handlers/admin/handlers.py
-  - unitares/src/tool_descriptions.json
+license: Apache-2.0
+compatibility: Requires UNITARES governance MCP server (gov.cirwel.org or local http://127.0.0.1:8767/mcp/)
+metadata:
+  unitares.last_verified: "2026-04-26"
+  unitares.freshness_days: "14"
 ---
 
 # Agent Lifecycle

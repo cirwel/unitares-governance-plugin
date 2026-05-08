@@ -1,0 +1,4 @@
+source_files:
+  - unitares/src/mcp_handlers/knowledge/handlers.py
+  - unitares/src/knowledge_graph.py
+  - unitares/src/storage/knowledge_graph_age.py

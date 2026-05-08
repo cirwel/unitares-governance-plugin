@@ -4,13 +4,11 @@ description: >
   Use when an agent needs to understand UNITARES governance concepts — EISV state vectors,
   basins, verdicts, coherence, calibration. Reference material for interpreting governance
   metrics and understanding the thermodynamic model.
-last_verified: "2026-04-25"
-freshness_days: 14
-source_files:
-  - unitares/config/governance_config.py
-  - unitares/src/auto_ground_truth.py
-  - unitares/src/governance_monitor.py
-  - unitares/src/mcp_handlers/core.py
+license: Apache-2.0
+compatibility: Requires UNITARES governance MCP server (gov.cirwel.org or local http://127.0.0.1:8767/mcp/)
+metadata:
+  unitares.last_verified: "2026-04-25"
+  unitares.freshness_days: "14"
 ---
 
 # Governance Fundamentals

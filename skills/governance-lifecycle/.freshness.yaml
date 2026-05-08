@@ -1,0 +1,5 @@
+source_files:
+  - unitares/src/mcp_handlers/core.py
+  - unitares/src/mcp_handlers/identity/handlers.py
+  - unitares/src/mcp_handlers/admin/handlers.py
+  - unitares/src/tool_descriptions.json

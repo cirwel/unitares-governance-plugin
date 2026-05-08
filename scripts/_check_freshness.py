@@ -2,10 +2,11 @@
 """Check skill freshness against source file modification times."""
 
 import os
-import re
 import sys
 from datetime import datetime
 from pathlib import Path
+
+import yaml
 
 RED = "\033[0;31m"
 YELLOW = "\033[0;33m"
@@ -15,23 +16,38 @@ NC = "\033[0m"
 
 def parse_frontmatter(content: str) -> dict:
     """Parse YAML frontmatter from skill file."""
-    fm = re.search(r"^---\n(.*?)\n---", content, re.DOTALL)
-    if not fm:
+    if not content.startswith("---\n"):
         return {}
-    fm_text = fm.group(1)
+    end = content.find("\n---", 4)
+    if end == -1:
+        return {}
+    fm = yaml.safe_load(content[4:end])
+    if not isinstance(fm, dict):
+        return {}
 
-    verified_m = re.search(r'last_verified:\s*["\'](\d{4}-\d{2}-\d{2})["\']', fm_text)
-    days_m = re.search(r"freshness_days:\s*(\d+)", fm_text)
-    sources = re.findall(r"^\s+-\s+(.+)$", fm_text, re.MULTILINE)
+    meta = fm.get("metadata", {}) or {}
+    last_verified = meta.get("unitares.last_verified")
+    freshness_days = meta.get("unitares.freshness_days")
 
-    if not verified_m or not days_m:
+    if not last_verified or not freshness_days:
         return {}
 
     return {
-        "last_verified": verified_m.group(1),
-        "freshness_days": int(days_m.group(1)),
-        "source_files": [s.strip() for s in sources],
+        "last_verified": str(last_verified),
+        "freshness_days": int(freshness_days),
     }
+
+
+def load_source_files(skill_dir: Path) -> list[str]:
+    """Load source_files list from .freshness.yaml sidecar."""
+    sidecar = skill_dir / ".freshness.yaml"
+    if not sidecar.exists():
+        return []
+    data = yaml.safe_load(sidecar.read_text())
+    if not isinstance(data, dict):
+        return []
+    files = data.get("source_files", [])
+    return [str(f) for f in files] if files else []
 
 
 def check_skills(plugin_root: str, projects_root: str) -> int:
@@ -56,10 +72,10 @@ def check_skills(plugin_root: str, projects_root: str) -> int:
         verified_date_start = datetime.strptime(meta["last_verified"], "%Y-%m-%d")
         age_days = (datetime.now() - verified_date_start).days
 
-        # Check if source files were modified after last_verified
+        source_files = load_source_files(skill_dir)
         source_modified = False
         modified_file = ""
-        for src in meta["source_files"]:
+        for src in source_files:
             full_path = Path(projects_root) / src
             if full_path.exists():
                 mtime = datetime.fromtimestamp(os.path.getmtime(full_path))
