@@ -1,0 +1,5 @@
+source_files:
+  - unitares/config/governance_config.py
+  - unitares/src/auto_ground_truth.py
+  - unitares/src/governance_monitor.py
+  - unitares/src/mcp_handlers/core.py

@@ -4,14 +4,11 @@ description: >
   Compatibility umbrella skill for the UNITARES governance framework. Use this
   as the entrypoint when you need the overall model and route into the split
   governance skills.
-last_verified: "2026-04-25"
-freshness_days: 14
-source_files:
-  - skills/governance-lifecycle/SKILL.md
-  - skills/governance-fundamentals/SKILL.md
-  - skills/knowledge-graph/SKILL.md
-  - skills/dialectic-reasoning/SKILL.md
-  - skills/discord-bridge/SKILL.md
+license: Apache-2.0
+compatibility: Requires UNITARES governance MCP server (gov.cirwel.org or local http://127.0.0.1:8767/mcp/)
+metadata:
+  unitares.last_verified: "2026-04-25"
+  unitares.freshness_days: "14"
 ---
 
 # UNITARES Governance

@@ -4,10 +4,11 @@ description: >
   Use when setting up or operating the UNITARES Discord bridge — a standalone bot that
   surfaces governance events, agent presence, Lumen's state, and autonomous governance
   actions as a living Discord server.
-last_verified: "2026-04-17"
-freshness_days: 14
-source_files:
-  - unitares-discord-bridge/src/bridge/bot.py
+license: Apache-2.0
+compatibility: Requires UNITARES governance MCP server (gov.cirwel.org or local http://127.0.0.1:8767/mcp/)
+metadata:
+  unitares.last_verified: "2026-04-17"
+  unitares.freshness_days: "14"
 ---
 
 # Discord Bridge

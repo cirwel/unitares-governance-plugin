@@ -1,25 +1,38 @@
 #!/usr/bin/env python3
 """Output a freshness warning if a skill's last_verified is stale. Used by session-start hook."""
 
-import re
 import sys
 from datetime import datetime
 
-content = sys.argv[1] if len(sys.argv) > 1 else ""
+import yaml
 
-fm = re.search(r"^---\n(.*?)\n---", content, re.DOTALL)
+
+def _parse_frontmatter(content: str) -> dict:
+    if not content.startswith("---\n"):
+        return {}
+    end = content.find("\n---", 4)
+    if end == -1:
+        return {}
+    fm = yaml.safe_load(content[4:end])
+    if not isinstance(fm, dict):
+        return {}
+    return fm
+
+
+content = sys.argv[1] if len(sys.argv) > 1 else ""
+fm = _parse_frontmatter(content)
 if not fm:
     sys.exit(0)
 
-fm_text = fm.group(1)
-verified_m = re.search(r'last_verified:\s*["\'](\d{4}-\d{2}-\d{2})["\']', fm_text)
-days_m = re.search(r"freshness_days:\s*(\d+)", fm_text)
+meta = fm.get("metadata", {}) or {}
+last_verified_raw = meta.get("unitares.last_verified")
+freshness_days_raw = meta.get("unitares.freshness_days")
 
-if not verified_m or not days_m:
+if not last_verified_raw or not freshness_days_raw:
     sys.exit(0)
 
-verified = datetime.strptime(verified_m.group(1), "%Y-%m-%d")
-max_days = int(days_m.group(1))
+verified = datetime.strptime(str(last_verified_raw), "%Y-%m-%d")
+max_days = int(freshness_days_raw)
 age = (datetime.now() - verified).days
 
 if age > max_days:
