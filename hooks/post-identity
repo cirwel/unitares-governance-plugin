@@ -16,6 +16,19 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PLUGIN_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
+# Diagnostic breadcrumb (off by default). When UNITARES_HOOK_DEBUG=1, append
+# one line per silent-exit so operators can see where the chain breaks
+# without changing user-visible behavior. Path overridable via
+# UNITARES_HOOK_DEBUG_LOG (default ~/.unitares/hook-skips.log).
+_breadcrumb() {
+  [[ "${UNITARES_HOOK_DEBUG:-0}" != "1" ]] && return 0
+  local log="${UNITARES_HOOK_DEBUG_LOG:-${HOME}/.unitares/hook-skips.log}"
+  local reason="$1"
+  printf '%s | hook=post-identity | reason=%s | pwd=%s\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$reason" "$PWD" \
+    >> "${log}" 2>/dev/null || true
+}
+
 SESSION_CACHE_HELPER=""
 for candidate in \
   "${PLUGIN_ROOT}/scripts/session_cache.py" \
@@ -27,6 +40,7 @@ do
   fi
 done
 if [[ -z "${SESSION_CACHE_HELPER}" ]]; then
+  _breadcrumb no_session_cache_helper
   exit 0
 fi
 
@@ -36,6 +50,7 @@ if [[ ! -t 0 ]]; then
   HOOK_INPUT=$(cat 2>/dev/null) || true
 fi
 if [[ -z "${HOOK_INPUT}" ]]; then
+  _breadcrumb no_stdin
   exit 0
 fi
 
@@ -48,17 +63,25 @@ fi
 EXTRACTED=$(python3 - "${HOOK_INPUT}" <<'PY' 2>/dev/null || true
 import json, sys
 
+def _skip(reason):
+    # Emitted on stdout where bash captures EXTRACTED. The bash side
+    # recognizes the __SKIP__ prefix and breadcrumbs the reason when
+    # UNITARES_HOOK_DEBUG=1. Plain (non-debug) operation is unchanged
+    # because empty/SKIP output both lead to silent exit downstream.
+    print(f"__SKIP__:{reason}")
+    sys.exit(0)
+
 try:
     data = json.loads(sys.argv[1] if len(sys.argv) > 1 else "{}")
 except Exception:
-    sys.exit(0)
+    _skip("hook_input_not_json")
 
 tool_name = (data.get("tool_name") or "").lower()
 # Match mcp__<server>__(onboard|identity|bind_session)
 _id_tools = ("onboard", "identity", "bind_session")
 suffix = tool_name.rsplit("__", 1)[-1] if "__" in tool_name else tool_name
 if suffix not in _id_tools:
-    sys.exit(0)
+    _skip(f"tool_name_mismatch:{tool_name or 'empty'}")
 
 session_id = data.get("session_id") or ""
 
@@ -81,13 +104,15 @@ if parts and isinstance(parts[0], dict):
     except Exception:
         resp = {}
 
-if not isinstance(resp, dict) or not resp.get("success", True):
-    sys.exit(0)
+if not isinstance(resp, dict):
+    _skip("response_not_dict")
+if not resp.get("success", True):
+    _skip("response_success_false")
 
 # Only record if we actually got a UUID — otherwise nothing useful to cache.
 uuid_val = resp.get("uuid") or (resp.get("bound_identity") or {}).get("uuid")
 if not uuid_val:
-    sys.exit(0)
+    _skip("no_uuid_in_response")
 
 # Identity ontology (unitares/docs/ontology/identity.md, §S11): the
 # workspace cache is a lineage anchor, not a resume credential. We stamp
@@ -117,6 +142,13 @@ PY
 )
 
 if [[ -z "${EXTRACTED}" ]]; then
+  _breadcrumb python_unknown_skip
+  exit 0
+fi
+
+# Python heredoc emits __SKIP__:<reason> when it bailed for a known cause.
+if [[ "${EXTRACTED}" == __SKIP__:* ]]; then
+  _breadcrumb "${EXTRACTED#__SKIP__:}"
   exit 0
 fi
 
@@ -124,6 +156,7 @@ SLOT=$(printf '%s' "${EXTRACTED}" | head -n 1)
 PAYLOAD=$(printf '%s' "${EXTRACTED}" | tail -n +2)
 
 if [[ -z "${PAYLOAD}" || "${PAYLOAD}" == "{}" ]]; then
+  _breadcrumb empty_payload
   exit 0
 fi
 
