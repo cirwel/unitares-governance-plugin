@@ -127,6 +127,94 @@ def test_home_fallback_removed_closes_cross_agent_siphoning(tmp_path, monkeypatc
     )
 
 
+def test_slotted_home_fallback_when_workspace_misses(tmp_path, monkeypatch):
+    """PWD-mismatch fix (2026-05-10): when post-identity wrote the slot file
+    in PWD=X but post-edit fires from PWD=Y, the lookup should fall back to
+    $HOME/.unitares/session-<slot>.json (which X==$HOME wrote) and find it.
+
+    Reproduces the ~/.unitares/hook-skips.log evidence: 51 misses from
+    /Users/cirwel/projects/trajectory-identity-paper despite the active
+    session having a slot file in $HOME (session was started from $HOME).
+    """
+    fake_home = tmp_path / "home"
+    home_unitares = fake_home / ".unitares"
+    home_unitares.mkdir(parents=True)
+    slot = "claude-session-12345"
+    home_slot_file = home_unitares / _slot_filename(slot)
+    home_slot_file.write_text(json.dumps({
+        "uuid": "u-from-home",
+        "client_session_id": "agent-from-home",
+        "slot": slot,
+    }))
+    monkeypatch.setenv("HOME", str(fake_home))
+
+    # PWD-at-edit is a project workspace with no .unitares/ dir at all.
+    edit_pwd = tmp_path / "projects" / "trajectory-identity-paper"
+    edit_pwd.mkdir(parents=True)
+
+    result = resolve_session_file(edit_pwd, slot)
+    assert result == home_slot_file, (
+        f"slotted HOME fallback should resolve when workspace cache is empty; "
+        f"got {result}"
+    )
+
+    # Hook helper roundtrip: load_session_for_hook must surface the cached payload
+    hook_payload = load_session_for_hook(
+        edit_pwd, json.dumps({"session_id": slot}),
+    )
+    assert hook_payload["uuid"] == "u-from-home"
+    assert hook_payload["client_session_id"] == "agent-from-home"
+
+
+def test_unslotted_home_still_blocked_after_slotted_fallback(tmp_path, monkeypatch):
+    """Regression: the slotted HOME fallback (added 2026-05-10) must NOT
+    re-introduce the unslotted-HOME siphoning hole that was closed
+    2026-04-18. A reader with a slot key, given a workspace with no slot
+    file, must still NOT fall through to $HOME/.unitares/session.json
+    (the legacy shared file)."""
+    fake_home = tmp_path / "home"
+    home_unitares = fake_home / ".unitares"
+    home_unitares.mkdir(parents=True)
+    # Plant ONLY an unslotted file in HOME — the kind that previously
+    # siphoned identity across agents
+    (home_unitares / "session.json").write_text(json.dumps({
+        "uuid": "stolen-uuid",
+        "client_session_id": "agent-stolen",
+    }))
+    monkeypatch.setenv("HOME", str(fake_home))
+
+    edit_pwd = tmp_path / "some_workspace"
+    edit_pwd.mkdir()
+
+    # Slotted lookup must NOT find the unslotted file
+    result = resolve_session_file(edit_pwd, "victim-slot")
+    assert result is None, (
+        f"slotted lookup must not fall through to unslotted HOME file; "
+        f"got {result}"
+    )
+
+
+def test_workspace_slotted_preferred_over_home(tmp_path, monkeypatch):
+    """When both workspace AND home have a slot file for the same slot,
+    workspace wins. Avoids stale-HOME-file shadowing legitimate per-workspace
+    state if both happen to exist."""
+    fake_home = tmp_path / "home"
+    home_unitares = fake_home / ".unitares"
+    home_unitares.mkdir(parents=True)
+    slot = "shared-slot"
+    (home_unitares / _slot_filename(slot)).write_text(json.dumps({"uuid": "from-home"}))
+    monkeypatch.setenv("HOME", str(fake_home))
+
+    edit_pwd = tmp_path / "ws"
+    (edit_pwd / ".unitares").mkdir(parents=True)
+    ws_path = edit_pwd / ".unitares" / _slot_filename(slot)
+    ws_path.write_text(json.dumps({"uuid": "from-workspace"}))
+
+    result = resolve_session_file(edit_pwd, slot)
+    assert result == ws_path
+    assert json.loads(result.read_text())["uuid"] == "from-workspace"
+
+
 def test_workspace_local_unslotted_still_reachable(tmp_path):
     """Sanity: the per-workspace unslotted fallback is preserved — it's
     scoped to the workspace dir so cross-workspace collision is impossible."""

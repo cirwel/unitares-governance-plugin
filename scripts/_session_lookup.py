@@ -48,30 +48,51 @@ def _slot_filename(slot: Optional[str]) -> str:
 def resolve_session_file(workspace: str | Path, slot: Optional[str]) -> Optional[Path]:
     """Return the matching session file path.
 
-    With a slot, only the slot-scoped cache is eligible. Without a slot,
-    a workspace-local legacy path is eligible. Returns None if no matching
-    file exists.
+    With a slot, the slot-scoped cache is the only eligible target. The
+    workspace `.unitares/` directory is checked first; if missing, fall back
+    to ``$HOME/.unitares/session-<slot>.json`` (PWD-mismatch fallback, see
+    below). Without a slot, a workspace-local legacy path is eligible.
+    Returns None if no matching file exists.
 
-    Identity-honesty note (2026-04-18): the prior ``$HOME/.unitares/session.json``
-    last-resort fallback has been removed. It was an axiom-violating shared
-    cache — any Claude Code / Codex / CLI session on the same machine whose
-    own slotted or workspace-unslotted cache was empty would silently adopt
-    whatever identity the most recent session had written there, siphoning
-    one UUID across parallel agents (invariant #3: per-instance isolation).
-    Callers that previously depended on the HOME fallback must now pass
-    ``workspace=Path.home()`` explicitly to opt into the shared file; silent
-    collapse is no longer possible.
+    Identity-honesty note (2026-04-18): the prior unslotted
+    ``$HOME/.unitares/session.json`` last-resort fallback was removed because
+    it was an axiom-violating *shared* cache — any same-UID Claude Code /
+    Codex / CLI session whose own slotted or workspace-unslotted cache was
+    empty would silently adopt whatever identity the most recent writer left
+    there, siphoning one UUID across parallel agents (invariant #3:
+    per-instance isolation).
+
+    PWD-mismatch fallback (2026-05-10): a *slotted* HOME read is structurally
+    distinct from the deleted unslotted fallback. The slot key is the Claude
+    Code ``session_id`` — globally unique per Claude session. Parallel agents
+    have different session_ids, so they read different filenames at HOME and
+    cannot collapse onto each other's cache. This fallback addresses the
+    specific failure mode where ``post-identity`` runs with PWD=X (writing
+    ``X/.unitares/session-<slot>.json``) and later ``post-edit`` runs with
+    PWD=Y (looking in ``Y/.unitares/...``, miss) — empirically the dominant
+    cause of dark sessions per ~/.unitares/hook-skips.log evidence. The HOME
+    file becomes findable regardless of PWD because the slot anchors it.
+
+    Callers that previously depended on the *unslotted* HOME fallback still
+    must pass ``workspace=Path.home()`` explicitly; silent collapse onto the
+    shared ``session.json`` is still impossible.
     """
     unitares_dir = Path(workspace) / ".unitares"
     slotted = unitares_dir / _slot_filename(slot)
     if slotted.exists():
         return slotted
     if slot:
+        # Slotted HOME fallback. Only fires when a slot key is present — the
+        # slot is per-Claude-session unique, so cross-agent siphoning is
+        # structurally precluded (cf. unslotted-HOME removal above).
+        home_slotted = Path.home() / ".unitares" / _slot_filename(slot)
+        if home_slotted.exists():
+            return home_slotted
         return None
     # Workspace-local unslotted lookup is still OK when the caller has no
     # slot — different workspaces have different .unitares/ dirs, so
     # parallel sessions in separate projects cannot collide on it. Only the
-    # removed $HOME fallback was a true cross-agent shared location.
+    # removed $HOME unslotted fallback was a true cross-agent shared location.
     unslotted = unitares_dir / "session.json"
     if unslotted.exists():
         return unslotted
