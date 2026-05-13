@@ -5,7 +5,7 @@
 [![Codex Plugin](https://img.shields.io/badge/Codex-plugin-10a37f.svg)](./CODEX_START.md)
 [![Version](https://img.shields.io/badge/version-0.4.2-blue.svg)](.claude-plugin/plugin.json)
 
-Governance client for UNITARES. This repo provides agent-facing skills, commands, and client adapters for connecting coding agents to a running UNITARES governance server.
+Client and integration layer for **UNITARES** — the runtime telemetry and coordination layer for heterogeneous AI-agent fleets. This repo provides agent-facing skills, commands, and adapters for connecting coding agents (Claude Code, Codex/ChatGPT, others) to a running UNITARES governance server. The runtime itself lives in [`cirwel/unitares`](https://github.com/cirwel/unitares).
 
 ## Purpose
 
