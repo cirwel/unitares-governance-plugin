@@ -51,7 +51,9 @@ def resolve_session_file(workspace: str | Path, slot: Optional[str]) -> Optional
     With a slot, the slot-scoped cache is the only eligible target. The
     workspace `.unitares/` directory is checked first; if missing, fall back
     to ``$HOME/.unitares/session-<slot>.json`` (PWD-mismatch fallback, see
-    below). Without a slot, a workspace-local legacy path is eligible.
+    below). Without a slot, returns None — workspace-flat legacy files are
+    lineage candidates for ``session_cache.py list``, not hook read targets
+    (S20 §3d).
     Returns None if no matching file exists.
 
     Identity-honesty note (2026-04-18): the prior unslotted
@@ -77,25 +79,18 @@ def resolve_session_file(workspace: str | Path, slot: Optional[str]) -> Optional
     must pass ``workspace=Path.home()`` explicitly; silent collapse onto the
     shared ``session.json`` is still impossible.
     """
+    if not slot:
+        return None
     unitares_dir = Path(workspace) / ".unitares"
     slotted = unitares_dir / _slot_filename(slot)
     if slotted.exists():
         return slotted
-    if slot:
-        # Slotted HOME fallback. Only fires when a slot key is present — the
-        # slot is per-Claude-session unique, so cross-agent siphoning is
-        # structurally precluded (cf. unslotted-HOME removal above).
-        home_slotted = Path.home() / ".unitares" / _slot_filename(slot)
-        if home_slotted.exists():
-            return home_slotted
-        return None
-    # Workspace-local unslotted lookup is still OK when the caller has no
-    # slot — different workspaces have different .unitares/ dirs, so
-    # parallel sessions in separate projects cannot collide on it. Only the
-    # removed $HOME unslotted fallback was a true cross-agent shared location.
-    unslotted = unitares_dir / "session.json"
-    if unslotted.exists():
-        return unslotted
+    # Slotted HOME fallback. Only fires when a slot key is present — the
+    # slot is per-Claude-session unique, so cross-agent siphoning is
+    # structurally precluded (cf. unslotted-HOME removal above).
+    home_slotted = Path.home() / ".unitares" / _slot_filename(slot)
+    if home_slotted.exists():
+        return home_slotted
     return None
 
 
