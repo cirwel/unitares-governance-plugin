@@ -61,6 +61,13 @@ Your state sits in a basin — a region of EISV space:
 
 Use `get_governance_metrics()` for the current basin/mode labels — do not assume they are constant across runtime versions.
 
+## Calibration
+
+The system tracks whether your stated confidence matches outcomes. Over time this builds a calibration curve.
+
+- Ground truth comes from objective signals: test pass/fail, command exit codes, lint results, file operations. These feed calibration automatically via `auto_ground_truth.py` and the `outcome_event` hook. Human validation is not required for deterministic outcomes.
+- Overconfidence is tracked and penalizes Information Integrity through entropy coupling.
+
 ## Diagnostics — When the Numbers Look Wrong
 
 Do not guess first. Use:
