@@ -76,12 +76,14 @@ def test_load_session_for_hook_full_roundtrip(tmp_path):
     assert result["slot"] == slot
 
 
-def test_load_session_for_hook_empty_stdin_falls_back(tmp_path):
+def test_load_session_for_hook_empty_stdin_returns_empty(tmp_path):
     (tmp_path / ".unitares").mkdir()
+    # Workspace-flat file exists but workspace-flat fallback was retired (S20 §3d).
+    # Empty stdin means no slot → no match → empty dict.
     unslotted = tmp_path / ".unitares" / "session.json"
     unslotted.write_text('{"uuid":"u","client_session_id":"c","continuity_token":"t","slot":"s"}')
     result = load_session_for_hook(tmp_path, "")
-    assert result["uuid"] == "u"
+    assert result == {}
 
 
 def test_home_fallback_removed_closes_cross_agent_siphoning(tmp_path, monkeypatch):
@@ -215,28 +217,26 @@ def test_workspace_slotted_preferred_over_home(tmp_path, monkeypatch):
     assert json.loads(result.read_text())["uuid"] == "from-workspace"
 
 
-def test_workspace_local_unslotted_still_reachable(tmp_path):
-    """Sanity: the per-workspace unslotted fallback is preserved — it's
-    scoped to the workspace dir so cross-workspace collision is impossible."""
+def test_workspace_local_unslotted_not_surfaced_after_s20_3d(tmp_path):
+    """S20 §3d: workspace-flat fallback retired. A legacy session.json in the
+    workspace .unitares/ dir must NOT be returned when slot is absent — it is
+    a lineage candidate for cmd_list, not a hook read target."""
     ws = tmp_path / "ws"
     (ws / ".unitares").mkdir(parents=True)
     (ws / ".unitares" / "session.json").write_text('{"uuid":"ws-local"}')
     result = resolve_session_file(ws, None)
-    assert result == ws / ".unitares" / "session.json"
-    assert json.loads(result.read_text())["uuid"] == "ws-local"
+    assert result is None
 
 
-def test_cli_emits_empty_slot_when_field_absent(tmp_path):
-    """S20.1a: the CLI's SLOT line must emit empty string when the cache
-    has no `slot` field — pre-S20.1a it emitted the literal `"default"`,
-    which collapsed every slotless caller onto a shared session-default.json
-    target downstream. Empty SLOT lets the caller decide (skip the slotted
-    write, or recover the slot from another source)."""
+def test_cli_emits_empty_fields_when_nothing_matches(tmp_path):
+    """S20.1a / S20 §3d: with no stdin slot and no slotted file, the CLI must
+    emit empty strings for all fields. Pre-S20.1a SLOT emitted the literal
+    `"default"` which collapsed every slotless caller onto session-default.json."""
     import subprocess
     import sys as _sys
 
     (tmp_path / ".unitares").mkdir()
-    # Cache without `slot` field — pre-S11 / legacy v1 shape
+    # Legacy flat file exists but is no longer read (S20 §3d fallback retired).
     (tmp_path / ".unitares" / "session.json").write_text(json.dumps({
         "uuid": "u",
         "client_session_id": "c",
@@ -252,23 +252,21 @@ def test_cli_emits_empty_slot_when_field_absent(tmp_path):
         check=True,
     )
     assert 'SLOT=""' in result.stdout, (
-        f"expected empty SLOT for no-slot-field cache; got:\n{result.stdout}"
+        f"expected empty SLOT when no slotted file matches; got:\n{result.stdout}"
     )
-    # Sanity: the other fields still propagate.
-    assert 'UUID="u"' in result.stdout
-    assert 'CSID="c"' in result.stdout
+    assert 'UUID=""' in result.stdout
+    assert 'CSID=""' in result.stdout
 
 
-def test_home_path_still_reachable_when_workspace_is_home(tmp_path, monkeypatch):
-    """CLI / ad-hoc tools that genuinely want the HOME-level file can still
-    get it by passing workspace=$HOME explicitly. This is the "be explicit
-    about shared identity" escape hatch the axiom allows."""
+def test_home_flat_not_reachable_even_when_workspace_is_home(tmp_path, monkeypatch):
+    """S20 §3d: workspace-flat fallback retired. Passing workspace=$HOME with
+    slot=None must NOT surface $HOME/.unitares/session.json — legacy flat files
+    are lineage candidates for cmd_list only, not hook read targets."""
     fake_home = tmp_path / "home"
     fake_home.mkdir()
     (fake_home / ".unitares").mkdir()
     (fake_home / ".unitares" / "session.json").write_text('{"uuid":"cli-shared"}')
     monkeypatch.setenv("HOME", str(fake_home))
 
-    # Explicit home workspace — identity sharing is opt-in, not fallback
     result = resolve_session_file(fake_home, None)
-    assert result == fake_home / ".unitares" / "session.json"
+    assert result is None
