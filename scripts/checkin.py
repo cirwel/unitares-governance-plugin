@@ -138,8 +138,8 @@ def submit_checkin(
     complexity: float,
     confidence: float,
     client_session_id: str,
-    continuity_token: str,
     slot: str,
+    continuity_token: str = "",
     uuid: str = "",
     server_url: Optional[str] = None,
     plugin_version: Optional[str] = None,
@@ -158,7 +158,6 @@ def submit_checkin(
                 "complexity": max(0.0, min(1.0, float(complexity))),
                 "confidence": max(0.0, min(1.0, float(confidence))),
                 "client_session_id": client_session_id,
-                "continuity_token": continuity_token,
                 "metadata": {
                     "source": "plugin_hook",
                     "event": event,
@@ -186,7 +185,15 @@ def _cli() -> int:
     p.add_argument("--complexity", type=float, required=True)
     p.add_argument("--confidence", type=float, required=True)
     p.add_argument("--client-session-id", required=True)
-    p.add_argument("--continuity-token", default="")
+    p.add_argument(
+        "--continuity-token",
+        default="",
+        help=(
+            "Deprecated compatibility flag; ignored for process_agent_update. "
+            "Use continuity_token only with explicit identity(agent_uuid, "
+            "continuity_token, resume=true) PATH 0 rebinds."
+        ),
+    )
     p.add_argument("--slot", required=True)
     p.add_argument("--uuid", default="")
     p.add_argument("--server-url", default=None)

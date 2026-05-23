@@ -152,13 +152,13 @@ def test_response_text_summarizes_overflow() -> None:
     assert "+5 more" in result["response_text"]
 
 
-def test_prefers_continuity_token_but_falls_back_to_session_id() -> None:
+def test_uses_client_session_id_and_ignores_continuity_token() -> None:
     with_token = decide(
         session={"continuity_token": "ct", "client_session_id": "sid"},
         milestone=_milestone(edit_count=5, files=["/f"]),
         now=FIXED_NOW,
     )
-    assert with_token["continuity_token"] == "ct"
+    assert "continuity_token" not in with_token
     assert with_token["client_session_id"] == "sid"
 
     sid_only = decide(
@@ -166,7 +166,7 @@ def test_prefers_continuity_token_but_falls_back_to_session_id() -> None:
         milestone=_milestone(edit_count=5, files=["/f"]),
         now=FIXED_NOW,
     )
-    assert sid_only["continuity_token"] == ""
+    assert "continuity_token" not in sid_only
     assert sid_only["client_session_id"] == "sid"
 
 

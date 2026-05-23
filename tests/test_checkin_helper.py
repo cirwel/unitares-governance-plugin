@@ -156,7 +156,7 @@ def test_payload_shape(monkeypatch, tmp_path):
     assert args["complexity"] == 0.4
     assert args["confidence"] == 0.7
     assert args["client_session_id"] == "agent-abc1234567"
-    assert args["continuity_token"] == "v1.tok"
+    assert "continuity_token" not in args
     assert args["metadata"]["source"] == "plugin_hook"
     assert args["metadata"]["event"] == "turn_stop"
     assert args["metadata"]["plugin_version"] == checkin._plugin_version()

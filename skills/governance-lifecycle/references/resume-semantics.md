@@ -12,7 +12,9 @@ A fresh process-instance is a fresh agent. To continue prior work across process
 
 ## S13 Fresh-Instance Gate — When the Server Auto-Mints for You
 
-The server auto-promotes `force_new=true` and emits `[FRESH_INSTANCE]` only for **truly arg-less** `onboard()` calls. Any of `continuity_token`, `client_session_id`, `agent_uuid`, `agent_id`, or `name` is treated as a proof signal and bypasses the gate — the call falls through to the resume path. So `onboard(name="Foo", model_type="claude")` (the legacy pattern) does *not* auto-mint and can hit weak session/PATH 2 IP:UA pin behavior. **Pass `force_new=true` explicitly whenever you mean to mint fresh.**
+The server auto-promotes `force_new=true` and emits `[FRESH_INSTANCE]` only for **truly arg-less** `onboard()` calls. Proof-shaped arguments such as `client_session_id`, `agent_uuid`, `agent_id`, or `name` suppress that auto-mint gate. So `onboard(name="Foo", model_type="claude")` (the legacy pattern) does *not* auto-mint and can hit weak session/PATH 2 IP:UA pin behavior. **Pass `force_new=true` explicitly whenever you mean to mint fresh.**
+
+After S1-c (2026-05-23), `onboard(continuity_token=...)` is no longer a resume path. Token-only `onboard`, token-only `identity`, and token-only `bind_session` return `status=continuity_token_resume_rejected`. The token remains valid only as the explicit PATH 0 ownership proof paired with `agent_uuid`.
 
 ## What Each Resume Path Actually Does
 
@@ -22,7 +24,7 @@ These describe paths the **server** runs internally when it sees a proof signal.
 
 - **PATH 0 (`agent_uuid` + `continuity_token`)** — explicit ownership-proven rebind for the **same live process** that already holds the continuity_token. The Identity Honesty Part C gate (2026-04-18) verifies the token's `aid` claim equals the requested `agent_uuid`. Without the matching token, the request is treated as a hijack (see below). **Not for cross-process resurrection** — that is the anti-pattern, not a feature.
 
-- **PATH 2.8 (`continuity_token` alone)** — the path the server runs when only a token is presented; it extracts the embedded UUID and rebinds. Don't aim for this. The token is short-lived (1h, rolling) per-process-instance proof, and using it as a transport-layer auto-injected resume key is the anti-pattern below. PATH 2.8 is what the server *does* when a token shows up; not a path you should design for.
+- **Token-only resume (`continuity_token` alone)** — retired by S1-c. The server now rejects this with `status=continuity_token_resume_rejected` instead of extracting the embedded UUID and rebinding. If you were relying on this, mint fresh with `force_new=true` and declare lineage through `parent_agent_id`, or use PATH 0 only when you also have the target `agent_uuid` and are proving ownership of that live UUID.
 
 ## The Anti-Pattern: Auto-Injecting continuity_token Between Calls
 

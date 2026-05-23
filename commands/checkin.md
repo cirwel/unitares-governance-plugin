@@ -14,8 +14,8 @@ Bare `get session` (no `--slot`) returns the legacy flat `session.json`, which u
 If a matching cache exists:
 
 - use `uuid` as the expected local identity anchor, not proof by itself
-- pass `continuity_token` when available for ownership proof
-- otherwise rely on the active session binding or `client_session_id`
+- rely on the active session binding or `client_session_id` for ordinary check-ins
+- do not pass `continuity_token` to `process_agent_update`; it is reserved for explicit PATH 0 ownership rebinds
 
 If current binding is unclear, call `identity()` first to inspect the active binding.
 
@@ -32,7 +32,7 @@ Inputs:
 - `response_text`: concise summary of what was actually accomplished
 - `complexity`: estimate `0.0-1.0`
 - `confidence`: honest estimate `0.0-1.0`
-- include `continuity_token` when available for ownership proof, otherwise rely on the active session binding or `client_session_id`
+- use the active session binding or `client_session_id`; do not auto-inject `continuity_token`
 - use `response_mode="mirror"` by default for Codex
 
 Guidelines:

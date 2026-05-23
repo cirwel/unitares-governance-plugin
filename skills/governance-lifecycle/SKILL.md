@@ -7,7 +7,7 @@ description: >
 license: Apache-2.0
 compatibility: Requires UNITARES governance MCP server (gov.cirwel.org or local http://127.0.0.1:8767/mcp/)
 metadata:
-  unitares.last_verified: "2026-05-22"
+  unitares.last_verified: "2026-05-23"
   unitares.freshness_days: "14"
 ---
 
