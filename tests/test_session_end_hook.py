@@ -68,3 +68,9 @@ def test_session_end_emits_checkin(tmp_path):
         if c.get("name") == "process_agent_update"
     ]
     assert "session_end" in events
+    payloads = [
+        c["arguments"]
+        for c in RecordingHandler.calls
+        if c.get("name") == "process_agent_update"
+    ]
+    assert all("continuity_token" not in args for args in payloads)

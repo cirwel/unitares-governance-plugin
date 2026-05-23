@@ -62,7 +62,6 @@ python3 "${PLUGIN_ROOT}/scripts/checkin.py" \
   --complexity "${COMPLEXITY}" \
   --confidence 0.7 \
   --client-session-id "${CSID}" \
-  --continuity-token "${TOK}" \
   --uuid "${UUID}" \
   --slot "${SLOT}" \
   >/dev/null 2>&1 || true

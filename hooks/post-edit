@@ -121,7 +121,7 @@ fi
 SESSION_LOOKUP="${PLUGIN_ROOT}/scripts/_session_lookup.py"
 if [[ -f "${SESSION_LOOKUP}" ]]; then
   # Load the full slotted session JSON for auto_checkin_decision, which needs
-  # continuity_token, client_session_id, and last_checkin_ts from the cache.
+  # client_session_id and last_checkin_ts from the cache.
   SESSION_PAYLOAD=$(printf '%s' "${HOOK_INPUT}" | python3 -c "
 import json, sys
 sys.path.insert(0, '${PLUGIN_ROOT}/scripts')
@@ -223,12 +223,11 @@ fi
 # redaction, logging, the kill switch, and metadata tagging on equal footing
 # with session-start/stop/end check-ins.
 # ---------------------------------------------------------------------------
-CONTINUITY_TOKEN=$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('continuity_token',''))" "${DECISION}" 2>/dev/null || echo "")
 CLIENT_SESSION_ID=$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('client_session_id',''))" "${DECISION}" 2>/dev/null || echo "")
 RESPONSE_TEXT=$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('response_text',''))" "${DECISION}" 2>/dev/null || echo "")
 COMPLEXITY=$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('complexity',0.3))" "${DECISION}" 2>/dev/null || echo "0.3")
 
-if [[ -z "${CONTINUITY_TOKEN}" && -z "${CLIENT_SESSION_ID}" ]]; then
+if [[ -z "${CLIENT_SESSION_ID}" ]]; then
   _breadcrumb no_credentials
   exit 0
 fi
@@ -249,7 +248,6 @@ python3 "${PLUGIN_ROOT}/scripts/checkin.py" \
   --complexity "${COMPLEXITY}" \
   --confidence 0.6 \
   --client-session-id "${CLIENT_SESSION_ID}" \
-  --continuity-token "${CONTINUITY_TOKEN}" \
   --uuid "${UUID_HINT}" \
   --slot "${SLOT}" \
   >/dev/null 2>&1 || true

@@ -13,7 +13,7 @@ Inputs (JSON on stdin or via CLI args):
                      edit_count >= 1; prevents firing on an empty session)
 
 Output: a JSON object the hook consumes — most importantly `fire` (bool),
-`response_text`, `complexity`, and the chosen continuity credential.
+`response_text`, `complexity`, and the active `client_session_id`.
 """
 
 from __future__ import annotations
@@ -93,7 +93,6 @@ def decide(
     return {
         "fire": fire,
         "reason": reason,
-        "continuity_token": session.get("continuity_token") or "",
         "client_session_id": session.get("client_session_id") or "",
         "response_text": response_text,
         "complexity": complexity,

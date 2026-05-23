@@ -7,7 +7,7 @@ description: >
 license: Apache-2.0
 compatibility: Requires UNITARES governance MCP server (gov.cirwel.org or local http://127.0.0.1:8767/mcp/)
 metadata:
-  unitares.last_verified: "2026-05-22"
+  unitares.last_verified: "2026-05-23"
   unitares.freshness_days: "14"
 ---
 
@@ -42,13 +42,15 @@ but it is the explicit-rebind case, not the default. The
 `continuity_token` is short-lived (1h, rolling) anti-hijack proof, not
 indefinite cross-process continuity.
 
-S13 precision: the server's fresh-instance gate auto-promotes
+S13/S1-c precision: the server's fresh-instance gate auto-promotes
 `force_new=true` and emits `[FRESH_INSTANCE]` only for **truly arg-less**
-`onboard()` calls. Any proof signal — including `onboard(name=...)` —
-bypasses the gate and can fall through to weak session/IP:UA pin
-behavior. Pass `force_new=true` explicitly whenever you mean to mint
-fresh. Bare `identity(agent_uuid=<uuid>)` without a matching token
-remains the canonical hijack pattern and is strict-mode rejected.
+`onboard()` calls. Proof-shaped arguments — including `onboard(name=...)`
+— suppress that gate and can fall through to weak session/IP:UA pin
+behavior. Token-only `onboard`, `identity`, and `bind_session` are now
+retired and return `status=continuity_token_resume_rejected`. Pass
+`force_new=true` explicitly whenever you mean to mint fresh. Bare
+`identity(agent_uuid=<uuid>)` without a matching token remains the
+canonical hijack pattern and is strict-mode rejected.
 
 Use `process_agent_update()` after meaningful work to record progress,
 complexity, and confidence, then read the returned governance verdict.
