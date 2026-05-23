@@ -214,8 +214,16 @@ fi
 COMPACT_MODE=0
 COMPACT_TTL_SECS="${UNITARES_HOOK_COMPACT_TTL:-3600}"
 if [[ -n "${WORKSPACE_CACHE}" && -f "${WORKSPACE_CACHE}" ]]; then
-  # Portable mtime: BSD `stat -f %m` (macOS) → fallback to GNU `stat -c %Y` (Linux).
-  CACHE_MTIME=$(stat -f %m "${WORKSPACE_CACHE}" 2>/dev/null || stat -c %Y "${WORKSPACE_CACHE}" 2>/dev/null || echo 0)
+  CACHE_MTIME=$(python3 - "${WORKSPACE_CACHE}" <<'PY' 2>/dev/null || echo 0
+import os
+import sys
+
+try:
+    print(int(os.path.getmtime(sys.argv[1])))
+except Exception:
+    print(0)
+PY
+)
   CACHE_AGE_SECS=$(( $(date +%s) - CACHE_MTIME ))
   if (( CACHE_MTIME > 0 && CACHE_AGE_SECS >= 0 && CACHE_AGE_SECS < COMPACT_TTL_SECS )); then
     COMPACT_MODE=1
