@@ -6,7 +6,7 @@ description: >
 license: Apache-2.0
 compatibility: Requires UNITARES governance MCP server (gov.cirwel.org or local http://127.0.0.1:8767/mcp/)
 metadata:
-  unitares.last_verified: "2026-04-17"
+  unitares.last_verified: "2026-05-22"
   unitares.freshness_days: "14"
 ---
 
@@ -33,16 +33,19 @@ The runtime may still expose older search aliases, but prefer the unified `knowl
 
 ## Quick Contribution
 
-For low-friction contributions, use `leave_note()`:
+For low-friction contributions, use the unified note action:
 
 ```
-leave_note(
+knowledge(
+  action: "note",
   summary: "What you discovered or observed",
   tags: ["domain", "type", "context"]
 )
 ```
 
 Notes are automatically shared with all agents. Use this when you find something useful, spot a bug, or have an insight that others should know about.
+
+`leave_note()` is a deprecated compatibility alias for `knowledge(action="note")`. Calls still work on servers that expose it, but new guidance and client adapters should use `knowledge(action=...)`.
 
 ## Full CRUD Operations
 
@@ -56,9 +59,11 @@ For more control, use the `knowledge()` tool with an action parameter:
 | `list` | List graph statistics or summary views |
 | `update` | Modify an existing discovery (status, content, tags) |
 | `details` | Get full details including graph relationships |
-| `note` | Same as `leave_note()` but through the unified interface |
+| `note` | Quick low-ceremony shared note |
 | `cleanup` | Run lifecycle cleanup for stale entries |
 | `stats` | Get knowledge graph statistics |
+| `supersede` | Mark an older discovery as replaced by a newer one |
+| `audit` | Run a knowledge graph lifecycle audit |
 
 ## Discovery Types
 

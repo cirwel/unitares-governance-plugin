@@ -7,7 +7,7 @@ description: >
 license: Apache-2.0
 compatibility: Requires UNITARES governance MCP server (gov.cirwel.org or local http://127.0.0.1:8767/mcp/)
 metadata:
-  unitares.last_verified: "2026-04-17"
+  unitares.last_verified: "2026-05-22"
   unitares.freshness_days: "14"
 ---
 
@@ -15,13 +15,13 @@ metadata:
 
 ## What It Does
 
-The UNITARES Discord bridge is a standalone Python bot (in the `unitares-discord-bridge` repo) that polls both the governance MCP server and the anima MCP server, then forwards events and state to a Discord server. It turns governance into something visible — agent presence, EISV changes, dialectic sessions, knowledge graph updates, and Lumen's physical state all appear as Discord messages and embeds.
+The UNITARES Discord bridge is a standalone Python bot (in the `unitares-discord-bridge` repo) that polls both the governance MCP server and the anima MCP server, subscribes to governance broadcaster WebSocket events, then forwards events and state to a Discord server. It turns governance into something visible — agent presence, EISV changes, dialectic sessions, knowledge graph updates, lease-plane transitions, and Lumen's physical state all appear as Discord messages and embeds.
 
 ## The 8 Layers
 
 The bridge operates in 8 layers, each handling a different aspect:
 
-1. **Events**: Governance events (verdicts, state changes, alerts) forwarded to Discord channels
+1. **Events**: Governance events (verdicts, state changes, alerts) forwarded from REST polling and typed WebSocket subscriptions to Discord channels
 2. **HUD**: Heads-up display with current system state, agent counts, risk levels
 3. **Presence**: Agent online/offline status, activity indicators, EISV summaries
 4. **Lumen**: Physical state from anima-mcp — temperature, humidity, light, neural bands, drawing state
@@ -37,6 +37,8 @@ The bridge can take autonomous governance actions, but only in response to gover
 - **Auto-resume**: When an agent's EISV recovers past threshold, the bridge can trigger resume
 - **Auto-dialectic**: On pause/reject verdicts, the bridge can initiate a dialectic session
 - **Neighbor warnings**: When one agent enters high risk, nearby agents get notified
+- **Class routing**: When enabled, broadcaster events are mirrored to violation-class channels from the live taxonomy
+- **Lease-plane Phase B mirror**: Sentinel Phase B promotion/regression transitions can be mirrored to an operator-managed channel
 
 The bridge never modifies governance state unprompted. Autonomous actions only fire when governance events trigger them (pause, reject, critical drift, high risk score).
 
@@ -62,8 +64,15 @@ Required environment variables:
 |----------|-------------|
 | `DISCORD_BOT_TOKEN` | Discord bot token with appropriate permissions |
 | `DISCORD_GUILD_ID` | Target Discord server ID |
-| `GOVERNANCE_MCP_URL` | Governance MCP endpoint (default: `http://localhost:8767/mcp/`) |
-| `ANIMA_MCP_URL` | Anima MCP endpoint (default: `http://100.79.215.83:8766/mcp/`) |
+| `GOVERNANCE_MCP_URL` | Governance HTTP endpoint (default: `http://localhost:8767`) |
+| `ANIMA_MCP_URL` | Anima HTTP endpoint; no machine-specific default is assumed |
+
+Optional event routing variables:
+
+| Variable | Description |
+|----------|-------------|
+| `BRIDGE_CLASS_ROUTING_ENABLED` | Enables taxonomy-backed per-class governance event channels |
+| `DISCORD_LEASE_PLANE_PHASE_B_CHANNEL_ID` | Existing text channel ID for lease-plane Phase B transition mirrors; unset/0 disables the dedicated mirror |
 
 ## Running
 
@@ -82,6 +91,7 @@ The bot will create missing channels on first startup and begin polling both MCP
 Key design decisions:
 
 - **Polling, not webhooks**: The bridge polls MCP servers on intervals rather than receiving push notifications. This keeps the MCP servers simple and the bridge self-contained.
+- **Typed WebSocket supplement**: The bridge also subscribes to governance broadcaster WebSocket events for lifecycle/knowledge/lease-plane events that REST polling does not expose.
 - **Read-heavy, write-light**: The bridge reads governance state frequently but writes back rarely (only autonomous actions).
 - **SQLite cursor-based delivery**: Tracks what has been sent to Discord to avoid duplicate messages. Uses cursors per channel per event type.
 - **Rate-limited message queue**: Messages are queued and sent with 150ms spacing to respect Discord rate limits.

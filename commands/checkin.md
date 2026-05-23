@@ -49,7 +49,7 @@ After the call:
 - report margin or edge warnings when present
 - report any guidance briefly
 - report the mirror question when present
-- if verdict is `pause` or `reject`, recommend `request_dialectic_review`
+- if verdict is `pause` or `reject`, recommend `dialectic(action="request")`
 - if verdict is `guide`, summarize the guidance and adjust behavior
 
 The plugin's PostToolUse hook on `process_agent_update` automatically resets

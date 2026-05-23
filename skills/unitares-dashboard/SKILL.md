@@ -10,7 +10,7 @@ description: >
 license: Apache-2.0
 compatibility: Requires UNITARES governance MCP server (gov.cirwel.org or local http://127.0.0.1:8767/mcp/)
 metadata:
-  unitares.last_verified: "2026-04-20"
+  unitares.last_verified: "2026-05-22"
   unitares.freshness_days: "30"
 ---
 
@@ -29,8 +29,8 @@ When adding a new panel, every item below must be done:
 | # | Do | File | Why |
 |---|----|----|-----|
 | 1 | Add filename to `allowed_files` list | `src/http_api.py::http_dashboard_static()` | Static handler 404s anything not on the allowlist — the browser silently fails to load |
-| 2 | Add `<script src="/dashboard/NAME.js"></script>` **without** `defer` | `dashboard/index.html` (Layer 2 block) | All peer modules load non-deferred and the IIFE has its own `DOMContentLoaded` guard |
-| 3 | Use `authFetch(url)` from `utils.js` | module JS | Shared helper reads the canonical `unitares_api_token` localStorage key; don't re-invent |
+| 2 | Add `<script src="/dashboard/NAME.js"></script>` **without** `defer` | `dashboard/index.html` in the correct layer block | All peer modules load non-deferred and the IIFE has its own `DOMContentLoaded` guard |
+| 3 | Use shared helpers from `utils.js`, `state.js`, `components.js`, and `colors.js` | module JS | The dashboard already centralizes auth, state, UI pieces, and palette; don't re-invent |
 | 4 | Set `Chart.defaults.color`, `.font.family`, `.borderColor` from body CSS vars | before `new Chart()` | Chart.js defaults to dark-grey ticks on your dark-grey background — invisible axis labels |
 | 5 | Copy option structure from `eisv-charts.js::makeChartOptions` | module JS | Themed tooltip (`rgba(13,13,18,0.9)`), mono body font, white-alpha grid, `interaction.mode: 'index'` at **top level** not under `tooltip` (Chart.js v4 change) |
 | 6 | Use `MetricColors.HEX.chart*` for line colors | `colors.js` | Eight curated series colors; don't hand-pick hex |
@@ -38,6 +38,9 @@ When adding a new panel, every item below must be done:
 | 8 | Chart wrapper needs `position: relative; height: Npx; contain: strict` | `styles.css` | Chart.js's ResizeObserver will thrash parent layout without `contain: strict` |
 | 9 | Canvas: `width: 100% !important; height: 100% !important` | `styles.css` | Required when Chart.js `maintainAspectRatio: false` lives inside a fixed-height parent |
 | 10 | Add nav link `<a href="#SECTION" class="section-nav-item" data-section="SECTION">…</a>` | `dashboard/index.html` top nav | Scroll-spy wires automatically by matching `id` |
+| 11 | Use responsive auto-fit grids for repeated compact blocks | `styles.css` | Prefer `repeat(auto-fit, minmax(min(100%, Npx), 1fr))` so panels survive intermediate widths without breakpoint churn |
+
+The current script chain is: Layer 0 `utils.js`, `state.js`, `colors.js`, `components.js`; Layer 1 `visualizations.js`; Layer 2 domain modules including `agents.js`, `discoveries.js`, `dialectic.js`, `eisv-charts.js`, `timeline.js`, `residents.js`, `fleet-metrics.js`, `watcher.js`, `sentinel.js`, `vigil.js`, and `system-health.js`. Add new modules to the layer matching their dependencies.
 
 ## The Chart.js Dark-Theme Trap (Item 4) — Biggest Pitfall
 

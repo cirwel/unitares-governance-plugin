@@ -7,7 +7,7 @@ description: >
 license: Apache-2.0
 compatibility: Requires UNITARES governance MCP server (gov.cirwel.org or local http://127.0.0.1:8767/mcp/)
 metadata:
-  unitares.last_verified: "2026-04-25"
+  unitares.last_verified: "2026-05-22"
   unitares.freshness_days: "14"
 ---
 
@@ -60,7 +60,9 @@ continuity, especially when calling with `require_strong_identity=true`.
 
 The governance system is coupled to the **knowledge graph**. Agents should
 search existing knowledge before duplicating work, and contribute discoveries,
-questions, and answers as they learn.
+questions, and answers as they learn. Prefer the unified
+`knowledge(action="search" | "note" | "store" | ...)` surface; legacy
+one-tool-per-operation aliases are compatibility paths.
 
 ## Split Skills
 
