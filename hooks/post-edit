@@ -100,6 +100,22 @@ if [[ -z "${SESSION_CACHE_HELPER}" ]]; then
   exit 0
 fi
 
+# Slot derivation (S20.1a): SLOT is strictly the Claude Code session_id
+# from hook stdin. When stdin lacks session_id, the entire auto-checkin
+# pipeline is a full no-op: no checkin.py call, no milestone reset, and no
+# last_checkin_ts stamp. This avoids threshold flapping and prevents stale
+# flat-cache slot fields from becoming write targets.
+SLOT_HELPER="${PLUGIN_ROOT}/scripts/_slot_from_stdin.py"
+SLOT=""
+if [[ -n "${HOOK_INPUT}" && -f "${SLOT_HELPER}" ]]; then
+  SLOT=$(printf '%s' "${HOOK_INPUT}" | python3 "${SLOT_HELPER}" 2>/dev/null || true)
+fi
+if [[ -z "${SLOT}" ]]; then
+  printf '[SLOTLESS_SKIP] post-edit: no session_id on stdin; auto-checkin pipeline not run\n' >&2
+  _breadcrumb slotless_skip
+  exit 0
+fi
+
 # Resolve slot-aware session cache via shared helper. HOOK_INPUT already
 # captured from stdin above — its session_id field is the slot key.
 SESSION_LOOKUP="${PLUGIN_ROOT}/scripts/_session_lookup.py"
@@ -217,33 +233,9 @@ if [[ -z "${CONTINUITY_TOKEN}" && -z "${CLIENT_SESSION_ID}" ]]; then
   exit 0
 fi
 
-# Slot derivation (S20.1a, 2026-04-26): SLOT is strictly the Claude Code
-# session_id from hook stdin. The eval at line 103 may have populated a
-# SLOT shell var from the cache's stored `slot` field; that value is
-# discarded here because a stale legacy flat cache can carry a slot string
-# from an unrelated prior session, and silently routing a write under that
-# stale slot would re-teach the cross-session collision pattern S20 closes.
-# The previous `${SLOT:-default}` literal-string fallback is removed for
-# the same reason — it collapsed every slotless hook invocation onto a
-# shared session-default.json target.
-#
-# Slotless invariant: when stdin lacks session_id, the entire auto-checkin
-# pipeline (checkin.py call, milestone reset, last_checkin_ts stamp) is
-# skipped. Firing checkin.py without being able to atomically stamp
-# last_checkin_ts would cause threshold flapping — every subsequent edit
-# past UNITARES_AUTO_CHECKIN_SECS would re-fire because the cache stamp
-# never advances. Full no-op + stderr breadcrumb is the legible degraded
-# state.
-SLOT_HELPER="${PLUGIN_ROOT}/scripts/_slot_from_stdin.py"
-SLOT=""
-if [[ -n "${HOOK_INPUT}" && -f "${SLOT_HELPER}" ]]; then
-  SLOT=$(printf '%s' "${HOOK_INPUT}" | python3 "${SLOT_HELPER}" 2>/dev/null || true)
-fi
-if [[ -z "${SLOT}" ]]; then
-  printf '[SLOTLESS_SKIP] post-edit: no session_id on stdin; auto-checkin pipeline not run\n' >&2
-  _breadcrumb slotless_skip
-  exit 0
-fi
+# SLOT was derived before session lookup, so the slotless path emits a
+# visible [SLOTLESS_SKIP] breadcrumb instead of disappearing as a generic
+# no_session_payload exit.
 UUID_HINT="${UUID:-}"
 
 # NOTE: The previous inline curl supported UNITARES_HTTP_API_TOKEN as a Bearer
