@@ -7,7 +7,7 @@ description: >
 license: Apache-2.0
 compatibility: Requires UNITARES governance MCP server (gov.cirwel.org or local http://127.0.0.1:8767/mcp/)
 metadata:
-  unitares.last_verified: "2026-04-17"
+  unitares.last_verified: "2026-05-22"
   unitares.freshness_days: "14"
 ---
 
@@ -18,18 +18,22 @@ metadata:
 A dialectic session is triggered when:
 
 - You receive a **pause** or **reject** verdict and want to contest it
-- You manually call `request_dialectic_review()` for peer verification
+- You call `dialectic(action="request")` for peer verification
 - You find something that contradicts the knowledge graph
 - A high-stakes decision needs structured verification before proceeding
 
 Dialectics are not punishment. They are a structured way to resolve disagreements using evidence and negotiation. In current UNITARES language, think of them as structured review more than "recovery court."
+
+The runtime may still expose legacy aliases (`request_dialectic_review()`, `submit_thesis()`, `submit_antithesis()`, `submit_synthesis()`), but prefer the unified `dialectic(action=...)` surface when available.
 
 ## Phase 1: Thesis
 
 The paused or requesting agent submits their position:
 
 ```
-submit_thesis(
+dialectic(
+  action: "thesis",
+  session_id: "<session-id>",
   reasoning: "Why I should resume / why my position is correct",
   root_cause: "What went wrong or what triggered this",
   proposed_conditions: ["Concrete, measurable condition 1", "Condition 2"]
@@ -47,7 +51,9 @@ submit_thesis(
 A reviewing agent examines the thesis and raises concerns:
 
 ```
-submit_antithesis(
+dialectic(
+  action: "antithesis",
+  session_id: "<session-id>",
   reasoning: "Counter-arguments to the thesis",
   concerns: ["Specific risk 1", "Specific risk 2"],
   observed_metrics: { E: 0.45, I: 0.38, S: 1.2, V: 0.8 }
@@ -67,7 +73,9 @@ If identity or session continuity looks suspect, verify with `identity()` before
 Both sides negotiate toward resolution:
 
 ```
-submit_synthesis(
+dialectic(
+  action: "synthesis",
+  session_id: "<session-id>",
   reasoning: "How we reconcile the thesis and antithesis",
   agrees: true/false,
   proposed_conditions: ["Negotiated condition 1", "Condition 2"]
@@ -76,13 +84,15 @@ submit_synthesis(
 
 Convergence happens when both sides agree on conditions. The synthesis should reflect genuine agreement, not capitulation.
 
+When `agrees: true`, include populated `proposed_conditions` unless a prior synthesis already supplied them. Current servers also accept `conditions` as an alias, but `proposed_conditions` is the canonical field for thesis/synthesis messages.
+
 ## Resolution Outcomes
 
 | Outcome | Meaning |
 |---------|---------|
 | **resume** | Agent continues with agreed conditions |
 | **block** | Agent stays paused — conditions not met or agreement not reached |
-| **escalate** | Needs human/operator intervention |
+| **failed** | Session ended without safe convergence or resolution execution failed |
 
 ## How to Participate Well
 

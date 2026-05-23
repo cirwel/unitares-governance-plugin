@@ -7,7 +7,7 @@ description: >
 license: Apache-2.0
 compatibility: Requires UNITARES governance MCP server (gov.cirwel.org or local http://127.0.0.1:8767/mcp/)
 metadata:
-  unitares.last_verified: "2026-04-26"
+  unitares.last_verified: "2026-05-22"
   unitares.freshness_days: "14"
 ---
 
@@ -71,8 +71,8 @@ Use in every session:
 - `identity()` — confirm who the runtime thinks you are within this process; rare same-live-process PATH 0 rebind via `(agent_uuid=..., continuity_token=..., resume=true)` (see `references/resume-semantics.md`)
 - `bind_session()` — explicit session rebind for a known `agent_uuid + client_session_id`; use only when bridging transports (e.g., REST hook → MCP session)
 - `health_check()` — operator-facing server health when behavior seems odd
-- `search_knowledge_graph()` — find existing knowledge before creating new entries
-- `leave_note()` — quick contribution to the knowledge graph
+- `knowledge(action="search")` — find existing knowledge before creating new entries
+- `knowledge(action="note")` — quick contribution to the knowledge graph; `leave_note()` is legacy compatibility only
 
 ## Going Deeper
 
