@@ -21,6 +21,14 @@ if [[ ! -f "${SESSION_LOOKUP}" ]]; then
 fi
 eval "$(printf '%s' "${PAYLOAD}" | python3 "${SESSION_LOOKUP}" --workspace "${PWD}")"
 
+# Release any file leases held by this Claude session. Run this before the
+# check-in credential guard so a session that edited before onboarding still
+# cleans up its lease-plane state.
+FILE_LEASE_HELPER="${PLUGIN_ROOT}/scripts/file_lease_hook.py"
+if [[ -f "${FILE_LEASE_HELPER}" ]]; then
+  printf '%s' "${PAYLOAD}" | python3 "${FILE_LEASE_HELPER}" release-session --workspace "${PWD}" >/dev/null 2>&1 || true
+fi
+
 [[ -z "${CSID:-}" ]] && exit 0
 
 # Tally check-ins posted this session from the log (best effort).

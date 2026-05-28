@@ -113,12 +113,18 @@ Environment variables:
 |----------|---------|-------------|
 | `UNITARES_SERVER_URL` | `http://localhost:8767` | Governance server base URL |
 | `UNITARES_AGENT_PREFIX` | `claude` | Prefix for generated client-side names in Claude hooks |
+| `UNITARES_FILE_LEASES_ENABLED` | `1` | Enable Claude Edit/Write/MultiEdit file-lease guard |
+| `UNITARES_FILE_LEASES_REQUIRED` | `0` | Block edits when lease infrastructure is missing/unreachable |
+| `LEASE_PLANE_BASE_URL` | `http://127.0.0.1:8788` | BEAM lease-plane HTTP base URL |
+| `LEASE_PLANE_BEARER_TOKEN` | unset | Bearer used for lease-plane acquire/heartbeat/release |
 
 ## Adapter Notes
 
 ### Claude
 
-The current Claude adapter includes session-start and post-edit hooks. Those hooks should be treated as an adapter convenience, not the canonical governance policy. In particular, frequent file writes should not automatically be interpreted as meaningful governance events.
+The current Claude adapter includes session-start, pre-edit, post-edit, and session-end hooks. Those hooks should be treated as an adapter convenience, not the canonical governance policy. In particular, frequent file writes should not automatically be interpreted as meaningful governance events.
+
+The pre-edit hook acquires a BEAM file lease before Edit/Write/MultiEdit. Missing lease-plane configuration fails open by default, while real `held_by_other` contention blocks the edit with a visible explanation. Post-edit heartbeats held leases, and session-end releases them.
 
 ### Codex
 
