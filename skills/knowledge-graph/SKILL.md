@@ -6,7 +6,7 @@ description: >
 license: Apache-2.0
 compatibility: Requires UNITARES governance MCP server (gov.cirwel.org or local http://127.0.0.1:8767/mcp/)
 metadata:
-  unitares.last_verified: "2026-05-22"
+  unitares.last_verified: "2026-05-26"
   unitares.freshness_days: "14"
 ---
 
@@ -76,6 +76,10 @@ When storing a discovery, classify it:
 | `bug_found` | A bug or defect you identified |
 | `improvement` | A suggestion for how something could be better |
 | `pattern` | A recurring pattern you noticed across multiple instances |
+| `question` | An open question that needs an answer or follow-up |
+| `architectural_decision`, `learning`, `rule` | Durable knowledge that should rarely be auto-archived |
+| `experiment`, `exploration`, `observation` | Investigation notes where the conclusion may evolve |
+| `bug_fix`, `refactoring`, `documentation` | Implementation or maintenance work already performed |
 
 Check the live tool schema if you are unsure which enum values the current runtime accepts. Do not invent discovery types casually.
 
@@ -84,13 +88,29 @@ Check the live tool schema if you are unsure which enum values the current runti
 Every discovery has a status:
 
 ```
-open  -->  resolved    (problem solved, finding addressed)
-  \-->  archived     (no longer relevant, superseded)
+open  -->  resolved  -->  archived  -->  cold
+  \-->  superseded
+  \-->  closed / wont_fix / disputed
 ```
 
 - **open**: Active, still relevant, may need attention
 - **resolved**: The issue or finding has been addressed
 - **archived**: No longer relevant (outdated, superseded, or duplicate)
+- **superseded**: Replaced by a newer discovery; prefer the newer entry
+- **closed** / **wont_fix** / **disputed**: Explicit operator or agent disposition
+- **cold**: Long-term storage managed by lifecycle cleanup; list/stats surfaces use `including_cold=true` when cold rows should be included
+
+Use `knowledge(action="supersede")` or store with a `supersedes` target when replacing older non-permanent entries. Permanent entries require explicit operator action to change.
+
+## Backend Drift and Rehydration
+
+The AGE graph is backed by durable PostgreSQL knowledge tables. On startup, the AGE backend compares graph rows with PostgreSQL rows:
+
+- If AGE is empty and PostgreSQL has rows, it fully rehydrates AGE from PostgreSQL.
+- If AGE has fewer rows than PostgreSQL, it rehydrates only the missing rows and related edges.
+- If AGE has more rows than PostgreSQL, it warns for operator review instead of guessing.
+
+Writes also tolerate graph/table drift by dropping `related_to` edges whose destination discovery is missing, instead of failing the whole write. For agents, the operational rule is simple: if a search result looks incomplete, retry or inspect with `knowledge(action="details")`, `knowledge(action="list")`, or `knowledge(action="audit")`; do not create a duplicate merely because one backend was briefly out of sync.
 
 ## Tagging Best Practices
 
