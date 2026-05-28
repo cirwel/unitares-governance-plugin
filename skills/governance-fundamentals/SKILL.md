@@ -7,7 +7,7 @@ description: >
 license: Apache-2.0
 compatibility: Requires UNITARES governance MCP server (gov.cirwel.org or local http://127.0.0.1:8767/mcp/)
 metadata:
-  unitares.last_verified: "2026-05-22"
+  unitares.last_verified: "2026-05-26"
   unitares.freshness_days: "14"
 ---
 
@@ -27,6 +27,15 @@ Four dimensions, updated through check-ins:
 | **V** (Void) | [-1, 1] | Accumulated E-I imbalance |
 
 The dimensions couple — E pulls toward I, S responds to complexity, V accumulates imbalance, **coherence** falls out of all four. Coherence is *structural health* (how well E/I/S/V hold together as a vector), **not a quality score for your work** — this is what makes the "do not game coherence" rule below meaningful. Full range is [0, 1]; the typical governed range is ~0.45–0.55, but coherence can travel anywhere in [0, 1] under stress — use `get_governance_metrics()` for current values. For the coupling math, see `references/eisv-deep.md`.
+
+### Point-of-use glossary fields
+
+Current runtimes annotate raw governance values in the response payload. Prefer these runtime fields over memorized constants when explaining a result:
+
+- **`primary_eisv_source_meta`** — explains whether the primary EISV came from `behavioral` data or `ode_fallback`, including the behavioral-confidence threshold.
+- **`state_glossary`** — explains interpreted `mode`, `basin`, and `trajectory`; basin entries include current threshold semantics.
+- **`input_glossary.ethical_drift`** — names the positional `ethical_drift` vector components: `primary_drift`, `coherence_loss`, `complexity_contribution`.
+- **`trajectory_identity.trust_tier`** and **`trajectory_identity.signature_glossary`** — annotate trust tier and known terms inside trajectory signatures.
 
 ### Two V channels (and what each one drives)
 
@@ -62,6 +71,7 @@ Your state sits in a basin — a region of EISV space:
 - **Boundary**: Transitioning. Verdicts may carry `margin: tight`.
 
 Use `get_governance_metrics()` for the current basin/mode labels — do not assume they are constant across runtime versions.
+When present, `state_glossary.basin.thresholds` is the response-local explanation of the basin thresholds used by that runtime.
 
 ## Calibration
 

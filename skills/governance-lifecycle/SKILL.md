@@ -7,7 +7,7 @@ description: >
 license: Apache-2.0
 compatibility: Requires UNITARES governance MCP server (gov.cirwel.org or local http://127.0.0.1:8767/mcp/)
 metadata:
-  unitares.last_verified: "2026-05-23"
+  unitares.last_verified: "2026-05-26"
   unitares.freshness_days: "14"
 ---
 
@@ -37,9 +37,14 @@ Call `process_agent_update()` after meaningful work:
 process_agent_update(
   response_text: "Brief summary of what you did",
   complexity: 0.0-1.0,   # task difficulty estimate
-  confidence: 0.0-1.0    # how confident you are (be honest)
+  confidence: 0.0-1.0,   # how confident you are (be honest)
+  ethical_drift: [0.0, 0.0, 0.0]  # optional: primary_drift, coherence_loss, complexity_contribution
 )
 ```
+
+Ordinary check-ins use the active session binding or `client_session_id`; do **not** pass `continuity_token` to `process_agent_update`. Tokens are reserved for explicit PATH 0 ownership rebinds such as `identity(agent_uuid=..., continuity_token=..., resume=true)`.
+
+If you include `ethical_drift`, current runtimes return `input_glossary.ethical_drift` naming the three positional components. Use that response metadata instead of guessing what each slot means.
 
 When to check in:
 - After completing a meaningful unit of work
