@@ -116,6 +116,14 @@ if [[ -z "${SLOT}" ]]; then
   exit 0
 fi
 
+# Keep any session-held file leases fresh. This is independent of the
+# auto-checkin path below: a session can edit before onboarding, and the
+# lease should still heartbeat while the agent continues working.
+FILE_LEASE_HELPER="${PLUGIN_ROOT}/scripts/file_lease_hook.py"
+if [[ -f "${FILE_LEASE_HELPER}" ]]; then
+  printf '%s' "${HOOK_INPUT}" | python3 "${FILE_LEASE_HELPER}" heartbeat-session --workspace "${PWD}" >/dev/null 2>&1 || true
+fi
+
 # Resolve slot-aware session cache via shared helper. HOOK_INPUT already
 # captured from stdin above — its session_id field is the slot key.
 SESSION_LOOKUP="${PLUGIN_ROOT}/scripts/_session_lookup.py"

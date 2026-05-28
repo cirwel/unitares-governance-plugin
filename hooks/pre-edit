@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# UNITARES Governance Plugin — PreToolUse hook (Edit/Write/MultiEdit)
+#
+# Acquires a BEAM file lease before Claude mutates a file. Missing lease-plane
+# configuration fails open by default so the plugin remains usable offline;
+# real contention (`held_by_other`) exits 2 and blocks the tool.
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PLUGIN_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+DEFAULTS_FILE=""
+for candidate in \
+  "${PLUGIN_ROOT}/config/defaults.env" \
+  "${PLUGIN_ROOT}/config/client/defaults.env"
+do
+  if [[ -f "${candidate}" ]]; then
+    DEFAULTS_FILE="${candidate}"
+    break
+  fi
+done
+
+SERVER_URL_OVERRIDE="${UNITARES_SERVER_URL-}"
+if [[ -n "${DEFAULTS_FILE}" ]]; then
+  # shellcheck source=/dev/null
+  source "${DEFAULTS_FILE}" 2>/dev/null || true
+fi
+if [[ -n "${SERVER_URL_OVERRIDE}" ]]; then
+  UNITARES_SERVER_URL="${SERVER_URL_OVERRIDE}"
+fi
+
+HOOK_INPUT=""
+if [[ ! -t 0 ]]; then
+  HOOK_INPUT=$(cat 2>/dev/null) || true
+fi
+
+HELPER="${PLUGIN_ROOT}/scripts/file_lease_hook.py"
+if [[ ! -f "${HELPER}" ]]; then
+  exit 0
+fi
+
+printf '%s' "${HOOK_INPUT}" | python3 "${HELPER}" pre-edit --workspace "${PWD}"
