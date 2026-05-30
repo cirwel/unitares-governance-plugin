@@ -101,6 +101,101 @@ def _run_raw(args: list[str], workspace: Path) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, capture_output=True, text=True)
 
 
+def _run_with_home(
+    args: list[str], workspace: Path, fake_home: Path
+) -> subprocess.CompletedProcess:
+    """Run session_cache.py with HOME redirected to a sandbox so the slotted-
+    HOME mirror write goes into the test tmp dir rather than the real ~/.unitares/."""
+    cmd = [sys.executable, str(SCRIPT), *args, "--workspace", str(workspace)]
+    env = {"HOME": str(fake_home), "PATH": "/usr/bin:/bin"}
+    return subprocess.run(cmd, capture_output=True, text=True, env=env)
+
+
+def test_set_session_mirrors_to_home(tmp_path: Path) -> None:
+    """Session-kind writes mirror to $HOME/.unitares/session-<slot>.json so
+    the slotted-HOME read fallback in _session_lookup.resolve_session_file
+    actually has a file to find when PWD changes between post-identity and
+    later hooks (the PWD-mismatch failure mode).
+
+    Milestone-kind writes are NOT mirrored — they stay workspace-scoped per
+    the auto-checkin design.
+    """
+    workspace = tmp_path / "ws"
+    fake_home = tmp_path / "home"
+    fake_home.mkdir(parents=True)
+
+    result = _run_with_home(
+        [
+            "set",
+            "session",
+            "--slot",
+            "test-mirror-slot-9999",
+            "--json",
+            '{"uuid": "00000000-0000-0000-0000-000000000099"}',
+        ],
+        workspace,
+        fake_home,
+    )
+    assert result.returncode == 0, result.stderr
+
+    # Primary workspace write (unchanged behavior)
+    ws_path = workspace / ".unitares" / "session-test-mirror-slot-9999.json"
+    assert ws_path.exists(), f"workspace cache not written: {ws_path}"
+    ws_data = json.loads(ws_path.read_text())
+    assert ws_data["uuid"] == "00000000-0000-0000-0000-000000000099"
+
+    # HOME mirror (new behavior — the fix)
+    home_path = fake_home / ".unitares" / "session-test-mirror-slot-9999.json"
+    assert home_path.exists(), f"home mirror not written: {home_path}"
+    home_data = json.loads(home_path.read_text())
+    assert home_data == ws_data, "home mirror payload should match workspace"
+
+
+def test_set_milestone_does_not_mirror_to_home(tmp_path: Path) -> None:
+    """Milestone accumulator stays workspace-scoped — only session caches
+    mirror to HOME (per the design comment in session_cache.py:cmd_set)."""
+    workspace = tmp_path / "ws"
+    fake_home = tmp_path / "home"
+    fake_home.mkdir(parents=True)
+
+    result = _run_with_home(
+        ["bump-edit", "--file-path", "/w/a.py"],
+        workspace,
+        fake_home,
+    )
+    assert result.returncode == 0, result.stderr
+
+    # Milestone in workspace
+    assert (workspace / ".unitares" / "last-milestone.json").exists()
+    # NOT mirrored to home
+    assert not (fake_home / ".unitares" / "last-milestone.json").exists()
+
+
+def test_set_session_home_mirror_skipped_when_workspace_is_home(tmp_path: Path) -> None:
+    """If workspace IS $HOME, the home-mirror is a no-op (paths are equal) —
+    one write, not two."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir(parents=True)
+
+    result = _run_with_home(
+        [
+            "set",
+            "session",
+            "--slot",
+            "test-noop-slot-8888",
+            "--json",
+            '{"uuid": "00000000-0000-0000-0000-000000000088"}',
+        ],
+        fake_home,  # workspace == home
+        fake_home,
+    )
+    assert result.returncode == 0, result.stderr
+    # Exactly one file at home/.unitares/, no separate workspace path
+    cache_files = list((fake_home / ".unitares").glob("session-*.json"))
+    assert len(cache_files) == 1
+    assert cache_files[0].name == "session-test-noop-slot-8888.json"
+
+
 def test_set_session_refuses_stub_without_identity(tmp_path: Path) -> None:
     """Stamp-only writes into a missing/identityless session cache must fail loudly,
     not silently produce 88-byte stubs that brick the next hook's identity lookup.
