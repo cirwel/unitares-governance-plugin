@@ -239,6 +239,35 @@ def cmd_set(args: argparse.Namespace) -> int:
     if args.stamp:
         payload["updated_at"] = datetime.now(timezone.utc).isoformat()
     _write_json(path, payload)
+
+    # Slotted HOME mirror for session caches (2026-05-30).
+    # `_session_lookup.resolve_session_file` has a slotted-HOME fallback
+    # added 2026-05-10 to fix the PWD-mismatch failure mode where
+    # post-identity writes from PWD=X but a later hook reads from PWD=Y and
+    # misses. The fix was read-side only — the writer never populated HOME,
+    # so the fallback never had a file to find. This mirror closes the loop:
+    # session writes hit BOTH workspace AND $HOME/.unitares/session-<slot>.json,
+    # so the slotted-HOME read fallback actually works.
+    #
+    # Identity-honesty unchanged: slot is the Claude Code session_id, globally
+    # unique per session, so cross-agent siphoning is structurally precluded
+    # (cf. the unslotted-HOME removal noted in _session_lookup.py). Milestone
+    # accumulator stays workspace-scoped per the auto-checkin design.
+    if args.kind == "session" and slot:
+        home_path = _cache_path("session", Path.home(), slot)
+        if home_path != path:
+            try:
+                _write_json(home_path, payload)
+            except Exception as exc:
+                # Best-effort — primary workspace write already succeeded.
+                # Failure here only loses the PWD-mismatch fallback path,
+                # not the primary cache.
+                print(
+                    f"session_cache.py: home-mirror write failed ({exc!r}) — "
+                    f"primary cache at {path} unaffected",
+                    file=sys.stderr,
+                )
+
     if args.echo:
         print(json.dumps(payload))
     return 0
