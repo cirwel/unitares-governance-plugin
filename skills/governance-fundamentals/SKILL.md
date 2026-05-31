@@ -7,7 +7,7 @@ description: >
 license: Apache-2.0
 compatibility: Requires UNITARES governance MCP server (gov.cirwel.org or local http://127.0.0.1:8767/mcp/)
 metadata:
-  unitares.last_verified: "2026-05-26"
+  unitares.last_verified: "2026-05-31"
   unitares.freshness_days: "14"
 ---
 
@@ -60,7 +60,7 @@ Governance issues a verdict after each check-in. This is the operational signal:
 
 A `margin: tight` flag means you are near a basin edge. Be more careful with next steps.
 
-Current runtime risk is phi/thermodynamic driven (`RISK_PHI_WEIGHT=1.0`, traditional keyword/complexity risk zeroed). Resident classes also have class-aware void thresholds, so do not infer verdict cause from generic constants alone; read the returned reason, margin, basin, and `state_semantics` fields.
+Current runtime risk is phi/thermodynamic driven (`RISK_PHI_WEIGHT=1.0`, traditional keyword/complexity risk zeroed). Resident classes have class-aware void thresholds, and engaged ephemeral agents now have a measured class-conditional manifold radius and healthy operating point. Do not infer verdict cause from generic constants alone; read the returned reason, margin, basin, and `state_semantics` fields.
 
 ## Basins
 

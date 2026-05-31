@@ -7,7 +7,7 @@ description: >
 license: Apache-2.0
 compatibility: Requires UNITARES governance MCP server (gov.cirwel.org or local http://127.0.0.1:8767/mcp/)
 metadata:
-  unitares.last_verified: "2026-05-22"
+  unitares.last_verified: "2026-05-31"
   unitares.freshness_days: "14"
 ---
 
@@ -25,6 +25,10 @@ A dialectic session is triggered when:
 Dialectics are not punishment. They are a structured way to resolve disagreements using evidence and negotiation. In current UNITARES language, think of them as structured review more than "recovery court."
 
 The runtime may still expose legacy aliases (`request_dialectic_review()`, `submit_thesis()`, `submit_antithesis()`, `submit_synthesis()`), but prefer the unified `dialectic(action=...)` surface when available.
+
+For small decisions that need a structured second look but not a persisted session, use `dialectic(action="quick", issue_description=..., position=...)`. It returns `record_decision` or `escalate_full_dialectic` and flags risk markers such as missing position, high risk/coherence metrics, security/data-loss language, or three or more concerns.
+
+`dialectic(action="get")` and `dialectic(action="list")` may include actionability fields naming the required role, allowed agent IDs, whether the current bound agent can submit, and the recommended next action. Follow those fields before writing thesis/antithesis/synthesis.
 
 ## Phase 1: Thesis
 
@@ -67,6 +71,8 @@ dialectic(
 - **Observed metrics**: Include the actual EISV values backing your concerns
 
 If identity or session continuity looks suspect, verify with `identity()` before assuming the thesis belongs to the agent you think it does.
+
+If a session is waiting on a different reviewer and the operator wants your bound agent to answer instead, use `dialectic(action="antithesis", take_over_if_requested=true, ...)` or explicitly reassign with `dialectic(action="reassign", session_id=..., new_reviewer_id=...)`.
 
 ## Phase 3: Synthesis
 

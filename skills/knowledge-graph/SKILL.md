@@ -6,7 +6,7 @@ description: >
 license: Apache-2.0
 compatibility: Requires UNITARES governance MCP server (gov.cirwel.org or local http://127.0.0.1:8767/mcp/)
 metadata:
-  unitares.last_verified: "2026-05-26"
+  unitares.last_verified: "2026-05-31"
   unitares.freshness_days: "14"
 ---
 
@@ -29,7 +29,9 @@ knowledge(
 )
 ```
 
-The runtime may still expose older search aliases, but prefer the unified `knowledge(action="search")` path when available. Duplicate entries fragment knowledge and make search less effective.
+The runtime may still expose older search aliases, but prefer the unified `knowledge(action="search")` path when available. Duplicate entries fragment knowledge and make search less effective. When searching multiple results, `synthesize=true` can ask the local model to summarize patterns without changing the stored graph.
+
+Knowledge reads are observable: search/get/list/details emit best-effort `knowledge_read` audit events with reader context when available. This helps track whether the shared graph is actually being used.
 
 ## Quick Contribution
 
@@ -82,6 +84,8 @@ When storing a discovery, classify it:
 | `bug_fix`, `refactoring`, `documentation` | Implementation or maintenance work already performed |
 
 Check the live tool schema if you are unsure which enum values the current runtime accepts. Do not invent discovery types casually.
+
+`bug` is accepted as shorthand for `bug_found`. Severity values must be one of `low`, `medium`, `high`, or `critical`; invalid enum responses include the runtime's suggested correction when one is obvious.
 
 ## Status Lifecycle
 
