@@ -36,19 +36,21 @@ On every axis it was designed for — concurrency, audit, governance, scale — 
 
 The wiki's **ingest** step integrates a new source *into existing pages*: it rewrites the synthesis so the narrative compounds and the cross-references are already materialized before any query arrives. The UNITARES KG stores discrete discovery rows and `related_to` edges; synthesis happens only on *read* (`synthesize=true` on search). The knowledge-graph skill says so plainly — "the graph accumulates knowledge well but does not close loops automatically."
 
-That is precisely the gap the wiki pattern closes. The LLM wiki is therefore best read not as a competitor to replace the KG but as a **missing layer** the KG could adopt: a synthesis-on-write pass that maintains rolled-up entity/topic pages over the raw discovery rows, so the compounding artifact exists before a query forces it into being.
+That is precisely the gap the wiki pattern closes. The LLM wiki is therefore best read not as a competitor to replace the KG but as a **missing layer** the KG could adopt: a pass that maintains rolled-up entity/topic pages over the raw discovery rows, so the compounding artifact exists before a query forces it into being.
+
+One caveat carries real weight, because bloat is the genuine risk here. The wiki's *per-source* ingest fits a single-user, ~100-source, human-curated flow; a multi-agent fleet writing constantly is a different volume profile, and running an LLM synthesis pass on every `store`/`note` would be exactly the "auto-checkin every trivial write" behavior this project lists as a non-goal — added latency, cost, and a fresh source of stale auto-generated rows. The transferable shape is therefore **periodic or on-demand synthesis as a lifecycle action** (a `knowledge(action="synthesize")` alongside the existing `cleanup`, `audit`, and `stats`), not a write-time hook. Reframed that way it reuses machinery that already exists, adds no per-write cost, and changes no schema. That is the version worth building.
 
 ## "Or any others" — the credible neighbors
 
 The honest competitive set is not RAG but agent-memory knowledge graphs, and two of them are ahead of us on a specific dimension:
 
-- **Zep / Graphiti** — a bi-temporal knowledge graph for agent memory. On time-aware reasoning (when a fact became true or false, and invalidation of superseded facts) it is more capable than the UNITARES KG today.
+- **Zep / Graphiti** — a bi-temporal knowledge graph for agent memory. On time-aware reasoning (when a fact became true or false, and invalidation of superseded facts) it is more capable than the UNITARES KG today. But matching it is a substrate-level change — migration, AGE query rewrites, and a time dimension threaded through every read path — for a payoff (point-in-time reconstruction, automatic invalidation) that is speculative for the current use case, given that `superseded` status plus `created_at` already covers most of it. This is a YAGNI candidate: a documented idea, not a roadmap item, until a concrete temporal-reasoning failure is actually observed.
 - **Microsoft GraphRAG** — community detection plus hierarchical summarization. This is the wiki's compounding synthesis done at graph scale, and it is the closest existing implementation of the layer the KG is missing.
 - **Letta/MemGPT, Mem0, Cognee** — single-agent memory systems; weaker than the KG on fleet coordination, audit, and governance.
 
 ## Bottom line
 
-Neither the LLM wiki nor the other systems are more capable than the UNITARES KG across the board; the KG dominates on the multi-agent, auditable, governed-fleet problem it was built for. The LLM wiki is more capable on compounding synthesis, and Graphiti on temporal reasoning. Those two are the borrow-this items — a synthesis-on-write layer and temporal edges — not reasons to switch substrates.
+Neither the LLM wiki nor the other systems are more capable than the UNITARES KG across the board; the KG dominates on the multi-agent, auditable, governed-fleet problem it was built for. The LLM wiki is more capable on compounding synthesis, and Graphiti on temporal reasoning. Naming both is cheap and worth doing, but only one is worth building soon: a **periodic synthesis lifecycle action** (lean, reuses existing machinery). **Temporal edges stay a documented idea** — deferred until a real temporal failure justifies the substrate cost. The point of the comparison is to borrow deliberately, not to switch substrates or build everything the neighbors have.
 
 ## Sources
 
