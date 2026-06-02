@@ -163,14 +163,32 @@ def test_payload_shape(monkeypatch, tmp_path):
 
 
 def test_plugin_version_matches_package_metadata():
-    """Package manifests and hook telemetry must not drift apart."""
+    """Every version location must stay in lockstep: the two package
+    manifests, the marketplace listing /plugin reads to offer updates, the
+    hook telemetry resolver, and its constant fallback. A drift in any one
+    (e.g. bumping a manifest but not marketplace.json) ships a plugin whose
+    updater advertises the wrong version."""
     plugin_root = Path(__file__).parent.parent
     versions = []
     for rel in (".claude-plugin/plugin.json", ".codex-plugin/plugin.json"):
         data = json.loads((plugin_root / rel).read_text(encoding="utf-8"))
         versions.append(data["version"])
 
-    assert len(set(versions)) == 1
+    # marketplace.json carries the version per-plugin under plugins[]; it is
+    # the file /plugin reads to decide what update to offer, so it must match.
+    market = json.loads(
+        (plugin_root / ".claude-plugin/marketplace.json").read_text(encoding="utf-8")
+    )
+    market_entry = next(
+        p for p in market["plugins"] if p["name"] == "unitares-governance"
+    )
+    versions.append(market_entry["version"])
+
+    # DEFAULT_PLUGIN_VERSION is the fallback _plugin_version() returns when the
+    # manifests are unreadable; guard it so it can't silently rot to a stale tag.
+    versions.append(checkin.DEFAULT_PLUGIN_VERSION)
+
+    assert len(set(versions)) == 1, f"version drift across locations: {versions}"
     assert checkin._plugin_version() == versions[0]
 
 
