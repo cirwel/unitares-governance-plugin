@@ -21,7 +21,7 @@ This plugin currently optimizes for `explicit`.
 ## Recommended Flow
 
 1. Run `/governance-start`
-2. Keep continuity in `.unitares/session.json`
+2. Keep continuity in slot-scoped `.unitares/session-<slot>.json` caches
 3. Do real work
 4. Run `/checkin` after a meaningful milestone
 5. Run `/diagnose` when continuity or governance state looks wrong
@@ -43,7 +43,9 @@ Codex should treat continuity as local workspace state, not Claude-only adapter 
 
 Preferred cache path:
 
-- `.unitares/session.json`
+- `.unitares/session-<slot>.json`
+
+Flat `.unitares/session.json` is a legacy/shared artifact. Use `scripts/session_cache.py list --workspace "$PWD"` to discover recent slots, then read a specific cache with `scripts/session_cache.py get session --slot=<slot>`.
 
 Shared helper:
 

@@ -8,7 +8,7 @@ Start by surfacing prior workspace state as a **lineage candidate** (not a resum
 
 Use the shared helper:
 
-- `scripts/session_cache.py list session` — slot inventory sorted by recency (when available; S20.1)
+- `scripts/session_cache.py list --workspace "$PWD"` — slot inventory sorted by recency (when available; S20.1)
 - otherwise glob `.unitares/session-*.json` and pick the most recent by `updated_at`
 
 If a candidate is found:

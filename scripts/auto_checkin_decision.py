@@ -6,7 +6,7 @@ logic. The hook calls this as a subprocess; tests import `decide` directly.
 
 Inputs (JSON on stdin or via CLI args):
 
-    session        — shape of .unitares/session.json
+    session        — shape of a slot-scoped .unitares/session-<slot>.json cache
     milestone      — shape of .unitares/last-milestone.json (with accumulator)
     edit_threshold — fire after N edits since last checkin
     secs_threshold — fire after T seconds since last checkin (combined with

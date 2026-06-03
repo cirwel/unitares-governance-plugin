@@ -3,8 +3,12 @@
 
 Stores lightweight continuity state in:
 
-    .unitares/session.json
+    .unitares/session-<slot>.json
     .unitares/last-milestone.json
+
+The flat `.unitares/session.json` path exists only as a legacy/shared cache
+surface. New session writes must be slot-scoped unless the caller explicitly
+opts into the substrate-earned single-tenant escape hatch.
 
 This helper is intentionally small and dependency-free so Claude hooks, Codex
 commands, and other thin clients can share one cache format.
