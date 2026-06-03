@@ -126,7 +126,11 @@ def test_pre_edit_blocks_on_held_by_other(tmp_path, monkeypatch, lease_server, c
     rc = file_lease_hook.main(["pre-edit", "--workspace", str(tmp_path)], stdin_text=_payload())
 
     assert rc == 2
-    assert "BLOCKED: file lease held by another agent" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "BLOCKED: file lease held by another agent" in err
+    # The block message must tell the operator the lease self-heals, so they
+    # don't reflexively force-release a lease that would clear on its own.
+    assert "self-heals" in err
     assert not (tmp_path / ".unitares" / "file-leases-slot-1.json").exists()
 
 

@@ -253,6 +253,30 @@ def _release(token: str, lease_id: str) -> dict[str, Any]:
     )
 
 
+def _self_heal_eta(expires_at: Any) -> str:
+    """Human phrase for when a `file://` lease auto-clears.
+
+    File leases take the `remote_heartbeat` path: a pure TTL row with no
+    auto-renewing holder, swept by the reaper at `expires_at`. So a lease held
+    by a *dead* session is not permanent — it clears on its own. This phrase
+    tells the operator that, so they don't reflexively force-release a lease
+    that would have cleared by itself.
+    """
+    if not isinstance(expires_at, str) or not expires_at:
+        return ""
+    try:
+        from datetime import datetime, timezone
+
+        exp = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+        remaining = (exp - datetime.now(timezone.utc)).total_seconds()
+    except Exception:
+        return ""
+    if remaining <= 30:
+        return " (expiring now — should clear within a reaper cycle)"
+    minutes = int(remaining // 60) or 1
+    return f" (auto-clears in ~{minutes} min if the holder is gone — no action needed)"
+
+
 def cmd_pre_edit(args: argparse.Namespace, stdin_text: str) -> int:
     if not _enabled():
         return 0
@@ -313,14 +337,18 @@ def cmd_pre_edit(args: argparse.Namespace, stdin_text: str) -> int:
         return 0
 
     if result.get("error") == "held_by_other":
+        expires_at = result.get("expires_at", "?")
         return _block(
             "BLOCKED: file lease held by another agent\n"
             f"  Path: {payload.file_path}\n"
             f"  Surface: {result.get('surface_id') or surface_id}\n"
             f"  Blocking lease: {result.get('blocking_lease_id', '?')}\n"
             f"  Held by: {result.get('held_by_uuid', '?')}\n"
-            f"  Expires: {result.get('expires_at', '?')}\n"
-            "Wait for the holder to finish, choose a non-overlapping file, or ask the operator to force-release."
+            f"  Expires: {expires_at}{_self_heal_eta(expires_at)}\n"
+            "This lease self-heals: file leases auto-expire at the time above even if the "
+            "holding session died without releasing.\n"
+            "Best action: wait for it to clear or edit a different file. Force-release "
+            "(operator) is only for when you genuinely can't wait."
         )
 
     return _fail_open_or_block(f"acquire failed for {surface_id}: {result.get('error') or result}")
