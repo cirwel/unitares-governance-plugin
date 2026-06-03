@@ -3,7 +3,7 @@
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Claude Code Plugin](https://img.shields.io/badge/Claude%20Code-plugin-d97757.svg)](https://docs.claude.com/en/docs/claude-code/plugins)
 [![Codex Plugin](https://img.shields.io/badge/Codex-plugin-10a37f.svg)](./CODEX_START.md)
-[![Version](https://img.shields.io/badge/version-0.4.4-blue.svg)](.claude-plugin/plugin.json)
+[![Version](https://img.shields.io/badge/version-0.4.5-blue.svg)](.claude-plugin/plugin.json)
 
 Client and integration layer for **UNITARES** — the runtime telemetry and coordination layer for heterogeneous AI-agent fleets. This repo provides agent-facing skills, commands, and adapters for connecting coding agents (Claude Code, Codex/ChatGPT, others) to a running UNITARES governance server. The runtime itself lives in [`cirwel/unitares`](https://github.com/cirwel/unitares).
 
@@ -116,7 +116,7 @@ Environment variables:
 | `UNITARES_FILE_LEASES_ENABLED` | `1` | Enable Claude Edit/Write/MultiEdit file-lease guard |
 | `UNITARES_FILE_LEASES_REQUIRED` | `0` | Block edits when lease infrastructure is missing/unreachable |
 | `LEASE_PLANE_BASE_URL` | `http://127.0.0.1:8788` | BEAM lease-plane HTTP base URL |
-| `LEASE_PLANE_BEARER_TOKEN` | unset | Bearer used for lease-plane acquire/heartbeat/release |
+| `LEASE_PLANE_BEARER_TOKEN` | unset | Bearer used for lease-plane acquire, heartbeat, and release calls |
 
 ## Adapter Notes
 
@@ -124,7 +124,7 @@ Environment variables:
 
 The current Claude adapter includes session-start, pre-edit, post-edit, and session-end hooks. Those hooks should be treated as an adapter convenience, not the canonical governance policy. In particular, frequent file writes should not automatically be interpreted as meaningful governance events.
 
-The pre-edit hook acquires a BEAM file lease before Edit/Write/MultiEdit. Missing lease-plane configuration fails open by default, while real `held_by_other` contention blocks the edit with a visible explanation. Post-edit heartbeats held leases, and session-end releases them.
+The pre-edit hook acquires a BEAM file lease before Edit/Write/MultiEdit. Missing lease-plane configuration fails open by default, while real `held_by_other` contention blocks the edit with a visible explanation. Post-edit releases the just-edited file lease immediately; session-end remains a best-effort cleanup path for any lease that survived an interrupted edit.
 
 ### Codex
 
@@ -132,7 +132,7 @@ Codex and ChatGPT support should stay minimal and explicit:
 
 - package shared skills through `.codex-plugin/plugin.json`
 - expose manual commands
-- treat `.unitares/session.json` as the neutral local continuity cache
+- treat `.unitares/session-<slot>.json` as the neutral local continuity cache; flat `.unitares/session.json` is legacy/read-only
 - use `scripts/session_cache.py` as the shared cache helper across adapters
 - avoid client-specific auto-checkin behavior until there is a Codex-native reason to add it
 

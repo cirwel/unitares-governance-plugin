@@ -31,6 +31,12 @@ jobs:
       - name: Check command cache contract
         run: ./scripts/dev/lint-command-cache-contract.sh
 
+      - name: Check doc drift contract
+        run: ./scripts/dev/lint-doc-drift.sh
+
+      - name: Check documented helper commands
+        run: python scripts/dev/lint-doc-command-examples.py
+
       - name: Check skill freshness metadata
         run: ./scripts/check-skill-freshness.sh
 

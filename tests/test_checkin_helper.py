@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -165,9 +166,9 @@ def test_payload_shape(monkeypatch, tmp_path):
 def test_plugin_version_matches_package_metadata():
     """Every version location must stay in lockstep: the two package
     manifests, the marketplace listing /plugin reads to offer updates, the
-    hook telemetry resolver, and its constant fallback. A drift in any one
-    (e.g. bumping a manifest but not marketplace.json) ships a plugin whose
-    updater advertises the wrong version."""
+    hook telemetry resolver, its constant fallback, and the public README
+    badge. A drift in any one (e.g. bumping a manifest but not marketplace.json)
+    ships a plugin whose updater or docs advertise the wrong version."""
     plugin_root = Path(__file__).parent.parent
     versions = []
     for rel in (".claude-plugin/plugin.json", ".codex-plugin/plugin.json"):
@@ -187,6 +188,11 @@ def test_plugin_version_matches_package_metadata():
     # DEFAULT_PLUGIN_VERSION is the fallback _plugin_version() returns when the
     # manifests are unreadable; guard it so it can't silently rot to a stale tag.
     versions.append(checkin.DEFAULT_PLUGIN_VERSION)
+
+    readme = (plugin_root / "README.md").read_text(encoding="utf-8")
+    badge_match = re.search(r"badge/version-([^-]+)-blue\.svg", readme)
+    assert badge_match, "README version badge missing or in an unexpected format"
+    versions.append(badge_match.group(1))
 
     assert len(set(versions)) == 1, f"version drift across locations: {versions}"
     assert checkin._plugin_version() == versions[0]

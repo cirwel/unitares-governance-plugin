@@ -4,8 +4,8 @@
 This script is intentionally stdlib-only so the installed plugin can run in
 any workspace without importing the UNITARES server repo. It talks to the
 lease-plane HTTP API, acquires `file://` leases before Edit/Write/MultiEdit,
-heartbeats held leases after edits, and releases the session's leases on
-SessionEnd.
+releases the edited file immediately after PostToolUse, and keeps session-end
+release as a best-effort cleanup path.
 """
 
 from __future__ import annotations

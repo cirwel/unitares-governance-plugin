@@ -419,7 +419,7 @@ class TestScanNewestLineageFallback:
     When ``CLAUDE_SESSION_ID`` is set but its slot-scoped cache file does not
     exist (the harness minted a fresh session_id and prior work in this
     workspace lives under a different slot), the hook falls back to
-    ``session_cache.py list session`` and surfaces the *newest* prior slot's
+    ``session_cache.py list --workspace "$PWD"`` and surfaces the *newest* prior slot's
     UUID as a lineage candidate. Strict guarantees:
 
     - One UUID, never a menu (KG bug 2026-04-20T00:09:51).

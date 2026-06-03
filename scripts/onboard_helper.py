@@ -3,7 +3,7 @@
 
 Owns the flow:
 
-1. Read existing ``.unitares/session.json`` cache (if any).
+1. Read the existing slot-scoped session cache (if any).
 2. Call ``onboard(force_new=true)``. When the cache has a UUID, pass it as
    ``parent_agent_id`` with ``spawn_reason="new_session"``.
 3. If the server reports ``trajectory_required`` (identity exists but lacks

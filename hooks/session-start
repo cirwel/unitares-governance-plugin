@@ -275,7 +275,7 @@ fi
 # When a Claude session_id is present but its slot-scoped cache file does
 # not exist (cross-`/clear` case: harness minted a fresh session_id, prior
 # work in this workspace lives under a different slot), fall back to
-# `session_cache.py list session` and surface the **newest** prior slot's
+# `session_cache.py list --workspace "$PWD"` and surface the **newest** prior slot's
 # UUID as a lineage candidate. This is the cross-`/clear` lineage
 # discovery the slot-scoped reader can't do alone.
 #
