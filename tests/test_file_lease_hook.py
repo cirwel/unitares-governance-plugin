@@ -204,6 +204,78 @@ def test_release_session_releases_and_removes_state(tmp_path, monkeypatch, lease
     assert not state_path.exists()
 
 
+def test_release_edit_releases_only_edited_file_and_keeps_others(tmp_path, monkeypatch, lease_server):
+    _lease_env(monkeypatch, lease_server)
+    lease_dir = tmp_path / ".unitares"
+    lease_dir.mkdir()
+    state_path = lease_dir / "file-leases-slot-1.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "slot": "slot-1",
+                "workspace": str(tmp_path),
+                "holder_uuid": "33333333-3333-4333-8333-333333333333",
+                "leases": {
+                    "file:///tmp/a.py": {
+                        "lease_id": "11111111-1111-4111-8111-111111111111",
+                        "path": "a.py",
+                        "surface_id": "file:///tmp/a.py",
+                    },
+                    "file:///tmp/b.py": {
+                        "lease_id": "22222222-2222-4222-8222-222222222222",
+                        "path": "b.py",
+                        "surface_id": "file:///tmp/b.py",
+                    },
+                },
+            }
+        )
+    )
+
+    rc = file_lease_hook.main(
+        ["release-edit", "--workspace", str(tmp_path)], stdin_text=_payload(path="a.py")
+    )
+
+    assert rc == 0
+    # Only the edited file's lease is released.
+    assert [call["path"] for call in LeaseHandler.calls] == ["/v1/lease/release"]
+    assert LeaseHandler.calls[0]["body"]["lease_id"] == "11111111-1111-4111-8111-111111111111"
+    # State keeps the still-held b.py lease, drops a.py.
+    state = json.loads(state_path.read_text())
+    assert "file:///tmp/a.py" not in state["leases"]
+    assert "file:///tmp/b.py" in state["leases"]
+
+
+def test_release_edit_noop_when_file_not_leased(tmp_path, monkeypatch, lease_server):
+    _lease_env(monkeypatch, lease_server)
+    lease_dir = tmp_path / ".unitares"
+    lease_dir.mkdir()
+    (lease_dir / "file-leases-slot-1.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "slot": "slot-1",
+                "workspace": str(tmp_path),
+                "holder_uuid": "33333333-3333-4333-8333-333333333333",
+                "leases": {
+                    "file:///tmp/b.py": {
+                        "lease_id": "22222222-2222-4222-8222-222222222222",
+                        "path": "b.py",
+                        "surface_id": "file:///tmp/b.py",
+                    }
+                },
+            }
+        )
+    )
+
+    rc = file_lease_hook.main(
+        ["release-edit", "--workspace", str(tmp_path)], stdin_text=_payload(path="a.py")
+    )
+
+    assert rc == 0
+    assert LeaseHandler.calls == []  # nothing released for an unleased file
+
+
 def test_hooks_json_wires_pretooluse_edit_guard():
     config = json.loads((Path(__file__).parent.parent / "hooks" / "hooks.json").read_text())
 

@@ -23,7 +23,11 @@ from pathlib import Path
 from typing import Any
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8788"
-DEFAULT_TTL_S = 900
+# Leases are released in PostToolUse right after each edit, so this TTL is now
+# only a backstop for the crash-mid-edit window (acquire fired, the session
+# died before release-edit ran). A short TTL means even that orphan self-heals
+# fast via the reaper. Overridable via UNITARES_FILE_LEASE_TTL_S.
+DEFAULT_TTL_S = 300
 STATE_VERSION = 1
 
 
@@ -418,9 +422,68 @@ def cmd_release_session(args: argparse.Namespace, stdin_text: str) -> int:
     return 0
 
 
+def cmd_release_edit(args: argparse.Namespace, stdin_text: str) -> int:
+    """Release the lease for the just-edited file (PostToolUse).
+
+    A `file://` lease only needs to exist for the duration of the write that
+    holds it. Releasing it right after the edit — instead of heartbeating it
+    until SessionEnd — means a file is leased only while actively being
+    mutated, so a session that dies cannot strand a held lease (the immortal-
+    lease class). The TTL remains a backstop for the crash-mid-edit window
+    (acquire fired in pre-edit, the session died before this released).
+
+    Fire-and-forget: always returns 0; never blocks the PostToolUse chain.
+    """
+    if not _enabled():
+        return 0
+    workspace = Path(args.workspace).resolve()
+    payload = _load_hook_payload(stdin_text)
+    if not payload.session_id or not payload.file_path:
+        return 0
+    token = _bearer_token()
+    if not token:
+        _debug("release-edit skipped: missing token")
+        return 0
+    state = _load_state(workspace, payload.session_id)
+    leases = state.get("leases")
+    if not isinstance(leases, dict) or not leases:
+        return 0
+    # Match on the stored raw `path` (what pre-edit recorded) rather than a
+    # recomputed surface_id: the state key is the server's canonicalized
+    # surface_id, which may differ from the client's `file://<abs>` form.
+    surface_id = _surface_id(payload.file_path, workspace)
+    key = next(
+        (
+            k
+            for k, r in leases.items()
+            if isinstance(r, dict)
+            and r.get("lease_id")
+            and (r.get("path") == payload.file_path or k == surface_id)
+        ),
+        None,
+    )
+    if key is None:
+        return 0
+    result = _release(token, str(leases[key]["lease_id"]))
+    if result.get("ok") is not True and result.get("error") not in {"not_found", "expired"}:
+        # Best-effort: leave it in state so a later heartbeat/session-end retries;
+        # the TTL backstop releases it server-side regardless.
+        _debug(f"release-edit failed for {key}: {result.get('error')}")
+        return 0
+    leases.pop(key, None)
+    if leases:
+        _save_state(workspace, payload.session_id, state)
+    else:
+        _state_path(workspace, payload.session_id).unlink(missing_ok=True)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["pre-edit", "heartbeat-session", "release-session"])
+    parser.add_argument(
+        "command",
+        choices=["pre-edit", "release-edit", "heartbeat-session", "release-session"],
+    )
     parser.add_argument("--workspace", default=os.getcwd())
     return parser
 
@@ -431,6 +494,8 @@ def main(argv: list[str] | None = None, stdin_text: str | None = None) -> int:
     text = sys.stdin.read() if stdin_text is None else stdin_text
     if args.command == "pre-edit":
         return cmd_pre_edit(args, text)
+    if args.command == "release-edit":
+        return cmd_release_edit(args, text)
     if args.command == "heartbeat-session":
         return cmd_heartbeat_session(args, text)
     if args.command == "release-session":

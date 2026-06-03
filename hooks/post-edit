@@ -116,12 +116,14 @@ if [[ -z "${SLOT}" ]]; then
   exit 0
 fi
 
-# Keep any session-held file leases fresh. This is independent of the
-# auto-checkin path below: a session can edit before onboarding, and the
-# lease should still heartbeat while the agent continues working.
+# Release the just-edited file's lease now that the write is done. A file
+# lease only needs to live for the duration of the edit that holds it;
+# releasing per-edit (instead of heartbeating until SessionEnd) means a
+# session that dies cannot strand a held lease — the immortal-lease class.
+# Independent of the auto-checkin path below; fire-and-forget.
 FILE_LEASE_HELPER="${PLUGIN_ROOT}/scripts/file_lease_hook.py"
 if [[ -f "${FILE_LEASE_HELPER}" ]]; then
-  printf '%s' "${HOOK_INPUT}" | python3 "${FILE_LEASE_HELPER}" heartbeat-session --workspace "${PWD}" >/dev/null 2>&1 || true
+  printf '%s' "${HOOK_INPUT}" | python3 "${FILE_LEASE_HELPER}" release-edit --workspace "${PWD}" >/dev/null 2>&1 || true
 fi
 
 # Resolve slot-aware session cache via shared helper. HOOK_INPUT already
