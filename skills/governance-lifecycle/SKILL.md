@@ -13,6 +13,26 @@ metadata:
 
 # Agent Lifecycle
 
+## Friendly Workflow Names
+
+Current UNITARES servers expose task-verb aliases for the core agent workflow.
+Prefer them when you want the most agent-readable response shape; use the
+canonical names when you need legacy/raw compatibility.
+
+| Job | Friendly alias | Canonical tool |
+| --- | --- | --- |
+| Start working | `start_session(force_new=true, ...)` | `onboard` |
+| Check in after meaningful work | `sync_state(response_text=..., complexity=...)` | `process_agent_update` |
+| Check your working state | `check_working_state()` | `get_governance_metrics` |
+| Avoid duplicate work | `search_shared_memory(query=...)` | `knowledge(action="search")` |
+| Record what actually happened | `record_result(...)` | `outcome_event` |
+| Ask for a structured review | `request_review(issue_description=...)` | `dialectic(action="request")` |
+
+The aliases accept the same parameters and inherit the same identity rules as
+their canonical tools. Alias responses put `next_action`, `state_summary`,
+`risk_summary`, `memory_suggestions`, and `recovery_hint` first when present,
+with the full canonical payload preserved under `raw_governance`.
+
 ## Starting a Session
 
 Per identity.md v2 ontology, a fresh process-instance is a fresh agent. To continue prior work across processes, **declare lineage** — do not resume via token:
@@ -31,10 +51,10 @@ The PATH semantics, the rare same-live-process rebind case, the S13 fresh-instan
 
 ## Check-ins
 
-Call `process_agent_update()` after meaningful work:
+Call `sync_state()` (`process_agent_update(...)` canonically) after meaningful work:
 
 ```
-process_agent_update(
+sync_state(
   response_text: "Brief summary of what you did",
   complexity: 0.0-1.0,   # task difficulty estimate
   confidence: 0.0-1.0,   # how confident you are (be honest)
@@ -70,13 +90,13 @@ A `guide` verdict is an early warning. Ignoring it makes `pause` more likely.
 
 Use in every session:
 
-- `onboard(force_new=true, parent_agent_id=...)` — register a fresh process identity, optionally declaring lineage. Never call bare `onboard()`.
-- `process_agent_update()` — check in with work summary, complexity, confidence
-- `get_governance_metrics()` — read current EISV state; read-only, and for an unbound caller it returns an `unbound` diagnostic plus `next_action` instead of creating a ghost identity
+- `start_session(force_new=true, parent_agent_id=...)` / `onboard(...)` — register a fresh process identity, optionally declaring lineage. Never call bare `onboard()`.
+- `sync_state()` / `process_agent_update()` — check in with work summary, complexity, confidence
+- `check_working_state()` / `get_governance_metrics()` — read current EISV state; read-only, and for an unbound caller it returns an `unbound` diagnostic plus `next_action` instead of creating a ghost identity
 - `identity()` — confirm who the runtime thinks you are within this process; rare same-live-process PATH 0 rebind via `(agent_uuid=..., continuity_token=..., resume=true)` (see `references/resume-semantics.md`)
 - `bind_session()` — explicit session rebind for a known `agent_uuid + client_session_id`; use only when bridging transports (e.g., REST hook → MCP session)
 - `health_check()` — operator-facing server health when behavior seems odd
-- `knowledge(action="search")` — find existing knowledge before creating new entries
+- `search_shared_memory(query=...)` / `knowledge(action="search")` — find existing knowledge before creating new entries
 - `knowledge(action="note")` — quick contribution to the knowledge graph; `leave_note()` is legacy compatibility only
 
 ## Going Deeper
