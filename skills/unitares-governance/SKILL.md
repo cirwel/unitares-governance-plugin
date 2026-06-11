@@ -7,7 +7,7 @@ description: >
 license: Apache-2.0
 compatibility: Requires UNITARES governance MCP server (gov.cirwel.org or local http://127.0.0.1:8767/mcp/)
 metadata:
-  unitares.last_verified: "2026-05-23"
+  unitares.last_verified: "2026-06-11"
   unitares.freshness_days: "14"
 ---
 
@@ -58,13 +58,18 @@ The response includes an `identity_assurance` block (`tier`, `score`,
 `session_source`, `reason`) — check it after check-in to confirm strong
 continuity, especially when calling with `require_strong_identity=true`.
 
+`get_governance_metrics()` is read-only. If no identity is bound, current
+servers return an `unbound` diagnostic with a `next_action` hint instead of
+minting a fresh identity as a side effect.
+
 ## Knowledge Layer
 
 The governance system is coupled to the **knowledge graph**. Agents should
 search existing knowledge before duplicating work, and contribute discoveries,
 questions, and answers as they learn. Prefer the unified
-`knowledge(action="search" | "note" | "store" | ...)` surface; legacy
-one-tool-per-operation aliases are compatibility paths.
+`knowledge(action="search" | "note" | "store" | "synthesize" | ...)` surface;
+legacy one-tool-per-operation aliases are compatibility paths. `synthesize`
+is an explicit lifecycle action for topic rollups, not a write-time hook.
 
 ## Split Skills
 

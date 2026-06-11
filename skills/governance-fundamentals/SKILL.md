@@ -7,7 +7,7 @@ description: >
 license: Apache-2.0
 compatibility: Requires UNITARES governance MCP server (gov.cirwel.org or local http://127.0.0.1:8767/mcp/)
 metadata:
-  unitares.last_verified: "2026-05-31"
+  unitares.last_verified: "2026-06-11"
   unitares.freshness_days: "14"
 ---
 
@@ -62,6 +62,8 @@ A `margin: tight` flag means you are near a basin edge. Be more careful with nex
 
 Current runtime risk is phi/thermodynamic driven (`RISK_PHI_WEIGHT=1.0`, traditional keyword/complexity risk zeroed). Resident classes have class-aware void thresholds, and engaged ephemeral agents now have a measured class-conditional manifold radius and healthy operating point. Do not infer verdict cause from generic constants alone; read the returned reason, margin, basin, and `state_semantics` fields.
 
+If a verdict reason says `warmup-structural-suppressed`, the runtime observed a cold-start structural pause during the first process-local warmup cycles but let the agent proceed because the behavioral baseline was established and safe. Audit/history still preserve the original structural pause; the suppression marker is the reconciling signal.
+
 ## Basins
 
 Your state sits in a basin — a region of EISV space:
@@ -86,7 +88,7 @@ Do not guess first. Use:
 
 - `identity()` — verify who the runtime thinks you are
 - `health_check()` — verify the server and knowledge graph are healthy
-- `get_governance_metrics()` — current live thresholds and interpreted state
+- `get_governance_metrics()` — current live thresholds and interpreted state; this is read-only and returns an `unbound` payload with a `next_action` hint rather than minting identity for an unbound caller
 
 ## What NOT to Do
 
