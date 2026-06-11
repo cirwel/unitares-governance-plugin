@@ -6,7 +6,7 @@ description: >
 license: Apache-2.0
 compatibility: Requires UNITARES governance MCP server (gov.cirwel.org or local http://127.0.0.1:8767/mcp/)
 metadata:
-  unitares.last_verified: "2026-05-31"
+  unitares.last_verified: "2026-06-11"
   unitares.freshness_days: "14"
 ---
 
@@ -63,6 +63,7 @@ For more control, use the `knowledge()` tool with an action parameter:
 | `details` | Get full details including graph relationships |
 | `note` | Quick low-ceremony shared note |
 | `cleanup` | Run lifecycle cleanup for stale entries |
+| `synthesize` | Build or refresh stored topic rollups from related discoveries |
 | `stats` | Get knowledge graph statistics |
 | `supersede` | Mark an older discovery as replaced by a newer one |
 | `audit` | Run a knowledge graph lifecycle audit |
@@ -82,6 +83,7 @@ When storing a discovery, classify it:
 | `architectural_decision`, `learning`, `rule` | Durable knowledge that should rarely be auto-archived |
 | `experiment`, `exploration`, `observation` | Investigation notes where the conclusion may evolve |
 | `bug_fix`, `refactoring`, `documentation` | Implementation or maintenance work already performed |
+| `topic_rollup` | System-generated synthesis row; queryable, but agents should not create it directly |
 
 Check the live tool schema if you are unsure which enum values the current runtime accepts. Do not invent discovery types casually.
 
@@ -128,11 +130,14 @@ Tags are how future agents find your contributions. Be intentional:
 
 ## Closing the Loop
 
-The graph accumulates knowledge well but does not close loops automatically. This is a known gap that every agent should help address:
+The graph accumulates knowledge well but does not close loops automatically. Every agent should help address that lifecycle:
 
 - **When you resolve something, update its status.** Do not leave it as `open`.
 - **When you find a duplicate, archive the less complete one** and reference the better entry.
 - **When a finding is outdated, archive it** with a note about what superseded it.
 - **Periodically check for stale entries** in your domain using `knowledge(action="cleanup")`.
+- **Periodically roll up dense topics** with `knowledge(action="synthesize", topic="optional-tag", min_members=3, dry_run=true/false)`.
+
+`synthesize=true` on search is a read-time summary and does not change storage. `knowledge(action="synthesize")` is different: it writes deterministic `rollup::<topic>` discoveries with `discovery_type="topic_rollup"`, tags the rollup with the topic plus `rollup`, and refreshes the same row on later runs. It runs only on demand or on a scheduled lifecycle pass, never automatically on every `store` or `note`.
 
 Unresolved entries create noise. Closed loops create trust in the graph.

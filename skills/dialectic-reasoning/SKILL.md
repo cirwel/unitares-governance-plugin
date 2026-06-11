@@ -7,7 +7,7 @@ description: >
 license: Apache-2.0
 compatibility: Requires UNITARES governance MCP server (gov.cirwel.org or local http://127.0.0.1:8767/mcp/)
 metadata:
-  unitares.last_verified: "2026-05-31"
+  unitares.last_verified: "2026-06-11"
   unitares.freshness_days: "14"
 ---
 
@@ -25,6 +25,8 @@ A dialectic session is triggered when:
 Dialectics are not punishment. They are a structured way to resolve disagreements using evidence and negotiation. In current UNITARES language, think of them as structured review more than "recovery court."
 
 The runtime may still expose legacy aliases (`request_dialectic_review()`, `submit_thesis()`, `submit_antithesis()`, `submit_synthesis()`), but prefer the unified `dialectic(action=...)` surface when available.
+
+On current servers, bare `dialectic({})` defaults to `action="list"` for orientation. Pass the action explicitly in docs, examples, and automation so the intent stays legible.
 
 For small decisions that need a structured second look but not a persisted session, use `dialectic(action="quick", issue_description=..., position=...)`. It returns `record_decision` or `escalate_full_dialectic` and flags risk markers such as missing position, high risk/coherence metrics, security/data-loss language, or three or more concerns.
 

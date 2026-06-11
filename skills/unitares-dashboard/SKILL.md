@@ -10,7 +10,7 @@ description: >
 license: Apache-2.0
 compatibility: Requires UNITARES governance MCP server (gov.cirwel.org or local http://127.0.0.1:8767/mcp/)
 metadata:
-  unitares.last_verified: "2026-05-22"
+  unitares.last_verified: "2026-06-11"
   unitares.freshness_days: "30"
 ---
 
@@ -28,7 +28,7 @@ When adding a new panel, every item below must be done:
 
 | # | Do | File | Why |
 |---|----|----|-----|
-| 1 | Add filename to `allowed_files` list | `src/http_api.py::http_dashboard_static()` | Static handler 404s anything not on the allowlist — the browser silently fails to load |
+| 1 | Add filename to `allowed_files` list | `src/http_api.py::http_dashboard_static()` | Static handler returns 403 JSON for anything not on the allowlist — the browser silently fails to load |
 | 2 | Add `<script src="/dashboard/NAME.js"></script>` **without** `defer` | `dashboard/index.html` in the correct layer block | All peer modules load non-deferred and the IIFE has its own `DOMContentLoaded` guard |
 | 3 | Use shared helpers from `utils.js`, `state.js`, `components.js`, and `colors.js` | module JS | The dashboard already centralizes auth, state, UI pieces, and palette; don't re-invent |
 | 4 | Set `Chart.defaults.color`, `.font.family`, `.borderColor` from body CSS vars | before `new Chart()` | Chart.js defaults to dark-grey ticks on your dark-grey background — invisible axis labels |
@@ -40,7 +40,7 @@ When adding a new panel, every item below must be done:
 | 10 | Add nav link `<a href="#SECTION" class="section-nav-item" data-section="SECTION">…</a>` | `dashboard/index.html` top nav | Scroll-spy wires automatically by matching `id` |
 | 11 | Use responsive auto-fit grids for repeated compact blocks | `styles.css` | Prefer `repeat(auto-fit, minmax(min(100%, Npx), 1fr))` so panels survive intermediate widths without breakpoint churn |
 
-The current script chain is: Layer 0 `utils.js`, `state.js`, `colors.js`, `components.js`; Layer 1 `visualizations.js`; Layer 2 domain modules including `agents.js`, `discoveries.js`, `dialectic.js`, `eisv-charts.js`, `timeline.js`, `residents.js`, `fleet-metrics.js`, `watcher.js`, `sentinel.js`, `vigil.js`, and `system-health.js`. Add new modules to the layer matching their dependencies.
+The current script chain is: Layer 0 `utils.js`, `state.js`, `colors.js`, `components.js`; Layer 1 `visualizations.js`; Layer 2 domain modules including `agents.js`, `discoveries.js`, `dialectic.js`, `eisv-charts.js`, `timeline.js`, `residents.js`, `fleet-metrics.js`, `watcher.js`, `sentinel.js`, `vigil.js`, and `system-health.js`; final boot modules `dashboard.js` and `resident-progress.js`. Add new modules to the layer matching their dependencies. `phase.js` is allowlisted for the separate `phase.html` view, not normal `/dashboard` panel work.
 
 ## The Chart.js Dark-Theme Trap (Item 4) — Biggest Pitfall
 
@@ -105,7 +105,7 @@ The reference implementation is `dashboard/eisv-charts.js::makeChartOptions`. Co
 
 ## The Allowlist Trap (Item 1)
 
-`src/http_api.py::http_dashboard_static()` has a hardcoded `allowed_files` list. A file not on it returns JSON `{"error": "File not allowed"}` — NOT a 404, but a 200 with an error body. The browser still fails to load the script and `Console` shows a SyntaxError deep in the JSON. Easy to miss.
+`src/http_api.py::http_dashboard_static()` has a hardcoded `allowed_files` list. A file not on it returns 403 JSON `{"error": "File not allowed"}`. The browser still fails to load the script; Network will show the rejected dashboard asset.
 
 Verify by `curl`:
 ```bash

@@ -7,7 +7,7 @@ description: >
 license: Apache-2.0
 compatibility: Requires UNITARES governance MCP server (gov.cirwel.org or local http://127.0.0.1:8767/mcp/)
 metadata:
-  unitares.last_verified: "2026-05-26"
+  unitares.last_verified: "2026-06-11"
   unitares.freshness_days: "14"
 ---
 
@@ -72,7 +72,7 @@ Use in every session:
 
 - `onboard(force_new=true, parent_agent_id=...)` — register a fresh process identity, optionally declaring lineage. Never call bare `onboard()`.
 - `process_agent_update()` — check in with work summary, complexity, confidence
-- `get_governance_metrics()` — read current EISV state
+- `get_governance_metrics()` — read current EISV state; read-only, and for an unbound caller it returns an `unbound` diagnostic plus `next_action` instead of creating a ghost identity
 - `identity()` — confirm who the runtime thinks you are within this process; rare same-live-process PATH 0 rebind via `(agent_uuid=..., continuity_token=..., resume=true)` (see `references/resume-semantics.md`)
 - `bind_session()` — explicit session rebind for a known `agent_uuid + client_session_id`; use only when bridging transports (e.g., REST hook → MCP session)
 - `health_check()` — operator-facing server health when behavior seems odd
