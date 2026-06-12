@@ -875,3 +875,125 @@ class TestCompactMode:
         assert compact_len < full_len * 0.4, (
             f"compact={compact_len}, full={full_len} — expected >=60% reduction"
         )
+
+
+class TestOrchestratorProvisionedLineage:
+    """Spawn-context env lineage source (UNITARES_PARENT_AGENT_ID).
+
+    The BEAM agent orchestrator (unitares PR #648) provisions
+    UNITARES_PARENT_AGENT_ID / UNITARES_SPAWN_REASON into spawned agents'
+    env as candidate declarations. The hook surfaces them as the
+    highest-confidence lineage candidate — ground truth from the spawner,
+    outranking slot-file and scan-newest inference — while keeping the
+    candidate-not-credential posture (declare via parent_agent_id, agent
+    may decline).
+    """
+
+    ENV_UUID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+
+    def test_env_lineage_surfaces_with_template_and_spawn_reason(self, tmp_path):
+        stdout, _ = _serve_and_run(
+            tmp_path,
+            extra_env={
+                "UNITARES_PARENT_AGENT_ID": self.ENV_UUID,
+                "UNITARES_SPAWN_REASON": "explicit",
+            },
+        )
+        ctx = json.loads(stdout).get("additional_context", "")
+
+        assert "Orchestrator-provisioned" in ctx
+        assert f'parent_agent_id="{self.ENV_UUID}"' in ctx
+        assert 'spawn_reason="explicit"' in ctx
+        # Candidate-not-credential posture preserved.
+        assert "candidate, not an obligation" in ctx
+        assert "resume=true" not in ctx
+        assert "identity(agent_uuid=" not in ctx
+
+    def test_spawn_reason_defaults_to_subagent(self, tmp_path):
+        stdout, _ = _serve_and_run(
+            tmp_path,
+            extra_env={"UNITARES_PARENT_AGENT_ID": self.ENV_UUID},
+        )
+        ctx = json.loads(stdout).get("additional_context", "")
+        assert 'spawn_reason="subagent"' in ctx
+
+    def test_env_lineage_outranks_slot_scoped_cache(self, tmp_path):
+        """Spawn-context ground truth wins over workspace-file inference."""
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        (workspace / ".unitares").mkdir()
+        slot = "claude-session-env-vs-slot"
+        (workspace / ".unitares" / f"session-{slot}.json").write_text(json.dumps({
+            "uuid": "ffffffff-1111-2222-3333-444444444444",
+            "agent_id": "Claude_Workspace_X",
+            "display_name": "Claude_Workspace_X",
+            "continuity_token": "",
+            "schema_version": 2,
+            "updated_at": "2026-04-20T00:00:00+00:00",
+        }))
+
+        stdout, _ = _serve_and_run(
+            tmp_path,
+            cwd=workspace,
+            claude_session_id=slot,
+            extra_env={"UNITARES_PARENT_AGENT_ID": self.ENV_UUID},
+        )
+        ctx = json.loads(stdout).get("additional_context", "")
+
+        assert self.ENV_UUID in ctx
+        # The slot UUID must NOT also surface — one candidate, never a menu.
+        assert "ffffffff-1111-2222-3333-444444444444" not in ctx
+
+    def test_malformed_env_uuid_is_ignored_and_slot_still_works(self, tmp_path):
+        """A polluted env var must not become a copy-pasteable suggestion."""
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        (workspace / ".unitares").mkdir()
+        slot = "claude-session-malformed-env"
+        (workspace / ".unitares" / f"session-{slot}.json").write_text(json.dumps({
+            "uuid": "ffffffff-1111-2222-3333-444444444444",
+            "agent_id": "Claude_Workspace_X",
+            "display_name": "Claude_Workspace_X",
+            "continuity_token": "",
+            "schema_version": 2,
+            "updated_at": "2026-04-20T00:00:00+00:00",
+        }))
+
+        stdout, _ = _serve_and_run(
+            tmp_path,
+            cwd=workspace,
+            claude_session_id=slot,
+            extra_env={"UNITARES_PARENT_AGENT_ID": "not-a-uuid; rm -rf /"},
+        )
+        ctx = json.loads(stdout).get("additional_context", "")
+
+        assert "not-a-uuid" not in ctx
+        assert "Orchestrator-provisioned" not in ctx
+        # Falls through to the slot-scoped source.
+        assert "ffffffff-1111-2222-3333-444444444444" in ctx
+
+    def test_malformed_spawn_reason_falls_back_to_subagent(self, tmp_path):
+        """spawn_reason is embedded in a quoted template — no breakout."""
+        stdout, _ = _serve_and_run(
+            tmp_path,
+            extra_env={
+                "UNITARES_PARENT_AGENT_ID": self.ENV_UUID,
+                "UNITARES_SPAWN_REASON": 'evil" ); rm -rf /; echo "',
+            },
+        )
+        ctx = json.loads(stdout).get("additional_context", "")
+
+        assert "rm -rf" not in ctx
+        assert 'spawn_reason="subagent"' in ctx
+
+    def test_env_lineage_makes_no_tool_calls(self, tmp_path):
+        """The new source keeps the load-bearing no-mutation invariant."""
+        _, calls = _serve_and_run(
+            tmp_path,
+            extra_env={"UNITARES_PARENT_AGENT_ID": self.ENV_UUID},
+        )
+        mutating = [
+            c for c in calls
+            if (c.get("tool") or c.get("name") or "") not in ("", "skills")
+        ]
+        assert mutating == []
