@@ -224,6 +224,20 @@ class TestSessionStartContext:
         assert "identity(agent_uuid=" not in ctx
         assert "bind_session(agent_uuid=" not in ctx
 
+    def test_online_context_names_agent_experience_response_fields(self, tmp_path):
+        """The banner should teach agents what to inspect after the first
+        governance call, not only which call to make."""
+        stdout, _ = _serve_and_run(tmp_path)
+        ctx = json.loads(stdout).get("additional_context", "")
+
+        assert "next_action" in ctx
+        assert "state_summary" in ctx
+        assert "risk_summary" in ctx
+        assert "memory_suggestions" in ctx
+        assert "recovery_hint" in ctx
+        assert "retrieval prompts" in ctx
+        assert "first recovery route" in ctx
+
     def test_offline_context_reports_offline_without_fake_identity(self, tmp_path):
         stdout, _ = _run_hook(tmp_path, "http://127.0.0.1:1")
         ctx = json.loads(stdout).get("additional_context", "")
@@ -757,6 +771,9 @@ class TestCompactMode:
         assert "Fresh process-instance, MCP stdio unbound" in ctx
         assert "force_new=true" in ctx  # security regression guard still applies
         assert "/diagnose" in ctx  # operator escape hatch retained
+        assert "next_action" in ctx
+        assert "memory_suggestions" in ctx
+        assert "recovery_hint" in ctx
         # The full-prose marker is gone
         assert "No identity has been created on your behalf" not in ctx
         # Fundamentals excerpt is suppressed in compact mode

@@ -51,6 +51,13 @@ The intended workflow is:
 5. use `identity(agent_uuid=..., continuity_token=..., resume=true)` only for same-owner proof-owned rebinds
 6. call `identity()` and `health_check()` when diagnosis is needed
 
+On servers with the agent-experience envelope enabled, friendly alias responses
+lift `next_action`, `state_summary`, `risk_summary`, `memory_suggestions`, and
+`recovery_hint` when present while preserving the canonical payload under
+`raw_governance`. Older compatibility surfaces may return the canonical payload
+directly. Use `memory_suggestions` as retrieval cues, and prefer
+`recovery_hint` before inventing a recovery path.
+
 The principle is simple: prefer high-signal governance over high-frequency governance. Meaningful check-ins beat noisy check-ins.
 
 ## Commands

@@ -25,10 +25,14 @@ Then call UNITARES using the strongest honest posture for the situation:
 - do not invent a display name unless the user asked for one
 
 `start_session(...)` is the friendly equivalent of `onboard(...)` on servers
-that expose the agent-experience aliases. It takes the same parameters and
-returns the same canonical payload under `raw_governance`, with `agent_uuid`,
-`client_session_id`, `next_action`, and `state_summary` lifted for easier
-agent use. If the alias is unavailable, call `onboard(...)` directly.
+that expose the agent-experience aliases. It takes the same parameters. On
+servers with the envelope enabled, it returns the same canonical payload under
+`raw_governance`, with `agent_uuid`, `client_session_id`, `next_action`,
+`state_summary`, `risk_summary`, `memory_suggestions`, and `recovery_hint`
+lifted when present for easier agent use. Older compatibility surfaces may
+return the canonical payload directly. Treat `memory_suggestions` as retrieval
+prompts and `recovery_hint` as the first recovery route when a response reports
+degraded state. If the alias is unavailable, call `onboard(...)` directly.
 
 Do not use `identity(agent_uuid=<uuid>, ...)` from a fresh process. Bare-UUID resume is an unsigned claim and is hijack-shaped under strict identity mode. Cross-process-instance token resume is also out of posture; the S1-a deprecation path only exists for testing.
 

@@ -27,9 +27,12 @@ UNITARES evaluates agent state with the **EISV** model:
 
 Agents typically start with `start_session(force_new=true)` and continue with
 `sync_state()` as their main check-in loop. These are friendly aliases over
-the canonical `onboard(...)` and `process_agent_update(...)` tools; alias
-responses put `next_action` and compact state fields first while preserving the
-full canonical payload under `raw_governance`.
+the canonical `onboard(...)` and `process_agent_update(...)` tools. On servers
+with the agent-experience envelope enabled, alias responses put `next_action`,
+`state_summary`, `risk_summary`, `memory_suggestions`, and `recovery_hint`
+first when present while preserving the full canonical payload under
+`raw_governance`. Older compatibility surfaces may return the canonical payload
+directly.
 
 ## Session Continuity
 
