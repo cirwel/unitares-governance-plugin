@@ -230,7 +230,38 @@ PY
   fi
 fi
 
-if [[ -n "${WORKSPACE_CACHE}" && -f "${WORKSPACE_CACHE}" ]]; then
+# ---------------------------------------------------------------------------
+# Orchestrator-provisioned lineage (spawn-context env) — highest confidence.
+#
+# The BEAM agent orchestrator (unitares PR #648) provisions
+# UNITARES_PARENT_AGENT_ID / UNITARES_SPAWN_REASON into the env of agents it
+# spawns. Unlike the slot-file and scan-newest sources below, this is ground
+# truth from the process that created THIS process-instance — not an
+# inference from workspace files — so it outranks both. Same posture as
+# those sources: a lineage CANDIDATE declared via parent_agent_id, never a
+# resume credential; the agent decides whether to declare it.
+#
+# Both values are shape-checked before they can appear inside the suggested
+# tool-call template: a polluted env var must not become a copy-pasteable
+# false-ancestry suggestion (UUID) or break out of the quoted template
+# (spawn reason).
+# ---------------------------------------------------------------------------
+ENV_PARENT_UUID="${UNITARES_PARENT_AGENT_ID:-}"
+if [[ -n "${ENV_PARENT_UUID}" ]]; then
+  if [[ "${ENV_PARENT_UUID}" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
+    ENV_SPAWN_REASON="${UNITARES_SPAWN_REASON:-subagent}"
+    if [[ ! "${ENV_SPAWN_REASON}" =~ ^[A-Za-z0-9_-]{1,64}$ ]]; then
+      ENV_SPAWN_REASON="subagent"
+    fi
+    WORKSPACE_LINEAGE_HINT="Orchestrator-provisioned lineage candidate (spawn-context env). The process that spawned this instance set \`UNITARES_PARENT_AGENT_ID\` — ground truth from the spawner, not an inference from workspace files. Spawn reason: ${ENV_SPAWN_REASON}.
+
+Under the identity ontology, a fresh process-instance declares lineage rather than resuming identity. To record the inheritance chain, include in the start_session/onboard call below:
+    start_session(force_new=true, parent_agent_id=\"${ENV_PARENT_UUID}\", spawn_reason=\"${ENV_SPAWN_REASON}\")
+This is a candidate, not an obligation — if it does not match how this process came to exist, omit \`parent_agent_id\` and onboard fresh. Memory, KG notes, and self-knowledge persist across instances; governance-identity does not."
+  fi
+fi
+
+if [[ -z "${WORKSPACE_LINEAGE_HINT}" && -n "${WORKSPACE_CACHE}" && -f "${WORKSPACE_CACHE}" ]]; then
   WORKSPACE_LINEAGE_HINT=$(python3 - "${WORKSPACE_CACHE}" <<'PY' 2>/dev/null || true
 import json, sys
 from pathlib import Path
