@@ -47,6 +47,8 @@ After the call:
 - report the verdict
 - report identity-assurance or continuity warnings when they are surfaced
 - report margin or edge warnings when present
+- report `memory_suggestions` when present and relevant to the next step
+- report `recovery_hint` when present before proposing an invented recovery path
 - report any guidance briefly
 - report the mirror question when present
 - if verdict is `pause` or `reject`, recommend `dialectic(action="request")`

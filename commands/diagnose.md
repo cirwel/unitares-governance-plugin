@@ -40,6 +40,7 @@ Display:
 - coherence
 - risk score
 - verdict
+- `next_action`, `memory_suggestions`, and `recovery_hint` when present
 - summary or mode/basin if available
 - behavioral vs ODE authority when it is obvious in the response
 

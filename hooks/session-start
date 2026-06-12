@@ -474,6 +474,7 @@ else
     # operator escape hatch — drop everything else.
     CONTEXT="UNITARES Governance: ONLINE
 Fresh process-instance, MCP stdio unbound. Start with \`start_session(force_new=true)\` (\`onboard(...)\` is the canonical equivalent; declare \`parent_agent_id\` if continuing prior workspace work — see lineage hint below).
+· After binding, read \`next_action\`, \`memory_suggestions\`, and \`recovery_hint\` when present.
 · Recovery: run /diagnose."
   else
     CONTEXT="UNITARES Governance: ONLINE
@@ -494,6 +495,13 @@ the default posture; lineage, when applicable, is declared via
 
 The post-identity hook records UUID locally so follow-up tool calls
 (/checkin, auto-checkin on edits) can find your session.
+
+After the first governance call, read the agent-experience fields in the
+response: \`next_action\`, \`state_summary\`, \`risk_summary\`,
+\`memory_suggestions\`, and \`recovery_hint\` when present. Treat
+\`memory_suggestions\` as optional retrieval prompts and
+\`recovery_hint\` as the first recovery route when a tool reports degraded
+or paused state.
 
 If you need to recover a specific prior identity by UUID, that is an
 operator action — run /diagnose for guided recovery rather than guessing

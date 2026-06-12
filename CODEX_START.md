@@ -37,8 +37,13 @@ If you are not using commands directly, the equivalent raw tool flow is:
 6. `identity()` if continuity looks wrong
 7. `health_check()` if the system itself may be part of the problem
 
-The friendly aliases return an agent-experience envelope with `next_action`,
-`state_summary`, and the full canonical payload under `raw_governance`. If a
+On servers with the agent-experience envelope enabled, friendly aliases lift
+`next_action`, `state_summary`, `risk_summary`, `memory_suggestions`, and
+`recovery_hint` when present, plus the full canonical payload under
+`raw_governance`. Treat `memory_suggestions` as optional retrieval prompts and
+`recovery_hint` as the first recovery route when a response reports degraded or
+paused state. Older compatibility surfaces may return the canonical payload
+directly; in that case read the same fields where they already appear. If a
 server does not know these aliases yet, use the canonical tool names shown in
 parentheses.
 
