@@ -182,6 +182,86 @@ class TestSubagentOnboardGuard:
         assert _run_hook(hook_input, tmp_path).returncode == 0
         assert _read_session_cache(tmp_path, "fresh-slot") == {}
 
+    def test_subagent_identity_call_does_not_capture_driver_cache(self, tmp_path):
+        # identity() carries client_session_id, not spawn_reason — the
+        # spawn_reason guard can't see it. Observed live 2026-06-12: a
+        # council verifier's late identity() re-captured the driver's slot
+        # cache minutes after the onboard guard shipped. Resume-shaped tools
+        # only write when the response UUID matches the cached one.
+        slot = "driver-slot-2"
+        driver = {
+            "session_id": slot,
+            "tool_name": "mcp__unitares-governance__onboard",
+            "tool_input": {"force_new": True, "spawn_reason": "new_session"},
+            "tool_response": _mcp_response(uuid="u-driver-2", sid="agent-driver2"),
+        }
+        assert _run_hook(driver, tmp_path).returncode == 0
+
+        subagent_identity = {
+            "session_id": slot,
+            "tool_name": "mcp__unitares-governance__identity",
+            "tool_input": {"client_session_id": "agent-council2"},
+            "tool_response": _mcp_response(uuid="u-council-9", sid="agent-council2"),
+        }
+        assert _run_hook(subagent_identity, tmp_path).returncode == 0
+
+        cache = _read_session_cache(tmp_path, slot)
+        assert cache["uuid"] == "u-driver-2", "resume-shaped mismatch must not capture"
+        assert cache["client_session_id"] == "agent-driver2"
+
+    def test_driver_rebind_same_uuid_still_writes(self, tmp_path):
+        # The legitimate recovery path: identity(agent_uuid=<own>, resume)
+        # after a server restart refreshes the cached client_session_id.
+        slot = "driver-slot-3"
+        driver = {
+            "session_id": slot,
+            "tool_name": "mcp__unitares-governance__onboard",
+            "tool_input": {"force_new": True},
+            "tool_response": _mcp_response(uuid="u-driver-3", sid="agent-old"),
+        }
+        assert _run_hook(driver, tmp_path).returncode == 0
+
+        rebind = {
+            "session_id": slot,
+            "tool_name": "mcp__unitares-governance__identity",
+            "tool_input": {"agent_uuid": "u-driver-3", "resume": True},
+            "tool_response": _mcp_response(uuid="u-driver-3", sid="agent-new"),
+        }
+        assert _run_hook(rebind, tmp_path).returncode == 0
+        cache = _read_session_cache(tmp_path, slot)
+        assert cache["uuid"] == "u-driver-3"
+        assert cache["client_session_id"] == "agent-new"
+
+    def test_identity_call_seeds_empty_cache(self, tmp_path):
+        # First governance call in a fresh session may be identity() —
+        # an empty cache accepts the bind.
+        hook_input = {
+            "session_id": "fresh-slot-2",
+            "tool_name": "mcp__unitares-governance__identity",
+            "tool_input": {"agent_uuid": "u-fresh-9", "resume": True},
+            "tool_response": _mcp_response(uuid="u-fresh-9"),
+        }
+        assert _run_hook(hook_input, tmp_path).returncode == 0
+        assert _read_session_cache(tmp_path, "fresh-slot-2")["uuid"] == "u-fresh-9"
+
+    def test_bind_session_mismatch_skipped(self, tmp_path):
+        slot = "driver-slot-4"
+        driver = {
+            "session_id": slot,
+            "tool_name": "mcp__unitares-governance__onboard",
+            "tool_input": {"force_new": True},
+            "tool_response": _mcp_response(uuid="u-driver-4"),
+        }
+        assert _run_hook(driver, tmp_path).returncode == 0
+        bind = {
+            "session_id": slot,
+            "tool_name": "mcp__unitares-governance__bind_session",
+            "tool_input": {"agent_uuid": "u-other-1"},
+            "tool_response": _mcp_response(uuid="u-other-1"),
+        }
+        assert _run_hook(bind, tmp_path).returncode == 0
+        assert _read_session_cache(tmp_path, slot)["uuid"] == "u-driver-4"
+
     def test_non_subagent_spawn_reasons_still_write(self, tmp_path):
         for reason in ("new_session", "compaction", "explicit", ""):
             slot = f"slot-{reason or 'none'}"
