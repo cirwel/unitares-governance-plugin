@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# UNITARES Governance Plugin — PreToolUse hook (governance MCP calls)
+#
+# Injects the slot-cached client_session_id into governance tool calls that
+# carry no identity arguments, so driver calls resolve at tier=strong instead
+# of through the displaceable IP:UA onboard pin. All policy lives in
+# scripts/governance_call_inject.py (suffix allowlist, minting-tool
+# exclusion, proof-field skip, fail-open). Never blocks, never decides
+# permissions — emits updatedInput only.
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PLUGIN_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+HOOK_INPUT=""
+if [[ ! -t 0 ]]; then
+  HOOK_INPUT=$(cat 2>/dev/null) || true
+fi
+[[ -z "${HOOK_INPUT}" ]] && exit 0
+
+HELPER="${PLUGIN_ROOT}/scripts/governance_call_inject.py"
+[[ -f "${HELPER}" ]] || exit 0
+
+printf '%s' "${HOOK_INPUT}" | python3 "${HELPER}" 2>/dev/null || true
+exit 0

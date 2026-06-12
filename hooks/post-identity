@@ -57,7 +57,7 @@ fi
 # Extract session_id (slot), tool_name, and the response payload that matters.
 # MCP tool responses arrive wrapped as {"content": [{"type":"text","text":"<JSON>"}]}.
 # The inner JSON contains uuid, agent_id, client_session_id, continuity_token,
-# display_name. We only record for the three identity-creating/resuming tools.
+# display_name. We only record for the four identity-creating/resuming tools.
 # HOOK_INPUT goes via argv[1] rather than stdin because the heredoc below
 # redirects stdin from itself — piping into `python3 - <<'PY'` would be lost.
 EXTRACTED=$(python3 - "${HOOK_INPUT}" <<'PY' 2>/dev/null || true
@@ -77,11 +77,26 @@ except Exception:
     _skip("hook_input_not_json")
 
 tool_name = (data.get("tool_name") or "").lower()
-# Match mcp__<server>__(onboard|identity|bind_session)
-_id_tools = ("onboard", "identity", "bind_session")
+# Match mcp__<server>__(onboard|start_session|identity|bind_session).
+# start_session is the friendly-workflow alias for onboard — without it,
+# alias-onboarded sessions never write the slot cache and run dark.
+_id_tools = ("onboard", "start_session", "identity", "bind_session")
 suffix = tool_name.rsplit("__", 1)[-1] if "__" in tool_name else tool_name
 if suffix not in _id_tools:
     _skip(f"tool_name_mismatch:{tool_name or 'empty'}")
+
+# Client-side mirror of server PR #604 (subagent onboard pins write SET-NX):
+# subagent tool calls fire this hook under the DRIVER's session_id, so a
+# council member's onboard would overwrite the driver's slot cache — every
+# later auto-checkin then runs as the subagent, and the next session's
+# session-start banner offers the subagent UUID as a lineage candidate
+# (observed live 2026-06-12: slot 155d00fa cached council-refire-verify).
+# Explicit-only, matching #604: dispatched subagents declare
+# spawn_reason="subagent"; inference would mislabel succession onboards.
+_tool_input = data.get("tool_input")
+if isinstance(_tool_input, dict):
+    if str(_tool_input.get("spawn_reason") or "").strip().lower() == "subagent":
+        _skip("subagent_onboard_not_cached")
 
 session_id = data.get("session_id") or ""
 
