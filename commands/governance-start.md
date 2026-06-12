@@ -24,6 +24,12 @@ Then call UNITARES using the strongest honest posture for the situation:
 - include `model_type` when the current runtime is clear from context
 - do not invent a display name unless the user asked for one
 
+`start_session(...)` is the friendly equivalent of `onboard(...)` on servers
+that expose the agent-experience aliases. It takes the same parameters and
+returns the same canonical payload under `raw_governance`, with `agent_uuid`,
+`client_session_id`, `next_action`, and `state_summary` lifted for easier
+agent use. If the alias is unavailable, call `onboard(...)` directly.
+
 Do not use `identity(agent_uuid=<uuid>, ...)` from a fresh process. Bare-UUID resume is an unsigned claim and is hijack-shaped under strict identity mode. Cross-process-instance token resume is also out of posture; the S1-a deprecation path only exists for testing.
 
 After a successful response:

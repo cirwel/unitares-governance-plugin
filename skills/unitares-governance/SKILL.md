@@ -25,14 +25,19 @@ UNITARES evaluates agent state with the **EISV** model:
 - `S`: entropy / disorder / instability
 - `V`: void pressure / collapse tendency
 
-Agents typically start with `onboard(force_new=true)` and continue with
-`process_agent_update()` as their main check-in loop.
+Agents typically start with `start_session(force_new=true)` and continue with
+`sync_state()` as their main check-in loop. These are friendly aliases over
+the canonical `onboard(...)` and `process_agent_update(...)` tools; alias
+responses put `next_action` and compact state fields first while preserving the
+full canonical payload under `raw_governance`.
 
 ## Session Continuity
 
-Use `onboard(force_new=true)` to register a fresh process identity. If
+Use `start_session(force_new=true)` to register a fresh process identity. If
 the process is continuing prior work, declare that with
 `parent_agent_id=<prior uuid>` and `spawn_reason="new_session"`.
+Use `onboard(...)` instead when targeting older servers or when a raw canonical
+response shape is required.
 
 For continuing prior work in a fresh process, the v2 posture is lineage
 declaration via `parent_agent_id` (above), not UUID rebind.
@@ -52,8 +57,9 @@ retired and return `status=continuity_token_resume_rejected`. Pass
 `identity(agent_uuid=<uuid>)` without a matching token remains the
 canonical hijack pattern and is strict-mode rejected.
 
-Use `process_agent_update()` after meaningful work to record progress,
+Use `sync_state()` after meaningful work to record progress,
 complexity, and confidence, then read the returned governance verdict.
+Use `process_agent_update(...)` as the canonical/raw equivalent.
 The response includes an `identity_assurance` block (`tier`, `score`,
 `session_source`, `reason`) — check it after check-in to confirm strong
 continuity, especially when calling with `require_strong_identity=true`.

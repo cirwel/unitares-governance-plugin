@@ -6,7 +6,7 @@ the agent's behalf AND does NOT surface other instances' UUIDs as a
 resume menu. It only:
 
   1. Confirms governance is reachable.
-  2. Suggests onboard(force_new=true) — fresh identity by default.
+  2. Suggests start_session(force_new=true) with onboard(...) as canonical fallback.
   3. If THIS workspace has slot-scoped continuity state, surfaces a lineage
      candidate for parent_agent_id, not a resume credential.
   4. Never enumerates ~/.unitares/session-*.json — those are other instances'
@@ -183,15 +183,16 @@ class TestSessionStartMakesNoToolCalls:
 class TestSessionStartContext:
     """Context wording teaches the agent how to bind its own identity."""
 
-    def test_online_context_offers_fresh_onboard(self, tmp_path):
+    def test_online_context_offers_fresh_start_session_with_onboard_fallback(self, tmp_path):
         stdout, _ = _serve_and_run(tmp_path)
         ctx = json.loads(stdout).get("additional_context", "")
         assert "UNITARES Governance: ONLINE" in ctx
         assert "No identity has been created on your behalf" in ctx
+        assert "start_session(" in ctx
         assert "onboard(" in ctx
 
     def test_online_context_instructs_force_new_on_fresh_onboard(self, tmp_path):
-        """Regression guard: a bare `onboard()` suggestion lets the server
+        """Regression guard: a bare `onboard()` / `start_session()` suggestion lets the server
         pin-resume a prior agent's UUID by IP:UA fingerprint alone on shared
         hosts (PATH 2 bleed — server emits `identity_hijack_suspected` with
         path='path2_ipua_pin'). The default fresh-mint suggestion must pass

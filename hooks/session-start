@@ -260,8 +260,8 @@ print(
     header + "\n\nUnder the identity ontology "
  ", a fresh process-instance "
     "declares lineage rather than resuming identity. To record the "
-    "inheritance chain, include in the onboard call below:\n"
-    f"    parent_agent_id=\"{uuid}\", spawn_reason=\"new_session\"\n"
+    "inheritance chain, include in the start_session/onboard call below:\n"
+    f"    start_session(force_new=true, parent_agent_id=\"{uuid}\", spawn_reason=\"new_session\")\n"
     "Memory, KG notes, and self-knowledge persist across instances; "
     "governance-identity does not."
 )
@@ -405,8 +405,8 @@ print(
  ", a fresh process-instance "
     "declares lineage rather than resuming identity. If — and only if — "
     "you are continuing that prior process's work, include in the "
-    "onboard call below:\n"
-    f"    parent_agent_id=\"{uuid}\", spawn_reason=\"new_session\"\n"
+    "start_session/onboard call below:\n"
+    f"    start_session(force_new=true, parent_agent_id=\"{uuid}\", spawn_reason=\"new_session\")\n"
     "Otherwise omit `parent_agent_id` and onboard fresh — false "
     "ancestry claims pollute the governance lineage DAG. Memory, KG "
     "notes, and self-knowledge persist across instances; "
@@ -442,13 +442,17 @@ else
     # the ontology pointer (so a forgetful agent can re-read), and the
     # operator escape hatch — drop everything else.
     CONTEXT="UNITARES Governance: ONLINE
-Fresh process-instance, MCP stdio unbound. Onboard with \`force_new=true\` (declare \`parent_agent_id\` if continuing prior workspace work — see lineage hint below).
+Fresh process-instance, MCP stdio unbound. Start with \`start_session(force_new=true)\` (\`onboard(...)\` is the canonical equivalent; declare \`parent_agent_id\` if continuing prior workspace work — see lineage hint below).
 · Recovery: run /diagnose."
   else
     CONTEXT="UNITARES Governance: ONLINE
 
 No identity has been created on your behalf. Your MCP stdio transport is
 unbound. As your first governance tool call, invoke:
+
+    start_session(force_new=true)
+
+Canonical/raw equivalent for older servers:
 
     onboard(force_new=true)
 

@@ -29,13 +29,18 @@ This plugin currently optimizes for `explicit`.
 
 If you are not using commands directly, the equivalent raw tool flow is:
 
-1. First run or fresh process: `onboard(force_new=true)`
-2. Fresh process continuing prior work: `onboard(force_new=true, parent_agent_id=<saved uuid>, spawn_reason="new_session")`
-3. `process_agent_update()` after meaningful work
+1. First run or fresh process: `start_session(force_new=true)` (`onboard(...)` is the canonical equivalent)
+2. Fresh process continuing prior work: `start_session(force_new=true, parent_agent_id=<saved uuid>, spawn_reason="new_session")`
+3. `sync_state()` after meaningful work (`process_agent_update(...)` is the canonical equivalent)
 4. Same live owner / proof-owned rebind only: `identity(agent_uuid=..., continuity_token=..., resume=true)`
-5. `get_governance_metrics()` for read-only state checks
+5. `check_working_state()` for read-only state checks (`get_governance_metrics(...)` is the canonical equivalent)
 6. `identity()` if continuity looks wrong
 7. `health_check()` if the system itself may be part of the problem
+
+The friendly aliases return an agent-experience envelope with `next_action`,
+`state_summary`, and the full canonical payload under `raw_governance`. If a
+server does not know these aliases yet, use the canonical tool names shown in
+parentheses.
 
 ## Local Continuity Cache
 

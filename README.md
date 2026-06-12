@@ -44,9 +44,9 @@ That path is now the preferred default. Claude hook automation remains supported
 
 The intended workflow is:
 
-1. `onboard(force_new=true)` to mint a fresh process identity
+1. `start_session(force_new=true)` to mint a fresh process identity (`onboard(...)` is the canonical equivalent)
 2. if continuing prior work, pass `parent_agent_id=<prior uuid>` and `spawn_reason="new_session"`
-3. call `process_agent_update()` after meaningful work
+3. call `sync_state()` after meaningful work (`process_agent_update(...)` is the canonical equivalent)
 4. call `get_governance_metrics()` for read-only state
 5. use `identity(agent_uuid=..., continuity_token=..., resume=true)` only for same-owner proof-owned rebinds
 6. call `identity()` and `health_check()` when diagnosis is needed
@@ -147,10 +147,10 @@ This repo should not:
 
 ## Check-In Triggers
 
-The Claude adapter emits `process_agent_update` calls at three trigger points.
+The Claude adapter emits canonical `process_agent_update` calls at three trigger points.
 `session-start` is deliberately read-only: it checks server reachability,
 fetches the governance fundamentals excerpt, and prompts the agent to call
-`onboard(force_new=true)` itself.
+`start_session(force_new=true)` / `onboard(force_new=true)` itself.
 
 | Trigger | Hook script | Frequency | `metadata.event` |
 |---|---|---|---|
