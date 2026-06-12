@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "unitares-governance-plugin"
+version = "0.4.5"
+description = "Governance client plugin and server-side aliases for UNITARES governance-mcp"
+readme = "README.md"
+requires-python = ">=3.12"
+license = {text = "Apache-2.0"}
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[project.entry-points."governance_mcp.plugins"]
+governance = "unitares_governance_plugin:register"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
