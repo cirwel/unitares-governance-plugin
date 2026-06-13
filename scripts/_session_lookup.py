@@ -168,6 +168,10 @@ def _cli() -> int:
     # empty case explicitly; callers using SLOT to scope cache writes must
     # skip the write when SLOT is empty — see hooks/post-edit S20.1a notes.
     print(f'SLOT="{_esc(data.get("slot") or "")}"')
+    # RAW_SLOT is the raw Claude session_id from the hook stdin — present even
+    # when no onboard cache exists. The substrate FLOOR (post-stop, un-onboarded
+    # case) keys on this so a session that never onboarded is still measurable.
+    print(f'RAW_SLOT="{_esc(_extract_slot(payload) or "")}"')
     return 0
 
 
