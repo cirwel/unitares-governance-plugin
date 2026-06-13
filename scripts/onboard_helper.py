@@ -37,6 +37,47 @@ DEFAULT_TIMEOUT = 10.0
 CACHE_DIR = ".unitares"
 CACHE_FILE = "session.json"
 
+# Genesis bootstrap — the name-claim ghost fix referenced in
+# ``_scope_name_by_slot`` below ("seed trajectory at creation so the
+# trajectory_required guard always fires"). A bare onboard creates an identity
+# but no trajectory row; if the session dies before its first real check-in,
+# the agent sits in the fleet as an "uninitialized, 0 updates" ghost (768 such
+# ghosts live on 2026-06-13). Passing ``initial_state`` makes the server write
+# a synthetic ``source='bootstrap'`` state row immediately after identity
+# creation, so the identity is born with a trajectory genesis instead.
+#
+# Bootstrap rows are excluded server-side from calibration, outcome
+# correlation, trust-tier observation counts, and real-check-in counts, so this
+# never inflates the "real" metrics — it only flips a fresh agent from
+# *uninitialized* to *initialized*. The "0 real updates until a genuine
+# check-in" property is preserved by design.
+BOOTSTRAP_RESPONSE_TEXT = "Genesis: identity created via plugin onboard (trajectory seed)."
+BOOTSTRAP_COMPLEXITY = 0.1
+BOOTSTRAP_CONFIDENCE = 0.5
+
+
+def _default_bootstrap_state() -> dict:
+    """Minimal genesis check-in payload for ``onboard(initial_state=...)``.
+
+    Mirrors the canonical check-in fields (``response_text``/``complexity``/
+    ``confidence``) so the server can persist it through the same path as a
+    real ``process_agent_update`` — the server tags the row ``source='bootstrap'``
+    itself, so we deliberately do not set a source key here.
+    """
+    return {
+        "response_text": BOOTSTRAP_RESPONSE_TEXT,
+        "complexity": BOOTSTRAP_COMPLEXITY,
+        "confidence": BOOTSTRAP_CONFIDENCE,
+    }
+
+
+def _bootstrap_enabled() -> bool:
+    """Global kill switch for genesis seeding (``UNITARES_ONBOARD_BOOTSTRAP=0``)."""
+    return (
+        os.environ.get("UNITARES_ONBOARD_BOOTSTRAP", "on").strip().lower()
+        not in ("0", "off", "false", "no")
+    )
+
 
 def _slot_filename(slot: str | None) -> str:
     """Return the cache filename, optionally namespaced by a slot key.
@@ -218,6 +259,8 @@ def run_onboard(
     force_new: bool = False,
     auth_token: str | None = None,
     timeout: float = DEFAULT_TIMEOUT,
+    initial_state: dict | None = None,
+    bootstrap: bool = True,
     post_json: Callable[[str, dict, float, str | None], dict] = _post_json,
     read_cache: Callable[..., dict] = _read_cache,
     write_cache: Callable[..., None] = _write_cache,
@@ -248,6 +291,15 @@ def run_onboard(
     if parent_agent_id:
         arguments["parent_agent_id"] = parent_agent_id
         arguments["spawn_reason"] = "new_session"
+
+    # Seed trajectory genesis (name-claim ghost fix — see BOOTSTRAP_* above).
+    # An explicit ``initial_state`` from the caller always wins; otherwise a
+    # default genesis seed is attached unless bootstrap is disabled (per-call
+    # ``bootstrap=False`` or the ``UNITARES_ONBOARD_BOOTSTRAP=0`` kill switch).
+    if initial_state is None and bootstrap and _bootstrap_enabled():
+        initial_state = _default_bootstrap_state()
+    if initial_state:
+        arguments["initial_state"] = initial_state
 
     raw = post_json(url, {"name": "onboard", "arguments": arguments}, timeout, auth_token)
     parsed = unwrap_tool_response(raw)
@@ -307,6 +359,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--workspace", default=os.getcwd())
     parser.add_argument("--force-new", action="store_true",
                         help="Create a fresh identity without declaring cached lineage")
+    parser.add_argument("--no-bootstrap", action="store_true",
+                        help="Do not seed a trajectory genesis row at onboard. "
+                             "By default the helper attaches a bootstrap "
+                             "initial_state so a short/dark session is not born "
+                             "as an uninitialized, 0-update ghost. The "
+                             "UNITARES_ONBOARD_BOOTSTRAP=0 env var has the same "
+                             "effect globally.")
     parser.add_argument(
         "--slot",
         default=os.environ.get("UNITARES_SESSION_SLOT", ""),
@@ -329,6 +388,7 @@ def main(argv: list[str] | None = None) -> int:
         force_new=args.force_new,
         auth_token=auth_token,
         timeout=args.timeout,
+        bootstrap=not args.no_bootstrap,
     )
     print(json.dumps(result))
     return 0

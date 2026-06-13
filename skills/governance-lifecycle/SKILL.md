@@ -7,7 +7,7 @@ description: >
 license: Apache-2.0
 compatibility: Requires UNITARES governance MCP server (gov.cirwel.org or local http://127.0.0.1:8767/mcp/)
 metadata:
-  unitares.last_verified: "2026-06-11"
+  unitares.last_verified: "2026-06-13"
   unitares.freshness_days: "14"
 ---
 
@@ -44,6 +44,47 @@ onboard(force_new=true, parent_agent_id="<prior-uuid>",     # continuing prior w
 ```
 
 `name=` is cosmetic — passing `name="Same-Agent"` does not re-bind to an existing agent.
+
+### Seed a trajectory at onboard
+
+A bare onboard creates your identity but **no trajectory row**. If your session
+is short or ends before its first real check-in, that identity lingers in the
+fleet as an *uninitialized, 0-update* ghost — indistinguishable from an
+abandoned agent. Avoid this by seeding a trajectory genesis at creation:
+
+```
+start_session(force_new=true, initial_state={
+  "response_text": "Genesis: <one line on what this session is for>",
+  "complexity": 0.1,
+  "confidence": 0.5,
+})
+```
+
+`initial_state` writes a synthetic `source='bootstrap'` state row immediately
+after identity creation. Bootstrap rows seed **trajectory genesis only** — they
+are excluded from calibration, outcome correlation, trust-tier counts, and
+real-check-in counts, so this never inflates your "real" metrics. It only flips
+you from *uninitialized* to *initialized*; your first genuine `sync_state()` is
+still your first real update. (The Claude adapter's `onboard_helper.py` does
+this automatically; set `UNITARES_ONBOARD_BOOTSTRAP=0` to opt out.)
+
+### Subagents and dispatched work
+
+Every `onboard`/`start_session` mints a **new** agent record. A dispatched
+subagent that onboards but never checks in is the dominant source of
+*uninitialized, 0-update* ghosts — the plugin's turn/edit/end check-ins route
+to the **driver's** identity, not the subagent's, so the subagent's record gets
+zero updates by construction.
+
+So, for short-lived dispatched/Task subagents:
+
+- **Prefer not to onboard at all.** Brief, attributable work can run under the
+  driver's existing session — no separate identity, no ghost.
+- **If a subagent genuinely needs its own identity** (long-running, separately
+  governed work), then it must (a) declare `spawn_reason="subagent"` and
+  `parent_agent_id=<driver uuid>`, (b) seed `initial_state` as above, **and**
+  (c) land at least one real `sync_state()` before it exits. An identity that
+  cannot meet (c) should not be minted.
 
 You get back a **UUID** (your identity for this process), a **client_session_id** (within-process transport continuity), and a **continuity_token** (per-process anti-hijack proof, narrowly scoped — see `references/resume-semantics.md` before passing it forward to anything). The response also includes `session_resolution_source`, `continuity_token_supported`, `ownership_proof_version`, and a `deprecations` field when present.
 

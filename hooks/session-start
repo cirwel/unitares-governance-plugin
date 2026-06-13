@@ -493,6 +493,12 @@ process-instances mint fresh governance-identity. \`force_new=true\` is
 the default posture; lineage, when applicable, is declared via
 \`parent_agent_id\` rather than resumed via token.
 
+Seed a trajectory at creation so a short session is not born as an
+uninitialized, 0-update ghost: pass an \`initial_state\` genesis seed, e.g.
+\`start_session(force_new=true, initial_state={\"response_text\": \"Genesis: <purpose>\", \"complexity\": 0.1, \"confidence\": 0.5})\`.
+This is a one-time trajectory anchor, not a check-in — your first real
+\`sync_state()\` is still your first real update.
+
 The post-identity hook records UUID locally so follow-up tool calls
 (/checkin, auto-checkin on edits) can find your session.
 
