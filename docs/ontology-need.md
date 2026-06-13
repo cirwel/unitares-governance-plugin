@@ -78,22 +78,34 @@ idea; do not pre-build the vocabulary.
 
 ## What to do
 
-Split by where the work lives. This repo is the **client adapter**; the
-normalization machinery itself belongs in the `cirwel/unitares` server.
+Split by where the work lives. This repo is the **client adapter**, but it
+already owns a write-time chokepoint — the `pre-governance-call` PreToolUse
+hook that rewrites knowledge-call inputs — so the *formatting* half of the fix
+lands here. The durable, fleet-wide half (reconciling rows already stored, and
+the curated synonym map) still belongs in the `cirwel/unitares` server.
 
-| Fix | Where | When |
+| Fix | Where | Status |
 |---|---|---|
-| Canonical-tag *guidance* — normalize at write time, agreed spellings | this repo, the `knowledge-graph` skill | now |
-| Deterministic `normalize()` on write + a one-time backfill | `cirwel/unitares` server | next |
+| Canonical-tag *guidance* — normalize at write time, agreed spellings | this repo, the `knowledge-graph` skill | done |
+| Deterministic `normalize()` applied to outgoing `tags` at the client hook | this repo, `scripts/tag_normalize.py` + `governance_call_inject.py` | done |
+| Folding `normalize()` into server write + a one-time backfill of existing rows | `cirwel/unitares` server | next |
 | Short hand-curated synonym/alias map folded into the lifecycle pass | `cirwel/unitares` server | with the above |
 | Richer edge types | anywhere | YAGNI — on demonstrated need |
 | Entity resolution; ontology system; ontology agent | nowhere | not building |
+
+The client-side normalizer is formatting-only and fail-open by construction:
+casing, separators, surrounding punctuation, and de-duplication, plus a tiny
+spelling-variant map (`postgresql → postgres`). It deliberately does not strip
+plurals (`metrics → metric` is lossy) or merge semantic synonyms (`auth ↔
+identity`) — those are curation concerns for the server lifecycle pass, not a
+write-time formatter.
 
 ## Bottom line
 
 There is no need for an ontology system and no need for an ontology agent. The
 need that masquerades as "ontology" is tag normalization, and that need is mostly
-**formatting** — a `normalize()` function and a ~20-line synonym table. Build the
-function, write the table, and leave everything grander documented and unbuilt.
-The point, as with the LLM-wiki comparison, is to borrow the narrow useful bit
-and decline the machine.
+**formatting** — a `normalize()` function and a short synonym table. The client
+half of that function now ships here (`scripts/tag_normalize.py`); the server
+half (backfill + curated synonyms) is the only follow-up, and everything grander
+stays documented and unbuilt. The point, as with the LLM-wiki comparison, is to
+borrow the narrow useful bit and decline the machine.
