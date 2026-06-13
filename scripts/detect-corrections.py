@@ -15,7 +15,7 @@ import json
 import re
 import sys
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -92,7 +92,7 @@ def load_history(history_path: Path, since: datetime) -> list[dict]:
                 continue
             ts = entry.get("timestamp", 0)
             if ts > 0:
-                entry_time = datetime.fromtimestamp(ts / 1000)
+                entry_time = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
                 if entry_time >= since:
                     entry["_datetime"] = entry_time
                     entries.append(entry)
@@ -216,7 +216,7 @@ def main():
     args = parser.parse_args()
 
     history_path = Path(args.history) if args.history else Path.home() / ".claude" / "history.jsonl"
-    since = datetime.now() - timedelta(days=args.days)
+    since = datetime.now(timezone.utc) - timedelta(days=args.days)
 
     entries = load_history(history_path, since)
     if not entries:
