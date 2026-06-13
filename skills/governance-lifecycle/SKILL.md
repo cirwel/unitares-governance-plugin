@@ -35,14 +35,13 @@ with the full canonical payload preserved under `raw_governance`.
 
 ## Starting a Session
 
-**Onboard when you have governable work, not reflexively at startup.** UNITARES
-governs *work*, not session creation. An identity that onboards but never lands
-a real check-in is invisible to the engine (it can score nothing without
-updates) and just accumulates in the fleet as dead weight. So the lifecycle is:
-do — or commit to doing — a meaningful unit of work, *then* `start_session()`,
-*then* land a real `sync_state()` as part of that work. A purely read-only,
-trivial, or throwaway session does not need a governed identity at all. Prefer
-one real check-in over an idle identity.
+**Onboard at the start of the session, before other work — then check in as you
+go.** Until you onboard, your MCP transport is unbound and your work is invisible
+to governance: no identity, no trajectory, and the turn/edit/end check-in hooks
+have nothing to attach to, so they stay silent the entire session. A session
+that never onboards is the main source of *uninitialized, 0-update* agents. The
+lifecycle is: `start_session()` first, then land a real `sync_state()` after
+each meaningful unit of work so the identity carries real signal.
 
 Per identity.md v2 ontology, a fresh process-instance is a fresh agent. To continue prior work across processes, **declare lineage** — do not resume via token:
 
