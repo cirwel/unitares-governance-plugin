@@ -93,6 +93,70 @@ class TestInjection:
         assert "permissionDecision" not in payload["hookSpecificOutput"]
 
 
+class TestTagNormalization:
+
+    def test_normalizes_tags_and_injects_identity_together(self, tmp_path):
+        _write_cache(tmp_path)
+        result = _run(_hook_input(
+            "mcp__unitares-governance__knowledge",
+            {"action": "note", "tags": ["Postgres", "DB_Pool", "postgres"]},
+        ), tmp_path)
+        updated = _updated_input(result)
+        assert updated is not None
+        # tags normalized + de-duped
+        assert updated["tags"] == ["postgres", "db-pool"]
+        # identity still injected in the same updatedInput
+        assert updated["client_session_id"] == SID
+        assert updated["action"] == "note"
+
+    def test_normalizes_tags_even_when_identity_injection_skipped(self, tmp_path):
+        # Proof field present => identity injection skipped, but tag
+        # normalization must still happen.
+        _write_cache(tmp_path)
+        result = _run(_hook_input(
+            "mcp__unitares-governance__knowledge",
+            {"action": "search", "tags": ["Postgres"], "agent_id": "some-uuid"},
+        ), tmp_path)
+        updated = _updated_input(result)
+        assert updated is not None
+        assert updated["tags"] == ["postgres"]
+        # explicit proof field preserved, no injected session id
+        assert updated["agent_id"] == "some-uuid"
+        assert "client_session_id" not in updated
+
+    def test_normalizes_tags_with_no_cache(self, tmp_path):
+        # No session cache => no identity injection, but tags still normalize.
+        result = _run(_hook_input(
+            "mcp__unitares-governance__leave_note",
+            {"tags": ["Foo_Bar", "foo-bar"]},
+        ), tmp_path)
+        updated = _updated_input(result)
+        assert updated is not None
+        assert updated["tags"] == ["foo-bar"]
+
+    def test_already_canonical_tags_no_output_without_injection(self, tmp_path):
+        # Canonical tags + a proof field => nothing to change => empty output.
+        _write_cache(tmp_path)
+        result = _run(_hook_input(
+            "mcp__unitares-governance__knowledge",
+            {"action": "search", "tags": ["postgres"], "agent_id": "u"},
+        ), tmp_path)
+        assert result.stdout.strip() == ""
+
+    def test_tags_untouched_on_non_tag_bearing_tool(self, tmp_path):
+        # process_agent_update is not tag-bearing; a stray tags field is
+        # passed through unchanged (only identity is injected).
+        _write_cache(tmp_path)
+        result = _run(_hook_input(
+            "mcp__unitares-governance__process_agent_update",
+            {"tags": ["Postgres"]},
+        ), tmp_path)
+        updated = _updated_input(result)
+        assert updated is not None
+        assert updated["tags"] == ["Postgres"]  # not normalized
+        assert updated["client_session_id"] == SID
+
+
 class TestExclusions:
 
     def test_never_injects_into_onboard(self, tmp_path):
