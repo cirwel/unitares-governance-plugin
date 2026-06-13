@@ -3,7 +3,7 @@
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Claude Code Plugin](https://img.shields.io/badge/Claude%20Code-plugin-d97757.svg)](https://docs.claude.com/en/docs/claude-code/plugins)
 [![Codex Plugin](https://img.shields.io/badge/Codex-plugin-10a37f.svg)](./CODEX_START.md)
-[![Version](https://img.shields.io/badge/version-0.4.5-blue.svg)](.claude-plugin/plugin.json)
+[![Version](https://img.shields.io/badge/version-0.4.6-blue.svg)](.claude-plugin/plugin.json)
 
 Client and integration layer for **UNITARES** — the runtime telemetry and coordination layer for heterogeneous AI-agent fleets. This repo provides agent-facing skills, commands, and adapters for connecting coding agents (Claude Code, Codex/ChatGPT, others) to a running UNITARES governance server. The runtime itself lives in [`cirwel/unitares`](https://github.com/cirwel/unitares).
 
