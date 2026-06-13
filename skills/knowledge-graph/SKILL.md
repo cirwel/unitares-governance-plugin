@@ -6,7 +6,7 @@ description: >
 license: Apache-2.0
 compatibility: Requires UNITARES governance MCP server (gov.cirwel.org or local http://127.0.0.1:8767/mcp/)
 metadata:
-  unitares.last_verified: "2026-06-11"
+  unitares.last_verified: "2026-06-13"
   unitares.freshness_days: "14"
 ---
 
@@ -127,6 +127,23 @@ Tags are how future agents find your contributions. Be intentional:
 - **Include context**: `postgres`, `eisv`, `dialectic`, `discord-bridge`
 - **Be specific**: `pool-connection-leak` is more useful than `bug`
 - **Be consistent**: Check existing tags before inventing new ones
+
+### Canonical Form
+
+Most tag fragmentation is formatting, not meaning — `Postgres`, `postgres`, and
+`PostgreSQL` are one tag stored three ways, and each variant is a future search
+miss. Normalize before you write:
+
+- **Lowercase** — `postgres`, not `Postgres` or `PostgreSQL`.
+- **Hyphenate** — `pool-connection-leak`, not `pool_connection_leak` or `poolConnectionLeak`.
+- **No surrounding whitespace or trailing punctuation; prefer the singular** — `bug`, not `bugs`.
+- **Prefer the canonical spelling of common entities** — `postgres` (not `postgresql`), `identity` (not `auth`), `performance` (not `perf`).
+
+When unsure, search the tag first (`knowledge(action="search")`) and reuse the
+spelling that already has results rather than minting a variant. The server may
+normalize tags on write, but filing them canonically keeps search sharp
+regardless. See `docs/ontology-need.md` for why this is a normalization problem,
+not an ontology one.
 
 ## Closing the Loop
 
