@@ -473,35 +473,40 @@ else
     # the ontology pointer (so a forgetful agent can re-read), and the
     # operator escape hatch — drop everything else.
     CONTEXT="UNITARES Governance: ONLINE
-Fresh process-instance, MCP stdio unbound. Start with \`start_session(force_new=true)\` (\`onboard(...)\` is the canonical equivalent; declare \`parent_agent_id\` if continuing prior workspace work — see lineage hint below).
+ACTION REQUIRED: onboard now — until you do, this session is invisible to governance (no identity, no trajectory, no check-ins). Call \`start_session(force_new=true)\` (\`onboard(...)\` canonical; declare \`parent_agent_id\` if continuing prior workspace work — see lineage hint below), then \`sync_state(...)\` after meaningful work.
 · After binding, read \`next_action\`, \`memory_suggestions\`, and \`recovery_hint\` when present.
 · Recovery: run /diagnose."
   else
     CONTEXT="UNITARES Governance: ONLINE
 
-No identity has been created on your behalf. Your MCP stdio transport is
-unbound. As your first governance tool call, invoke:
+ACTION REQUIRED — onboard now, as your first governance tool call, before
+other work. No identity has been created on your behalf (identity-honesty:
+the harness will not mint one for you). Until you onboard, your MCP transport
+is unbound and everything you do this session is invisible to governance —
+no identity, no trajectory, no verdicts, no check-ins. A session that never
+onboards is the #1 cause of \"uninitialized, 0-update\" agents.
 
-    start_session(force_new=true)
+    start_session(force_new=true)          # canonical/raw: onboard(force_new=true)
 
-Canonical/raw equivalent for older servers:
+Then check in after meaningful work so your identity carries real signal:
 
-    onboard(force_new=true)
+    sync_state(response_text=..., complexity=..., confidence=...)
 
-Under the identity ontology, fresh
-process-instances mint fresh governance-identity. \`force_new=true\` is
-the default posture; lineage, when applicable, is declared via
-\`parent_agent_id\` rather than resumed via token.
+Under the identity ontology, fresh process-instances mint fresh
+governance-identity. \`force_new=true\` is the default posture; lineage, when
+applicable, is declared via \`parent_agent_id\` (see hint below) rather than
+resumed via token.
 
-The post-identity hook records UUID locally so follow-up tool calls
-(/checkin, auto-checkin on edits) can find your session.
+The post-identity hook records your UUID locally so the turn/edit/end
+check-in hooks can find your session. If you skip onboarding, those hooks
+have nothing to attach to and stay silent the entire session — your work
+goes ungoverned.
 
-After the first governance call, read the agent-experience fields in the
-response: \`next_action\`, \`state_summary\`, \`risk_summary\`,
-\`memory_suggestions\`, and \`recovery_hint\` when present. Treat
-\`memory_suggestions\` as optional retrieval prompts and
-\`recovery_hint\` as the first recovery route when a tool reports degraded
-or paused state.
+After onboarding, read the agent-experience fields in the response:
+\`next_action\`, \`state_summary\`, \`risk_summary\`, \`memory_suggestions\`,
+and \`recovery_hint\` when present. Treat \`memory_suggestions\` as optional
+retrieval prompts and \`recovery_hint\` as the first recovery route when a
+tool reports degraded or paused state.
 
 If you need to recover a specific prior identity by UUID, that is an
 operator action — run /diagnose for guided recovery rather than guessing

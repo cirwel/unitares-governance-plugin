@@ -767,8 +767,9 @@ class TestCompactMode:
         stdout, _ = _serve_and_run(tmp_path, cwd=workspace, claude_session_id=slot)
         ctx = json.loads(stdout).get("additional_context", "")
 
-        # Compact prose markers
-        assert "Fresh process-instance, MCP stdio unbound" in ctx
+        # Compact prose markers: the banner nudges prompt onboarding
+        assert "ACTION REQUIRED" in ctx
+        assert "onboard now" in ctx
         assert "force_new=true" in ctx  # security regression guard still applies
         assert "/diagnose" in ctx  # operator escape hatch retained
         assert "next_action" in ctx

@@ -37,6 +37,49 @@ DEFAULT_TIMEOUT = 10.0
 CACHE_DIR = ".unitares"
 CACHE_FILE = "session.json"
 
+# Genesis bootstrap — an OPTIONAL trajectory anchor (OFF by default).
+#
+# Passing ``initial_state`` makes the server write a synthetic
+# ``source='bootstrap'`` state row immediately after identity creation. This is
+# NOT a fix for the "uninitialized, 0 updates" symptom: bootstrap rows are
+# excluded server-side from calibration, outcome correlation, trust-tier
+# observation counts, and **real-check-in counts**, so an agent with only a
+# genesis row still reads as uninitialized / 0 real updates. Only a genuine
+# ``process_agent_update`` (``sync_state``) clears that — see the lazy-onboard
+# guidance in skills/governance-lifecycle and the session-start hook.
+#
+# The seed's sole benefit is giving the agent's FIRST real check-in a baseline,
+# so it registers as a trajectory *delta* instead of a lone point. That is a
+# minor nicety, so it is opt-in: per-call ``bootstrap=True`` / ``--bootstrap``,
+# or globally via ``UNITARES_ONBOARD_BOOTSTRAP=1``. An explicit caller-supplied
+# ``initial_state`` is always honored regardless of the flag.
+BOOTSTRAP_RESPONSE_TEXT = "Genesis: identity created via plugin onboard (trajectory seed)."
+BOOTSTRAP_COMPLEXITY = 0.1
+BOOTSTRAP_CONFIDENCE = 0.5
+
+
+def _default_bootstrap_state() -> dict:
+    """Minimal genesis check-in payload for ``onboard(initial_state=...)``.
+
+    Mirrors the canonical check-in fields (``response_text``/``complexity``/
+    ``confidence``) so the server can persist it through the same path as a
+    real ``process_agent_update`` — the server tags the row ``source='bootstrap'``
+    itself, so we deliberately do not set a source key here.
+    """
+    return {
+        "response_text": BOOTSTRAP_RESPONSE_TEXT,
+        "complexity": BOOTSTRAP_COMPLEXITY,
+        "confidence": BOOTSTRAP_CONFIDENCE,
+    }
+
+
+def _bootstrap_enabled() -> bool:
+    """Global opt-in for genesis seeding (``UNITARES_ONBOARD_BOOTSTRAP=1``). Off by default."""
+    return (
+        os.environ.get("UNITARES_ONBOARD_BOOTSTRAP", "off").strip().lower()
+        in ("1", "on", "true", "yes")
+    )
+
 
 def _slot_filename(slot: str | None) -> str:
     """Return the cache filename, optionally namespaced by a slot key.
@@ -218,6 +261,8 @@ def run_onboard(
     force_new: bool = False,
     auth_token: str | None = None,
     timeout: float = DEFAULT_TIMEOUT,
+    initial_state: dict | None = None,
+    bootstrap: bool = False,
     post_json: Callable[[str, dict, float, str | None], dict] = _post_json,
     read_cache: Callable[..., dict] = _read_cache,
     write_cache: Callable[..., None] = _write_cache,
@@ -248,6 +293,16 @@ def run_onboard(
     if parent_agent_id:
         arguments["parent_agent_id"] = parent_agent_id
         arguments["spawn_reason"] = "new_session"
+
+    # Optional genesis anchor (OFF by default — see BOOTSTRAP_* above; it is
+    # NOT a fix for the "uninitialized" symptom). An explicit caller-supplied
+    # ``initial_state`` always wins; otherwise a default seed is attached only
+    # when opted in per-call (``bootstrap=True``) or globally
+    # (``UNITARES_ONBOARD_BOOTSTRAP=1``).
+    if initial_state is None and (bootstrap or _bootstrap_enabled()):
+        initial_state = _default_bootstrap_state()
+    if initial_state:
+        arguments["initial_state"] = initial_state
 
     raw = post_json(url, {"name": "onboard", "arguments": arguments}, timeout, auth_token)
     parsed = unwrap_tool_response(raw)
@@ -307,6 +362,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--workspace", default=os.getcwd())
     parser.add_argument("--force-new", action="store_true",
                         help="Create a fresh identity without declaring cached lineage")
+    parser.add_argument("--bootstrap", action="store_true",
+                        help="Attach an optional trajectory genesis seed "
+                             "(initial_state) at onboard. OFF by default. This "
+                             "does NOT clear an 'uninitialized / 0 real updates' "
+                             "status — bootstrap rows are excluded from "
+                             "real-check-in counts; only a real sync_state does. "
+                             "Its only benefit is giving the first real check-in "
+                             "a trajectory baseline. UNITARES_ONBOARD_BOOTSTRAP=1 "
+                             "enables it globally.")
     parser.add_argument(
         "--slot",
         default=os.environ.get("UNITARES_SESSION_SLOT", ""),
@@ -329,6 +393,7 @@ def main(argv: list[str] | None = None) -> int:
         force_new=args.force_new,
         auth_token=auth_token,
         timeout=args.timeout,
+        bootstrap=args.bootstrap,
     )
     print(json.dumps(result))
     return 0

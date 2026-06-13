@@ -7,7 +7,7 @@ description: >
 license: Apache-2.0
 compatibility: Requires UNITARES governance MCP server (gov.cirwel.org or local http://127.0.0.1:8767/mcp/)
 metadata:
-  unitares.last_verified: "2026-06-11"
+  unitares.last_verified: "2026-06-13"
   unitares.freshness_days: "14"
 ---
 
@@ -35,6 +35,14 @@ with the full canonical payload preserved under `raw_governance`.
 
 ## Starting a Session
 
+**Onboard at the start of the session, before other work — then check in as you
+go.** Until you onboard, your MCP transport is unbound and your work is invisible
+to governance: no identity, no trajectory, and the turn/edit/end check-in hooks
+have nothing to attach to, so they stay silent the entire session. A session
+that never onboards is the main source of *uninitialized, 0-update* agents. The
+lifecycle is: `start_session()` first, then land a real `sync_state()` after
+each meaningful unit of work so the identity carries real signal.
+
 Per identity.md v2 ontology, a fresh process-instance is a fresh agent. To continue prior work across processes, **declare lineage** — do not resume via token:
 
 ```
@@ -44,6 +52,52 @@ onboard(force_new=true, parent_agent_id="<prior-uuid>",     # continuing prior w
 ```
 
 `name=` is cosmetic — passing `name="Same-Agent"` does not re-bind to an existing agent.
+
+### Optional: seed a trajectory anchor at onboard
+
+> This is a minor nicety, **not** a fix for showing up as "uninitialized." An
+> agent reads as uninitialized / 0 updates until it lands a **real** check-in;
+> a genesis seed does not change that (see below). The real lever is the
+> lazy-onboard + real-`sync_state()` lifecycle above.
+
+Once you *have* decided to onboard, you may pass an `initial_state` genesis seed
+so that your first real `sync_state()` immediately produces a trajectory *delta*
+instead of a lone point:
+
+```
+start_session(force_new=true, initial_state={
+  "response_text": "Genesis: <one line on what this session is for>",
+  "complexity": 0.1,
+  "confidence": 0.5,
+})
+```
+
+`initial_state` writes a synthetic `source='bootstrap'` state row immediately
+after identity creation. Bootstrap rows seed **trajectory genesis only** — they
+are excluded from calibration, outcome correlation, trust-tier counts, and
+**real-check-in counts**. So the seed does **not** clear an "uninitialized / 0
+real updates" status — only a genuine `sync_state()` does. Its sole benefit is
+the trajectory baseline. (In the Claude adapter, `onboard_helper.py` leaves this
+off by default; enable with `--bootstrap` or `UNITARES_ONBOARD_BOOTSTRAP=1`.)
+
+### Subagents and dispatched work
+
+Every `onboard`/`start_session` mints a **new** agent record. A dispatched
+subagent that onboards but never checks in is the dominant source of
+*uninitialized, 0-update* ghosts — the plugin's turn/edit/end check-ins route
+to the **driver's** identity, not the subagent's, so the subagent's record gets
+zero updates by construction.
+
+So, for short-lived dispatched/Task subagents:
+
+- **Prefer not to onboard at all.** Brief, attributable work can run under the
+  driver's existing session — no separate identity, no ghost.
+- **If a subagent genuinely needs its own identity** (long-running, separately
+  governed work), then it must (a) declare `spawn_reason="subagent"` and
+  `parent_agent_id=<driver uuid>`, **and** (b) land at least one real
+  `sync_state()` before it exits (optionally seeding `initial_state` as above
+  to anchor it). An identity that
+  cannot meet (c) should not be minted.
 
 You get back a **UUID** (your identity for this process), a **client_session_id** (within-process transport continuity), and a **continuity_token** (per-process anti-hijack proof, narrowly scoped — see `references/resume-semantics.md` before passing it forward to anything). The response also includes `session_resolution_source`, `continuity_token_supported`, `ownership_proof_version`, and a `deprecations` field when present.
 
