@@ -2,7 +2,7 @@
 """Output a freshness warning if a skill's last_verified is stale. Used by session-start hook."""
 
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 
 import yaml
 
@@ -31,9 +31,9 @@ freshness_days_raw = meta.get("unitares.freshness_days")
 if not last_verified_raw or not freshness_days_raw:
     sys.exit(0)
 
-verified = datetime.strptime(str(last_verified_raw), "%Y-%m-%d")
+verified = datetime.strptime(str(last_verified_raw), "%Y-%m-%d").replace(tzinfo=timezone.utc)
 max_days = int(freshness_days_raw)
-age = (datetime.now() - verified).days
+age = (datetime.now(timezone.utc) - verified).days
 
 if age > max_days:
     print(

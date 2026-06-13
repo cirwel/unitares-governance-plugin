@@ -3,7 +3,7 @@
 
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
@@ -67,10 +67,15 @@ def check_skills(plugin_root: str, projects_root: str) -> int:
             print(f"  [{YELLOW}-{NC}] {skill_name}: no freshness metadata")
             continue
 
-        verified_date = datetime.strptime(meta["last_verified"], "%Y-%m-%d").replace(hour=23, minute=59, second=59)
+        # Anchor everything to UTC so a CI runner (UTC) and a local machine
+        # (e.g. Mountain Time) agree about day boundaries — otherwise the same
+        # source mtime can read FRESH locally but STALE in CI near midnight.
+        verified_date = datetime.strptime(meta["last_verified"], "%Y-%m-%d").replace(
+            hour=23, minute=59, second=59, tzinfo=timezone.utc
+        )
         max_days = meta["freshness_days"]
-        verified_date_start = datetime.strptime(meta["last_verified"], "%Y-%m-%d")
-        age_days = (datetime.now() - verified_date_start).days
+        verified_date_start = datetime.strptime(meta["last_verified"], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        age_days = (datetime.now(timezone.utc) - verified_date_start).days
 
         source_files = load_source_files(skill_dir)
         source_modified = False
@@ -78,7 +83,7 @@ def check_skills(plugin_root: str, projects_root: str) -> int:
         for src in source_files:
             full_path = Path(projects_root) / src
             if full_path.exists():
-                mtime = datetime.fromtimestamp(os.path.getmtime(full_path))
+                mtime = datetime.fromtimestamp(os.path.getmtime(full_path), tz=timezone.utc)
                 if mtime > verified_date:
                     source_modified = True
                     modified_file = f"{src} (modified {mtime.strftime('%Y-%m-%d')})"
