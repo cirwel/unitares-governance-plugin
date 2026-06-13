@@ -473,36 +473,42 @@ else
     # the ontology pointer (so a forgetful agent can re-read), and the
     # operator escape hatch — drop everything else.
     CONTEXT="UNITARES Governance: ONLINE
-Fresh process-instance, MCP stdio unbound. Start with \`start_session(force_new=true)\` (\`onboard(...)\` is the canonical equivalent; declare \`parent_agent_id\` if continuing prior workspace work — see lineage hint below).
+Fresh process-instance, MCP stdio unbound. Onboard only when you have governable work — then check in. Don't mint an idle identity for a read-only session.
+· When you start real work: \`start_session(force_new=true)\` (\`onboard(...)\` canonical; declare \`parent_agent_id\` if continuing prior workspace work — see lineage hint below), then \`sync_state(...)\` as part of that first unit of work.
 · After binding, read \`next_action\`, \`memory_suggestions\`, and \`recovery_hint\` when present.
 · Recovery: run /diagnose."
   else
     CONTEXT="UNITARES Governance: ONLINE
 
-No identity has been created on your behalf. Your MCP stdio transport is
-unbound. As your first governance tool call, invoke:
+No identity has been created on your behalf — and you do not need one yet.
+UNITARES governs *work*, not session startup. An agent that onboards but
+never lands a real check-in is invisible to the governance engine (it can
+score nothing without updates) and only clutters the fleet. Do NOT onboard
+reflexively at startup.
 
-    start_session(force_new=true)
+Onboard when you are about to do meaningful, governable work — then make
+your identity earn its place with a real check-in:
 
-Canonical/raw equivalent for older servers:
+    start_session(force_new=true)          # canonical/raw: onboard(force_new=true)
+    ... do the first unit of work ...
+    sync_state(response_text=..., complexity=..., confidence=...)
 
-    onboard(force_new=true)
+A purely read-only, trivial, or throwaway session does not need to mint a
+governed identity at all. Prefer one real check-in over an idle identity.
 
-Under the identity ontology, fresh
-process-instances mint fresh governance-identity. \`force_new=true\` is
-the default posture; lineage, when applicable, is declared via
-\`parent_agent_id\` rather than resumed via token.
-
-Seed a trajectory at creation so a short session is not born as an
-uninitialized, 0-update ghost: pass an \`initial_state\` genesis seed, e.g.
-\`start_session(force_new=true, initial_state={\"response_text\": \"Genesis: <purpose>\", \"complexity\": 0.1, \"confidence\": 0.5})\`.
-This is a one-time trajectory anchor, not a check-in — your first real
-\`sync_state()\` is still your first real update.
+Under the identity ontology, fresh process-instances mint fresh
+governance-identity. \`force_new=true\` is the default posture; lineage,
+when applicable, is declared via \`parent_agent_id\` rather than resumed via
+token. When you do onboard, you may pass an \`initial_state\` genesis seed
+(\`{\"response_text\": \"Genesis: <purpose>\", \"complexity\": 0.1, \"confidence\": 0.5}\`)
+to anchor your trajectory so your first real \`sync_state()\` immediately
+produces a trajectory delta — but the seed is an anchor, not a substitute
+for that real check-in.
 
 The post-identity hook records UUID locally so follow-up tool calls
 (/checkin, auto-checkin on edits) can find your session.
 
-After the first governance call, read the agent-experience fields in the
+After your first governance call, read the agent-experience fields in the
 response: \`next_action\`, \`state_summary\`, \`risk_summary\`,
 \`memory_suggestions\`, and \`recovery_hint\` when present. Treat
 \`memory_suggestions\` as optional retrieval prompts and

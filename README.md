@@ -44,9 +44,9 @@ That path is now the preferred default. Claude hook automation remains supported
 
 The intended workflow is:
 
-1. `start_session(force_new=true)` to mint a fresh process identity (`onboard(...)` is the canonical equivalent)
+1. when you have governable work, `start_session(force_new=true)` to mint a fresh process identity (`onboard(...)` is the canonical equivalent) — a purely read-only or throwaway session does not need a governed identity, and an identity that never checks in is invisible to the engine
 2. if continuing prior work, pass `parent_agent_id=<prior uuid>` and `spawn_reason="new_session"`
-3. call `sync_state()` after meaningful work (`process_agent_update(...)` is the canonical equivalent)
+3. land a real `sync_state()` as part of that first unit of work, and after meaningful work thereafter (`process_agent_update(...)` is the canonical equivalent) — onboarding without ever checking in is the main source of uninitialized, 0-update agents
 4. call `get_governance_metrics()` for read-only state
 5. use `identity(agent_uuid=..., continuity_token=..., resume=true)` only for same-owner proof-owned rebinds
 6. call `identity()` and `health_check()` when diagnosis is needed

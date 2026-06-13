@@ -35,6 +35,15 @@ with the full canonical payload preserved under `raw_governance`.
 
 ## Starting a Session
 
+**Onboard when you have governable work, not reflexively at startup.** UNITARES
+governs *work*, not session creation. An identity that onboards but never lands
+a real check-in is invisible to the engine (it can score nothing without
+updates) and just accumulates in the fleet as dead weight. So the lifecycle is:
+do — or commit to doing — a meaningful unit of work, *then* `start_session()`,
+*then* land a real `sync_state()` as part of that work. A purely read-only,
+trivial, or throwaway session does not need a governed identity at all. Prefer
+one real check-in over an idle identity.
+
 Per identity.md v2 ontology, a fresh process-instance is a fresh agent. To continue prior work across processes, **declare lineage** — do not resume via token:
 
 ```
@@ -45,12 +54,12 @@ onboard(force_new=true, parent_agent_id="<prior-uuid>",     # continuing prior w
 
 `name=` is cosmetic — passing `name="Same-Agent"` does not re-bind to an existing agent.
 
-### Seed a trajectory at onboard
+### Seed a trajectory at onboard (anchor, not a substitute for checking in)
 
-A bare onboard creates your identity but **no trajectory row**. If your session
-is short or ends before its first real check-in, that identity lingers in the
-fleet as an *uninitialized, 0-update* ghost — indistinguishable from an
-abandoned agent. Avoid this by seeding a trajectory genesis at creation:
+Once you *have* decided to onboard, a bare onboard still creates your identity
+with **no trajectory row**, so your first real check-in is a lone point the
+engine can't yet turn into a trajectory. Seed a genesis anchor at creation so
+that first real `sync_state()` immediately produces a trajectory *delta*:
 
 ```
 start_session(force_new=true, initial_state={
