@@ -1,6 +1,6 @@
 {
   "name": "unitares-governance",
-  "version": "0.4.5",
+  "version": "0.4.6",
   "description": "Governance client for UNITARES: onboarding, diagnostics, dialectic review, and knowledge graph guidance.",
   "author": {
     "name": "CIRWEL",
