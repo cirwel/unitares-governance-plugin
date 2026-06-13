@@ -54,12 +54,16 @@ onboard(force_new=true, parent_agent_id="<prior-uuid>",     # continuing prior w
 
 `name=` is cosmetic — passing `name="Same-Agent"` does not re-bind to an existing agent.
 
-### Seed a trajectory at onboard (anchor, not a substitute for checking in)
+### Optional: seed a trajectory anchor at onboard
 
-Once you *have* decided to onboard, a bare onboard still creates your identity
-with **no trajectory row**, so your first real check-in is a lone point the
-engine can't yet turn into a trajectory. Seed a genesis anchor at creation so
-that first real `sync_state()` immediately produces a trajectory *delta*:
+> This is a minor nicety, **not** a fix for showing up as "uninitialized." An
+> agent reads as uninitialized / 0 updates until it lands a **real** check-in;
+> a genesis seed does not change that (see below). The real lever is the
+> lazy-onboard + real-`sync_state()` lifecycle above.
+
+Once you *have* decided to onboard, you may pass an `initial_state` genesis seed
+so that your first real `sync_state()` immediately produces a trajectory *delta*
+instead of a lone point:
 
 ```
 start_session(force_new=true, initial_state={
@@ -72,10 +76,10 @@ start_session(force_new=true, initial_state={
 `initial_state` writes a synthetic `source='bootstrap'` state row immediately
 after identity creation. Bootstrap rows seed **trajectory genesis only** — they
 are excluded from calibration, outcome correlation, trust-tier counts, and
-real-check-in counts, so this never inflates your "real" metrics. It only flips
-you from *uninitialized* to *initialized*; your first genuine `sync_state()` is
-still your first real update. (The Claude adapter's `onboard_helper.py` does
-this automatically; set `UNITARES_ONBOARD_BOOTSTRAP=0` to opt out.)
+**real-check-in counts**. So the seed does **not** clear an "uninitialized / 0
+real updates" status — only a genuine `sync_state()` does. Its sole benefit is
+the trajectory baseline. (In the Claude adapter, `onboard_helper.py` leaves this
+off by default; enable with `--bootstrap` or `UNITARES_ONBOARD_BOOTSTRAP=1`.)
 
 ### Subagents and dispatched work
 
@@ -91,8 +95,9 @@ So, for short-lived dispatched/Task subagents:
   driver's existing session — no separate identity, no ghost.
 - **If a subagent genuinely needs its own identity** (long-running, separately
   governed work), then it must (a) declare `spawn_reason="subagent"` and
-  `parent_agent_id=<driver uuid>`, (b) seed `initial_state` as above, **and**
-  (c) land at least one real `sync_state()` before it exits. An identity that
+  `parent_agent_id=<driver uuid>`, **and** (b) land at least one real
+  `sync_state()` before it exits (optionally seeding `initial_state` as above
+  to anchor it). An identity that
   cannot meet (c) should not be minted.
 
 You get back a **UUID** (your identity for this process), a **client_session_id** (within-process transport continuity), and a **continuity_token** (per-process anti-hijack proof, narrowly scoped — see `references/resume-semantics.md` before passing it forward to anything). The response also includes `session_resolution_source`, `continuity_token_supported`, `ownership_proof_version`, and a `deprecations` field when present.

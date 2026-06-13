@@ -364,9 +364,10 @@ def test_force_new_flag_ignores_cached_lineage(tmp_path: Path) -> None:
 # ---- Genesis bootstrap (name-claim ghost fix) ------------------------------
 
 
-def test_onboard_seeds_trajectory_genesis_by_default(tmp_path: Path) -> None:
-    """A bare onboard must attach a bootstrap initial_state so the identity is
-    born with a trajectory row instead of as an uninitialized 0-update ghost."""
+def test_onboard_omits_initial_state_by_default(tmp_path: Path) -> None:
+    """The genesis seed is OPT-IN. A bare onboard must send no initial_state —
+    seeding does not clear an 'uninitialized / 0 real updates' status (bootstrap
+    rows are excluded from real-check-in counts), so it is not the default."""
     transport = _FakeTransport(_onboard_ok_response("aaaa1111-0000-0000-0000-000000000000", "cirwel"))
 
     run_onboard(
@@ -378,18 +379,12 @@ def test_onboard_seeds_trajectory_genesis_by_default(tmp_path: Path) -> None:
         post_json=transport,
     )
 
-    sent_args = transport.calls[0]["payload"]["arguments"]
-    assert "initial_state" in sent_args
-    assert sent_args["initial_state"]["response_text"] == BOOTSTRAP_RESPONSE_TEXT
-    # The seed mirrors the canonical check-in fields and must not pre-tag a
-    # source — the server stamps source='bootstrap' itself.
-    assert set(sent_args["initial_state"]) == {"response_text", "complexity", "confidence"}
-    assert _default_bootstrap_state()["response_text"] == BOOTSTRAP_RESPONSE_TEXT
+    assert "initial_state" not in transport.calls[0]["payload"]["arguments"]
 
 
-def test_onboard_bootstrap_false_omits_initial_state(tmp_path: Path) -> None:
-    """The per-call opt-out (mirrors the --no-bootstrap CLI flag) must send no
-    initial_state at all — for callers that explicitly want a bare identity."""
+def test_onboard_bootstrap_true_attaches_genesis_seed(tmp_path: Path) -> None:
+    """The per-call opt-in (mirrors the --bootstrap CLI flag) attaches the
+    default genesis seed."""
     transport = _FakeTransport(_onboard_ok_response("bbbb2222-0000-0000-0000-000000000000", "cirwel"))
 
     run_onboard(
@@ -398,11 +393,16 @@ def test_onboard_bootstrap_false_omits_initial_state(tmp_path: Path) -> None:
         model_type="claude-code",
         workspace=tmp_path,
         slot=None,
-        bootstrap=False,
+        bootstrap=True,
         post_json=transport,
     )
 
-    assert "initial_state" not in transport.calls[0]["payload"]["arguments"]
+    sent_args = transport.calls[0]["payload"]["arguments"]
+    assert sent_args["initial_state"]["response_text"] == BOOTSTRAP_RESPONSE_TEXT
+    # The seed mirrors the canonical check-in fields and must not pre-tag a
+    # source — the server stamps source='bootstrap' itself.
+    assert set(sent_args["initial_state"]) == {"response_text", "complexity", "confidence"}
+    assert _default_bootstrap_state()["response_text"] == BOOTSTRAP_RESPONSE_TEXT
 
 
 def test_explicit_initial_state_overrides_default_seed(tmp_path: Path) -> None:
@@ -423,9 +423,9 @@ def test_explicit_initial_state_overrides_default_seed(tmp_path: Path) -> None:
     assert transport.calls[0]["payload"]["arguments"]["initial_state"] == custom
 
 
-def test_env_kill_switch_disables_bootstrap(tmp_path: Path, monkeypatch: Any) -> None:
-    """UNITARES_ONBOARD_BOOTSTRAP=0 suppresses the genesis seed globally."""
-    monkeypatch.setenv("UNITARES_ONBOARD_BOOTSTRAP", "0")
+def test_env_opt_in_enables_bootstrap(tmp_path: Path, monkeypatch: Any) -> None:
+    """UNITARES_ONBOARD_BOOTSTRAP=1 enables the (otherwise off) genesis seed globally."""
+    monkeypatch.setenv("UNITARES_ONBOARD_BOOTSTRAP", "1")
     transport = _FakeTransport(_onboard_ok_response("dddd4444-0000-0000-0000-000000000000", "cirwel"))
 
     run_onboard(
@@ -437,7 +437,7 @@ def test_env_kill_switch_disables_bootstrap(tmp_path: Path, monkeypatch: Any) ->
         post_json=transport,
     )
 
-    assert "initial_state" not in transport.calls[0]["payload"]["arguments"]
+    assert "initial_state" in transport.calls[0]["payload"]["arguments"]
 
 
 # ---- Integration: real server, real distinct UUIDs -------------------------

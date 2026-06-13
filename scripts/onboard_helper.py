@@ -37,20 +37,22 @@ DEFAULT_TIMEOUT = 10.0
 CACHE_DIR = ".unitares"
 CACHE_FILE = "session.json"
 
-# Genesis bootstrap — the name-claim ghost fix referenced in
-# ``_scope_name_by_slot`` below ("seed trajectory at creation so the
-# trajectory_required guard always fires"). A bare onboard creates an identity
-# but no trajectory row; if the session dies before its first real check-in,
-# the agent sits in the fleet as an "uninitialized, 0 updates" ghost (768 such
-# ghosts live on 2026-06-13). Passing ``initial_state`` makes the server write
-# a synthetic ``source='bootstrap'`` state row immediately after identity
-# creation, so the identity is born with a trajectory genesis instead.
+# Genesis bootstrap — an OPTIONAL trajectory anchor (OFF by default).
 #
-# Bootstrap rows are excluded server-side from calibration, outcome
-# correlation, trust-tier observation counts, and real-check-in counts, so this
-# never inflates the "real" metrics — it only flips a fresh agent from
-# *uninitialized* to *initialized*. The "0 real updates until a genuine
-# check-in" property is preserved by design.
+# Passing ``initial_state`` makes the server write a synthetic
+# ``source='bootstrap'`` state row immediately after identity creation. This is
+# NOT a fix for the "uninitialized, 0 updates" symptom: bootstrap rows are
+# excluded server-side from calibration, outcome correlation, trust-tier
+# observation counts, and **real-check-in counts**, so an agent with only a
+# genesis row still reads as uninitialized / 0 real updates. Only a genuine
+# ``process_agent_update`` (``sync_state``) clears that — see the lazy-onboard
+# guidance in skills/governance-lifecycle and the session-start hook.
+#
+# The seed's sole benefit is giving the agent's FIRST real check-in a baseline,
+# so it registers as a trajectory *delta* instead of a lone point. That is a
+# minor nicety, so it is opt-in: per-call ``bootstrap=True`` / ``--bootstrap``,
+# or globally via ``UNITARES_ONBOARD_BOOTSTRAP=1``. An explicit caller-supplied
+# ``initial_state`` is always honored regardless of the flag.
 BOOTSTRAP_RESPONSE_TEXT = "Genesis: identity created via plugin onboard (trajectory seed)."
 BOOTSTRAP_COMPLEXITY = 0.1
 BOOTSTRAP_CONFIDENCE = 0.5
@@ -72,10 +74,10 @@ def _default_bootstrap_state() -> dict:
 
 
 def _bootstrap_enabled() -> bool:
-    """Global kill switch for genesis seeding (``UNITARES_ONBOARD_BOOTSTRAP=0``)."""
+    """Global opt-in for genesis seeding (``UNITARES_ONBOARD_BOOTSTRAP=1``). Off by default."""
     return (
-        os.environ.get("UNITARES_ONBOARD_BOOTSTRAP", "on").strip().lower()
-        not in ("0", "off", "false", "no")
+        os.environ.get("UNITARES_ONBOARD_BOOTSTRAP", "off").strip().lower()
+        in ("1", "on", "true", "yes")
     )
 
 
@@ -260,7 +262,7 @@ def run_onboard(
     auth_token: str | None = None,
     timeout: float = DEFAULT_TIMEOUT,
     initial_state: dict | None = None,
-    bootstrap: bool = True,
+    bootstrap: bool = False,
     post_json: Callable[[str, dict, float, str | None], dict] = _post_json,
     read_cache: Callable[..., dict] = _read_cache,
     write_cache: Callable[..., None] = _write_cache,
@@ -292,11 +294,12 @@ def run_onboard(
         arguments["parent_agent_id"] = parent_agent_id
         arguments["spawn_reason"] = "new_session"
 
-    # Seed trajectory genesis (name-claim ghost fix — see BOOTSTRAP_* above).
-    # An explicit ``initial_state`` from the caller always wins; otherwise a
-    # default genesis seed is attached unless bootstrap is disabled (per-call
-    # ``bootstrap=False`` or the ``UNITARES_ONBOARD_BOOTSTRAP=0`` kill switch).
-    if initial_state is None and bootstrap and _bootstrap_enabled():
+    # Optional genesis anchor (OFF by default — see BOOTSTRAP_* above; it is
+    # NOT a fix for the "uninitialized" symptom). An explicit caller-supplied
+    # ``initial_state`` always wins; otherwise a default seed is attached only
+    # when opted in per-call (``bootstrap=True``) or globally
+    # (``UNITARES_ONBOARD_BOOTSTRAP=1``).
+    if initial_state is None and (bootstrap or _bootstrap_enabled()):
         initial_state = _default_bootstrap_state()
     if initial_state:
         arguments["initial_state"] = initial_state
@@ -359,13 +362,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--workspace", default=os.getcwd())
     parser.add_argument("--force-new", action="store_true",
                         help="Create a fresh identity without declaring cached lineage")
-    parser.add_argument("--no-bootstrap", action="store_true",
-                        help="Do not seed a trajectory genesis row at onboard. "
-                             "By default the helper attaches a bootstrap "
-                             "initial_state so a short/dark session is not born "
-                             "as an uninitialized, 0-update ghost. The "
-                             "UNITARES_ONBOARD_BOOTSTRAP=0 env var has the same "
-                             "effect globally.")
+    parser.add_argument("--bootstrap", action="store_true",
+                        help="Attach an optional trajectory genesis seed "
+                             "(initial_state) at onboard. OFF by default. This "
+                             "does NOT clear an 'uninitialized / 0 real updates' "
+                             "status — bootstrap rows are excluded from "
+                             "real-check-in counts; only a real sync_state does. "
+                             "Its only benefit is giving the first real check-in "
+                             "a trajectory baseline. UNITARES_ONBOARD_BOOTSTRAP=1 "
+                             "enables it globally.")
     parser.add_argument(
         "--slot",
         default=os.environ.get("UNITARES_SESSION_SLOT", ""),
@@ -388,7 +393,7 @@ def main(argv: list[str] | None = None) -> int:
         force_new=args.force_new,
         auth_token=auth_token,
         timeout=args.timeout,
-        bootstrap=not args.no_bootstrap,
+        bootstrap=args.bootstrap,
     )
     print(json.dumps(result))
     return 0
