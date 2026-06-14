@@ -288,13 +288,17 @@ if date_part:
 header += f"; UUID `{uuid}`."
 
 print(
-    header + "\n\nUnder the identity ontology "
- ", a fresh process-instance "
-    "declares lineage rather than resuming identity. To record the "
-    "inheritance chain, include in the start_session/onboard call below:\n"
-    f"    start_session(force_new=true, parent_agent_id=\"{uuid}\", spawn_reason=\"new_session\")\n"
-    "Memory, KG notes, and self-knowledge persist across instances; "
-    "governance-identity does not."
+    header + "\n\nUnder the identity ontology a fresh process-instance "
+    "onboards fresh — co-location in this workspace is not lineage. "
+    "Onboard fresh:\n"
+    "    start_session(force_new=true)\n"
+    "Declare this UUID as a parent ONLY if that prior session has EXITED "
+    "and you are a deliberate continuation of it:\n"
+    f"    start_session(force_new=true, parent_agent_id=\"{uuid}\", spawn_reason=\"explicit\")\n"
+    "If that session is still running it is a concurrent sibling, not a "
+    "predecessor, and the server rejects the claim "
+    "(lineage_coincidental_rejected). Memory, KG notes, and self-knowledge "
+    "persist across instances; governance-identity does not."
 )
 PY
 )
@@ -427,21 +431,21 @@ else:
 # so an agent that copies the literal string also copies its
 # lineage-only intent.
 print(
-    "Scan-newest workspace lineage candidate (NOT a slot match for the "
-    "current session). Another process-instance previously wrote a slot "
-    f"file in this workspace — slot `{slot}`, last active {date_part} "
-    f"({age_text}). The prior process may have been a different Claude "
-    "session (e.g. before `/clear`), a Codex run, a dispatch worker, "
-    "or an ad-hoc script.\n\nUnder the identity ontology "
- ", a fresh process-instance "
-    "declares lineage rather than resuming identity. If — and only if — "
-    "you are continuing that prior process's work, include in the "
-    "start_session/onboard call below:\n"
-    f"    start_session(force_new=true, parent_agent_id=\"{uuid}\", spawn_reason=\"new_session\")\n"
-    "Otherwise omit `parent_agent_id` and onboard fresh — false "
-    "ancestry claims pollute the governance lineage DAG. Memory, KG "
-    "notes, and self-knowledge persist across instances; "
-    "governance-identity does not."
+    "Scan-newest workspace slot (NOT a slot match for the current "
+    "session, and NOT lineage by default). Another process-instance "
+    f"previously wrote a slot file in this workspace — slot `{slot}`, last "
+    f"active {date_part} ({age_text}). The prior process may have been a "
+    "different Claude session (e.g. before `/clear`), a Codex run, a "
+    "dispatch worker, or an ad-hoc script.\n\nUnder the identity ontology "
+    "onboard fresh — co-location is not lineage:\n"
+    "    start_session(force_new=true)\n"
+    "Declare this UUID as a parent ONLY if that prior process has EXITED "
+    "and you are a deliberate continuation of its work:\n"
+    f"    start_session(force_new=true, parent_agent_id=\"{uuid}\", spawn_reason=\"explicit\")\n"
+    "If it is still running it is a concurrent sibling, not a predecessor — "
+    "the server rejects such claims (lineage_coincidental_rejected) and "
+    "false ancestry pollutes the lineage DAG. Memory, KG notes, and "
+    "self-knowledge persist across instances; governance-identity does not."
 )
 PY
 )
@@ -473,7 +477,7 @@ else
     # the ontology pointer (so a forgetful agent can re-read), and the
     # operator escape hatch — drop everything else.
     CONTEXT="UNITARES Governance: ONLINE
-ACTION REQUIRED: onboard now — until you do, this session is invisible to governance (no identity, no trajectory, no check-ins). Call \`start_session(force_new=true)\` (\`onboard(...)\` canonical; declare \`parent_agent_id\` if continuing prior workspace work — see lineage hint below), then \`sync_state(...)\` after meaningful work.
+ACTION REQUIRED: onboard now — until you do, this session is invisible to governance (no identity, no trajectory, no check-ins). Call \`start_session(force_new=true)\` (\`onboard(...)\` canonical) — onboard fresh; declare \`parent_agent_id\` only for a real spawn/handoff (see lineage hint below), not for co-location. Then \`sync_state(...)\` after meaningful work.
 · After binding, read \`next_action\`, \`memory_suggestions\`, and \`recovery_hint\` when present.
 · Recovery: run /diagnose."
   else

@@ -483,7 +483,7 @@ class TestScanNewestLineageFallback:
         # Honesty marker — appears BEFORE the UUID (council finding) so a
         # pattern-matching agent that copies the surrounding sentence still
         # reads the disclaimer.
-        marker_idx = ctx.find("Scan-newest workspace lineage candidate")
+        marker_idx = ctx.find("Scan-newest workspace slot")
         uuid_idx = ctx.find("22222222-aaaa-bbbb-cccc-000000000002")
         assert marker_idx >= 0 and uuid_idx >= 0 and marker_idx < uuid_idx
         # Framing must NOT claim "different Claude session" — the workspace
