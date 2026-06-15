@@ -96,6 +96,7 @@ python3 "${PLUGIN_ROOT}/scripts/checkin.py" \
   --response-text "${SUMMARY}" \
   --complexity "${COMPLEXITY}" \
   --confidence 0.7 \
+  --epistemic-class substrate_interpretation \
   --client-session-id "${CSID}" \
   --uuid "${UUID}" \
   --slot "${SLOT}" \

@@ -143,6 +143,7 @@ def submit_checkin(
     uuid: str = "",
     server_url: Optional[str] = None,
     plugin_version: Optional[str] = None,
+    epistemic_class: Optional[str] = None,
 ) -> str:
     """Send one check-in. Returns a status string suitable for logging."""
     if _is_killed():
@@ -151,19 +152,22 @@ def submit_checkin(
     try:
         safe_text = redact_secrets(response_text)[:RESPONSE_TEXT_MAX]
         url = server_url or os.environ.get("UNITARES_SERVER_URL", DEFAULT_SERVER_URL)
+        arguments = {
+            "response_text": safe_text,
+            "complexity": max(0.0, min(1.0, float(complexity))),
+            "confidence": max(0.0, min(1.0, float(confidence))),
+            "client_session_id": client_session_id,
+            "metadata": {
+                "source": "plugin_hook",
+                "event": event,
+                "plugin_version": plugin_version or _plugin_version(),
+            },
+        }
+        if epistemic_class:
+            arguments["epistemic_class"] = epistemic_class
         payload = {
             "name": "process_agent_update",
-            "arguments": {
-                "response_text": safe_text,
-                "complexity": max(0.0, min(1.0, float(complexity))),
-                "confidence": max(0.0, min(1.0, float(confidence))),
-                "client_session_id": client_session_id,
-                "metadata": {
-                    "source": "plugin_hook",
-                    "event": event,
-                    "plugin_version": plugin_version or _plugin_version(),
-                },
-            },
+            "arguments": arguments,
         }
         ok, latency_ms, err = _post_to_governance(url, payload)
         status = "sent" if ok else "fail"
@@ -198,6 +202,17 @@ def _cli() -> int:
     p.add_argument("--uuid", default="")
     p.add_argument("--server-url", default=None)
     p.add_argument("--plugin-version", default=None)
+    p.add_argument(
+        "--epistemic-class",
+        default=None,
+        choices=[
+            "agent_report",
+            "substrate_observation",
+            "substrate_interpretation",
+            "prediction",
+        ],
+        help="Optional process_agent_update epistemic_class label.",
+    )
     args = p.parse_args()
 
     status = submit_checkin(
@@ -211,6 +226,7 @@ def _cli() -> int:
         uuid=args.uuid,
         server_url=args.server_url,
         plugin_version=args.plugin_version,
+        epistemic_class=args.epistemic_class,
     )
     return 0 if status in ("sent", "skip_kill_switch") else 1
 

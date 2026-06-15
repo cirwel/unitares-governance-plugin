@@ -85,4 +85,5 @@ def test_post_stop_emits_turn_stop_checkin(tmp_path):
     text = checkins[0]["arguments"]["response_text"]
     assert "3 tool call" in text
     assert "Completed the refactor" in text
+    assert checkins[0]["arguments"]["epistemic_class"] == "substrate_interpretation"
     assert "continuity_token" not in checkins[0]["arguments"]
