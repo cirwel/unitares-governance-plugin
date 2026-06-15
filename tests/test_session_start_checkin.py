@@ -183,15 +183,15 @@ class TestSessionStartMakesNoToolCalls:
 class TestSessionStartContext:
     """Context wording teaches the agent how to bind its own identity."""
 
-    def test_online_context_offers_optional_start_session_with_onboard_fallback(self, tmp_path):
+    def test_online_context_offers_start_session_with_lazy_onboard_fallback(self, tmp_path):
         stdout, _ = _serve_and_run(tmp_path)
         ctx = json.loads(stdout).get("additional_context", "")
         assert "UNITARES Governance: ONLINE" in ctx
-        assert "Optional identity attribution" in ctx
-        assert "No identity has been created on your behalf" in ctx
+        assert "Identity attribution" in ctx
+        assert "SessionStart has not created an identity yet" in ctx
         assert "start_session(" in ctx
         assert "onboard(" in ctx
-        assert "continuing without onboarding is allowed" in ctx
+        assert "Stop hook will lazily create a slot-scoped identity" in ctx
 
     def test_online_context_avoids_pressure_framing(self, tmp_path):
         stdout, _ = _serve_and_run(tmp_path)
@@ -203,6 +203,7 @@ class TestSessionStartContext:
         assert "uninitialized, 0-update" not in ctx
         assert "Do not manufacture a check-in" in ctx
         assert "Substrate hooks may record observations automatically" in ctx
+        assert "harness-managed attribution" in ctx
 
     def test_online_context_instructs_force_new_on_fresh_onboard(self, tmp_path):
         """Regression guard: a bare `onboard()` / `start_session()` suggestion lets the server
@@ -832,7 +833,8 @@ class TestCompactMode:
         ctx = json.loads(stdout).get("additional_context", "")
 
         # Full prose markers
-        assert "No identity has been created on your behalf" in ctx
+        assert "SessionStart has not created an identity yet" in ctx
+        assert "Stop hook will lazily create a slot-scoped identity" in ctx
         assert "Governance Fundamentals" in ctx
 
     def test_no_cache_means_full_prose(self, tmp_path):
@@ -844,7 +846,8 @@ class TestCompactMode:
             tmp_path, cwd=workspace, claude_session_id="never-seen-before"
         )
         ctx = json.loads(stdout).get("additional_context", "")
-        assert "No identity has been created on your behalf" in ctx
+        assert "SessionStart has not created an identity yet" in ctx
+        assert "Stop hook will lazily create a slot-scoped identity" in ctx
         assert "Governance Fundamentals" in ctx
 
     def test_compact_ttl_is_configurable_via_env(self, tmp_path):
@@ -863,7 +866,8 @@ class TestCompactMode:
         )
         ctx = json.loads(stdout).get("additional_context", "")
         # TTL=0 means age (>=0) is never less than TTL → full prose returns
-        assert "No identity has been created on your behalf" in ctx
+        assert "SessionStart has not created an identity yet" in ctx
+        assert "Stop hook will lazily create a slot-scoped identity" in ctx
         assert "Governance Fundamentals" in ctx
 
     def test_compact_mode_substantially_reduces_context_size(self, tmp_path):
@@ -894,24 +898,25 @@ class TestCompactMode:
 
 
 class TestOnboardingNudgeOnce:
-    """Issue #735: the optional onboarding note must not repeat every turn
-    when an agent chooses not to onboard."""
+    """Issue #735: the onboarding note must not repeat every turn before the
+    stop hook has a chance to lazily onboard the session."""
 
     def test_no_cache_repeats_suppress_optional_note_for_same_session(self, tmp_path):
         slot = "same-session-no-cache"
         first_stdout, _ = _serve_and_run(tmp_path, claude_session_id=slot)
         first_ctx = json.loads(first_stdout).get("additional_context", "")
-        assert "Optional identity attribution" in first_ctx
+        assert "Identity attribution" in first_ctx
         assert "start_session(force_new=true)" in first_ctx
         assert "Governance Fundamentals" in first_ctx
 
         second_stdout, _ = _serve_and_run(tmp_path, claude_session_id=slot)
         second_ctx = json.loads(second_stdout).get("additional_context", "")
-        assert "Optional onboarding context was already shown" in second_ctx
-        assert "Optional identity attribution" not in second_ctx
+        assert "Onboarding context was already shown" in second_ctx
+        assert "Identity attribution" not in second_ctx
         assert "start_session(" not in second_ctx
         assert "Governance Fundamentals" not in second_ctx
-        assert "no check-in should be manufactured" in second_ctx
+        assert "Do not manufacture a check-in" in second_ctx
+        assert "Stop hook will lazily create a slot-scoped governance identity" in second_ctx
 
 
 class TestOrchestratorProvisionedLineage:

@@ -18,6 +18,42 @@ from _session_lookup import _slot_filename  # noqa: E402
 from tests.test_session_start_checkin import RecordingHandler, _ReusableTCPServer  # noqa: E402
 
 
+class LazyOnboardHandler(RecordingHandler):
+    """Mock governance server that returns a usable identity for onboard."""
+
+    calls: list[dict] = []
+
+    def do_POST(self):
+        length = int(self.headers.get("content-length", 0))
+        body = self.rfile.read(length)
+        try:
+            data = json.loads(body)
+        except Exception:
+            data = {"raw": body.decode(errors="replace")}
+        LazyOnboardHandler.calls.append(data)
+
+        if data.get("name") == "onboard":
+            response = {
+                "result": {
+                    "success": True,
+                    "uuid": "11111111-2222-4333-8444-555555555555",
+                    "agent_id": "Claude_20260615",
+                    "client_session_id": "agent-11111111-222",
+                    "continuity_token": "v1.transient-token",
+                    "session_resolution_source": "force_new",
+                    "continuity_token_supported": True,
+                    "display_name": "claude-test#slot",
+                }
+            }
+        else:
+            response = {"result": {"success": True}}
+
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps(response).encode())
+
+
 def test_post_stop_emits_turn_stop_checkin(tmp_path):
     """post-stop hook posts a check-in with event='turn_stop'."""
     RecordingHandler.calls = []
@@ -87,3 +123,61 @@ def test_post_stop_emits_turn_stop_checkin(tmp_path):
     assert "Completed the refactor" in text
     assert checkins[0]["arguments"]["epistemic_class"] == "substrate_interpretation"
     assert "continuity_token" not in checkins[0]["arguments"]
+
+
+def test_post_stop_lazy_onboards_when_cache_missing(tmp_path):
+    """An un-onboarded Claude turn should get a slot-scoped identity before
+    post-stop emits turn_stop. This is the fix for floor-only sessions that
+    never called start_session manually."""
+    LazyOnboardHandler.calls = []
+    srv = _ReusableTCPServer(("127.0.0.1", 0), LazyOnboardHandler)
+    port = srv.server_address[1]
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+
+    slot = "lazy-slot-1234"
+    stop_payload = json.dumps({
+        "hook_event_name": "Stop",
+        "session_id": slot,
+        "tool_calls": [{"name": "Read"}],
+        "final_text": "Inspected governance status.",
+    })
+
+    try:
+        env = {
+            "PATH": "/usr/bin:/bin:/usr/local/bin",
+            "HOME": str(tmp_path),
+            "UNITARES_SERVER_URL": f"http://127.0.0.1:{port}",
+            "UNITARES_CHECKIN_LOG": str(tmp_path / "checkins.log"),
+            "UNITARES_AUTO_ONBOARD": "on",
+            "CLAUDE_PLUGIN_ROOT": str(PLUGIN_ROOT),
+            "PWD": str(tmp_path),
+        }
+        hook = PLUGIN_ROOT / "hooks" / "post-stop"
+        subprocess.run(
+            [str(hook)],
+            env=env,
+            cwd=str(tmp_path),
+            input=stop_payload,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    finally:
+        srv.shutdown()
+        thread.join(timeout=2)
+
+    tool_names = [c.get("name") for c in LazyOnboardHandler.calls]
+    assert tool_names == ["onboard", "process_agent_update"]
+
+    checkin = LazyOnboardHandler.calls[1]["arguments"]
+    assert checkin["client_session_id"] == "agent-11111111-222"
+    assert checkin["metadata"]["event"] == "turn_stop"
+    assert checkin["epistemic_class"] == "substrate_interpretation"
+    assert "continuity_token" not in checkin
+
+    cache_path = tmp_path / ".unitares" / _slot_filename(slot)
+    cached = json.loads(cache_path.read_text())
+    assert cached["uuid"] == "11111111-2222-4333-8444-555555555555"
+    assert cached["client_session_id"] == "agent-11111111-222"
+    assert "continuity_token" not in cached

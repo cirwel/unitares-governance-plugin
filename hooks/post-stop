@@ -12,6 +12,59 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PLUGIN_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
+DEFAULTS_FILE=""
+for candidate in \
+  "${PLUGIN_ROOT}/config/defaults.env" \
+  "${PLUGIN_ROOT}/config/client/defaults.env"
+do
+  if [[ -f "${candidate}" ]]; then
+    DEFAULTS_FILE="${candidate}"
+    break
+  fi
+done
+
+SERVER_URL_OVERRIDE="${UNITARES_SERVER_URL-}"
+CHECKINS_OVERRIDE="${UNITARES_CHECKINS-}"
+CHECKIN_LOG_OVERRIDE="${UNITARES_CHECKIN_LOG-}"
+AUTO_ONBOARD_OVERRIDE="${UNITARES_AUTO_ONBOARD-}"
+DISABLE_AUTO_ONBOARD_OVERRIDE="${UNITARES_DISABLE_AUTO_ONBOARD-}"
+AGENT_NAME_OVERRIDE="${UNITARES_AGENT_NAME-}"
+AGENT_PREFIX_OVERRIDE="${UNITARES_AGENT_PREFIX-}"
+MODEL_TYPE_OVERRIDE="${UNITARES_MODEL_TYPE-}"
+AUTO_ONBOARD_TIMEOUT_OVERRIDE="${UNITARES_AUTO_ONBOARD_TIMEOUT-}"
+if [[ -n "${DEFAULTS_FILE}" ]]; then
+  # shellcheck source=/dev/null
+  source "${DEFAULTS_FILE}" 2>/dev/null || true
+fi
+if [[ -n "${SERVER_URL_OVERRIDE}" ]]; then
+  UNITARES_SERVER_URL="${SERVER_URL_OVERRIDE}"
+fi
+if [[ -n "${CHECKINS_OVERRIDE}" ]]; then
+  UNITARES_CHECKINS="${CHECKINS_OVERRIDE}"
+fi
+if [[ -n "${CHECKIN_LOG_OVERRIDE}" ]]; then
+  UNITARES_CHECKIN_LOG="${CHECKIN_LOG_OVERRIDE}"
+fi
+if [[ -n "${AUTO_ONBOARD_OVERRIDE}" ]]; then
+  UNITARES_AUTO_ONBOARD="${AUTO_ONBOARD_OVERRIDE}"
+fi
+if [[ -n "${DISABLE_AUTO_ONBOARD_OVERRIDE}" ]]; then
+  UNITARES_DISABLE_AUTO_ONBOARD="${DISABLE_AUTO_ONBOARD_OVERRIDE}"
+fi
+if [[ -n "${AGENT_NAME_OVERRIDE}" ]]; then
+  UNITARES_AGENT_NAME="${AGENT_NAME_OVERRIDE}"
+fi
+if [[ -n "${AGENT_PREFIX_OVERRIDE}" ]]; then
+  UNITARES_AGENT_PREFIX="${AGENT_PREFIX_OVERRIDE}"
+fi
+if [[ -n "${MODEL_TYPE_OVERRIDE}" ]]; then
+  UNITARES_MODEL_TYPE="${MODEL_TYPE_OVERRIDE}"
+fi
+if [[ -n "${AUTO_ONBOARD_TIMEOUT_OVERRIDE}" ]]; then
+  UNITARES_AUTO_ONBOARD_TIMEOUT="${AUTO_ONBOARD_TIMEOUT_OVERRIDE}"
+fi
+SERVER_URL="${UNITARES_SERVER_URL:-http://localhost:8767}"
+
 # Read stdin once — we use it both for the turn summary AND for the
 # session-cache lookup (Claude Code's session_id field is the slot).
 PAYLOAD=$(cat 2>/dev/null || echo "{}")
@@ -24,11 +77,47 @@ if [[ ! -f "${SESSION_LOOKUP}" ]]; then
 fi
 eval "$(printf '%s' "${PAYLOAD}" | python3 "${SESSION_LOOKUP}" --workspace "${PWD}")"
 
-# No onboarded identity (no CSID) → don't go dark. Emit one identity-free
-# substrate FLOOR observation: a measurement that this session ran, NOT an
-# identity claim. It writes to core.substrate_observations via a separate
-# endpoint that never touches the identity path. RAW_SLOT is the raw Claude
-# session_id from stdin, present even when no onboard cache exists.
+# If the agent did not explicitly onboard before the turn ended, provision a
+# slot-scoped identity now so the turn can still produce a real check-in.
+# This is harness-managed attribution for the Claude process, not an
+# agent-authored claim. onboard_helper.py owns the safety constraints:
+# force_new=true, per-slot name scoping, lineage via parent_agent_id, no
+# persisted continuity token.
+CHECKINS_MODE="$(printf '%s' "${UNITARES_CHECKINS:-on}" | tr '[:upper:]' '[:lower:]')"
+AUTO_ONBOARD_MODE="$(printf '%s' "${UNITARES_AUTO_ONBOARD:-on}" | tr '[:upper:]' '[:lower:]')"
+DISABLE_AUTO_ONBOARD="$(printf '%s' "${UNITARES_DISABLE_AUTO_ONBOARD:-0}" | tr '[:upper:]' '[:lower:]')"
+if [[ -z "${CSID:-}" && -n "${RAW_SLOT:-}" \
+      && "${CHECKINS_MODE}" != "off" \
+      && "${AUTO_ONBOARD_MODE}" != "0" \
+      && "${AUTO_ONBOARD_MODE}" != "off" \
+      && "${AUTO_ONBOARD_MODE}" != "false" \
+      && "${AUTO_ONBOARD_MODE}" != "no" \
+      && "${DISABLE_AUTO_ONBOARD}" != "1" \
+      && "${DISABLE_AUTO_ONBOARD}" != "true" \
+      && "${DISABLE_AUTO_ONBOARD}" != "on" ]]; then
+  ONBOARD_HELPER="${PLUGIN_ROOT}/scripts/onboard_helper.py"
+  if [[ -f "${ONBOARD_HELPER}" ]]; then
+    WORKSPACE_NAME="$(basename "${PWD}")"
+    AGENT_NAME="${UNITARES_AGENT_NAME:-${UNITARES_AGENT_PREFIX:-claude}-${WORKSPACE_NAME}}"
+    MODEL_TYPE="${UNITARES_MODEL_TYPE:-claude-code}"
+    python3 "${ONBOARD_HELPER}" \
+      --server-url "${SERVER_URL}" \
+      --name "${AGENT_NAME}" \
+      --model-type "${MODEL_TYPE}" \
+      --workspace "${PWD}" \
+      --slot "${RAW_SLOT}" \
+      --timeout "${UNITARES_AUTO_ONBOARD_TIMEOUT:-10}" \
+      >/dev/null 2>&1 || true
+    eval "$(printf '%s' "${PAYLOAD}" | python3 "${SESSION_LOOKUP}" --workspace "${PWD}")"
+  fi
+fi
+
+# No onboarded identity (no CSID) after lazy onboarding → don't go dark. Emit
+# one identity-free substrate FLOOR observation: a measurement that this
+# session ran, NOT an identity claim. It writes to core.substrate_observations
+# via a separate endpoint that never touches the identity path. RAW_SLOT is
+# the raw Claude session_id from stdin, present even when no onboard cache
+# exists.
 if [[ -z "${CSID:-}" ]]; then
   if [[ -n "${RAW_SLOT:-}" ]]; then
     FLOOR_TOOLS=$(python3 - "${PAYLOAD}" <<'PY'
@@ -99,7 +188,7 @@ python3 "${PLUGIN_ROOT}/scripts/checkin.py" \
   --epistemic-class substrate_interpretation \
   --client-session-id "${CSID}" \
   --uuid "${UUID}" \
-  --slot "${SLOT}" \
+  --slot "${SLOT:-${RAW_SLOT:-}}" \
   >/dev/null 2>&1 || true
 
 exit 0

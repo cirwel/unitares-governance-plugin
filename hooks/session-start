@@ -490,8 +490,8 @@ After governance calls, read \`next_action\`, \`memory_suggestions\`, and \`reco
 Recovery: run /diagnose."
   elif [[ "${NUDGE_ALREADY_SHOWN}" == "1" ]]; then
     CONTEXT="UNITARES Governance: ONLINE
-Optional onboarding context was already shown for this session. Continuing without governance identity attribution is allowed; no action is required and no check-in should be manufactured for this reminder.
-Use \`sync_state(...)\` only for meaningful state worth reporting. Substrate hooks may record observations automatically; those are not agent-authored check-ins.
+Onboarding context was already shown for this session. If no identity is cached by turn stop, the Stop hook will lazily create a slot-scoped governance identity before emitting its substrate summary.
+Use \`sync_state(...)\` only for meaningful state worth reporting. Do not manufacture a check-in for this reminder.
 Recovery: run /diagnose."
   else
     if [[ -n "${NUDGE_MARKER}" ]]; then
@@ -500,20 +500,26 @@ Recovery: run /diagnose."
     fi
     CONTEXT="UNITARES Governance: ONLINE
 
-Optional identity attribution: if this process should have a governance
-identity, call:
+Identity attribution: bind this process to governance before substantive
+work when you can. Call:
 
     start_session(force_new=true)          # canonical/raw: onboard(force_new=true)
 
-No identity has been created on your behalf (identity-honesty: the harness
-will not mint one for you), and continuing without onboarding is allowed.
-Do not manufacture a check-in to satisfy this note. If you do onboard, use
-\`sync_state(...)\` only when there is meaningful state worth reporting:
+SessionStart has not created an identity yet. If you do not bind manually,
+the Stop hook will lazily create a slot-scoped identity before it emits the
+turn summary, unless \`UNITARES_AUTO_ONBOARD=off\` or
+\`UNITARES_DISABLE_AUTO_ONBOARD=1\` is set. Manual start_session is still
+preferred when you need governance MCP calls during the turn.
+
+Do not manufacture a check-in to satisfy this note. Use \`sync_state(...)\`
+only when there is meaningful state worth reporting:
 
     sync_state(response_text=..., complexity=..., confidence=...)
 
 Substrate hooks may record observations automatically. Those observations are
-not agent-authored check-ins and do not require you to echo them.
+not agent-authored check-ins and do not require you to echo them. Lazy
+onboarding is harness-managed attribution for this Claude process; it is not
+an agent-authored claim.
 
 Under the identity ontology, fresh process-instances mint fresh
 governance-identity. \`force_new=true\` is the default posture; lineage, when
