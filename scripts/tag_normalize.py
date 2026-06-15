@@ -34,12 +34,14 @@ from typing import Any
 TAG_BEARING_SUFFIXES = frozenset({"knowledge", "search_shared_memory", "leave_note"})
 
 # Pure spelling-variant canonicalization, applied AFTER formatting. Keys are
-# already in normalized (lowercased, hyphenated) form. Keep this small,
-# unambiguous, and spelling-only — semantic synonyms do not belong here, and
-# anything ambiguous (e.g. ``pg``, ``k8s``) is left alone on purpose.
+# already in normalized (lowercased, hyphenated) form. Keep this small and
+# unambiguous: semantic synonyms do not belong here, and anything ambiguous
+# (e.g. ``pg``, ``k8s``) is left alone on purpose. One-off singular/plural
+# fixes are allowed only when the canonical tag is obvious.
 _CANONICAL = {
     "postgresql": "postgres",
     "postgre": "postgres",
+    "residents": "resident",
 }
 
 # A run of anything that is not a lowercase letter or digit becomes one

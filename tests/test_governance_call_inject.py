@@ -77,6 +77,13 @@ class TestInjection:
         assert updated is not None
         assert updated["client_session_id"] == SID
 
+    def test_injects_for_codex_governance_server_alias(self, tmp_path):
+        _write_cache(tmp_path)
+        result = _run(_hook_input("mcp__governance__sync_state", {}), tmp_path)
+        updated = _updated_input(result)
+        assert updated is not None
+        assert updated["client_session_id"] == SID
+
     def test_injects_for_gateway_server_name(self, tmp_path):
         _write_cache(tmp_path)
         result = _run(_hook_input("mcp__claude_ai_UNITARES__knowledge", {"action": "search"}), tmp_path)

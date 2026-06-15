@@ -28,6 +28,8 @@ class TestNormalizeTag:
         ("PostgreSQL", "postgres"),
         ("postgre", "postgres"),
         ("postgres", "postgres"),
+        ("Residents", "resident"),
+        ("resident", "resident"),
         ("  Postgres  ", "postgres"),
         ("pool_connection_leak", "pool-connection-leak"),
         ("pool connection leak", "pool-connection-leak"),
@@ -57,6 +59,7 @@ class TestNormalizeTagList:
 
     def test_dedup_and_canonicalize_in_order(self):
         assert normalize_tag_list(["Postgres", "postgres", "PostgreSQL"]) == ["postgres"]
+        assert normalize_tag_list(["resident", "residents"]) == ["resident"]
 
     def test_preserves_first_seen_order(self):
         assert normalize_tag_list(["beta", "Alpha", "alpha"]) == ["beta", "alpha"]

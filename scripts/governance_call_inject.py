@@ -17,7 +17,8 @@ formatting-only, runs independently of (and never disables) identity
 injection, and lives in scripts/tag_normalize.py — see docs/ontology-need.md.
 
 Contract:
-- Only fires for MCP tools whose server segment contains "unitares".
+- Only fires for MCP tools whose server segment is the local UNITARES server
+  alias ("governance") or contains "unitares".
 - Only fires for an explicit suffix allowlist of attribution-relevant tools
   verified to accept client_session_id (schemas inherit AgentIdentityMixin
   server-side). Unknown/new tools get NO injection — they degrade to today's
@@ -98,6 +99,11 @@ INJECT_SUFFIXES = frozenset({
 PROOF_FIELDS = ("client_session_id", "continuity_token", "agent_uuid", "agent_id")
 
 
+def _is_governance_server(server: str) -> bool:
+    """Return True for MCP server aliases owned by UNITARES governance."""
+    return server == "governance" or "unitares" in server
+
+
 def _has_proof_field(tool_input: dict) -> bool:
     """True if the caller supplied a non-empty identity proof field."""
     for field in PROOF_FIELDS:
@@ -128,7 +134,7 @@ def main() -> int:
         return 0
     server = "__".join(parts[1:-1]).lower()
     suffix = parts[-1].lower()
-    if "unitares" not in server:
+    if not _is_governance_server(server):
         return 0
     if suffix not in INJECT_SUFFIXES:
         return 0
