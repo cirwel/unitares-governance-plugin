@@ -1034,3 +1034,66 @@ class TestOrchestratorProvisionedLineage:
             if (c.get("tool") or c.get("name") or "") not in ("", "skills")
         ]
         assert mutating == []
+
+
+def _git_q(repo, *args):
+    """Run a quiet git command; identity is supplied inline so the test needs
+    no global git config or author env."""
+    subprocess.run(
+        ["git", "-c", "user.name=t", "-c", "user.email=t@t", *args],
+        cwd=str(repo),
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+class TestWorkspaceCoordinationBriefing:
+    """Git-sourced collision briefing.
+
+    The substrate can't answer "who else is live here" — that needs the very
+    check-ins we're trying to elicit, and status='active' is never reaped. So
+    the hook sources liveness from git worktree state (adoption-independent)
+    and surfaces sibling worktrees carrying UNCOMMITTED edits — the collision
+    hotspots. Precision-or-silence: clean siblings produce no briefing, and a
+    non-git cwd produces none at all.
+    """
+
+    def _repo_with_sibling(self, tmp_path, *, dirty):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _git_q(repo, "init", "-q", "-b", "master")
+        (repo / "README.md").write_text("seed\n")
+        _git_q(repo, "add", ".")
+        _git_q(repo, "commit", "-qm", "init")
+        sib = tmp_path / "sib"
+        _git_q(repo, "worktree", "add", "-q", "-b", "codex/test-sib", str(sib))
+        (sib / "shared.py").write_text("change\n")  # uncommitted edit in sibling
+        if not dirty:
+            _git_q(sib, "add", ".")
+            _git_q(sib, "commit", "-qm", "commit the sibling change")
+        return repo, sib
+
+    def test_briefing_surfaces_dirty_sibling(self, tmp_path):
+        repo, _sib = self._repo_with_sibling(tmp_path, dirty=True)
+        stdout, _ = _run_hook(tmp_path, "http://127.0.0.1:1", cwd=repo)
+        ctx = json.loads(stdout).get("additional_context", "")
+        assert "Workspace coordination" in ctx
+        assert "codex/test-sib" in ctx
+        assert "shared.py" in ctx
+        # Honest framing: a heads-up sourced from git, not a governance lock.
+        assert "NOT governance state" in ctx
+
+    def test_briefing_silent_when_siblings_clean(self, tmp_path):
+        repo, _sib = self._repo_with_sibling(tmp_path, dirty=False)
+        stdout, _ = _run_hook(tmp_path, "http://127.0.0.1:1", cwd=repo)
+        ctx = json.loads(stdout).get("additional_context", "")
+        assert "Workspace coordination" not in ctx
+
+    def test_briefing_absent_outside_git_repo(self, tmp_path):
+        # tmp_path is not a git work tree -> no briefing, and the hook still
+        # emits a well-formed envelope (fail-safe).
+        stdout, _ = _run_hook(tmp_path, "http://127.0.0.1:1")
+        payload = json.loads(stdout)
+        assert "Workspace coordination" not in payload.get("additional_context", "")
+        assert "additionalContext" in payload.get("hookSpecificOutput", {})
