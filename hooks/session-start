@@ -553,6 +553,67 @@ ${SKILL_CONTENT}"
   fi
 fi
 
+# ---------------------------------------------------------------------------
+# Workspace coordination briefing (git-sourced, adoption-independent)
+#
+# The governance substrate CANNOT answer "who else is live in this workspace"
+# — that would require the very check-ins we're trying to elicit. Measured
+# 2026-06-15: 16 concurrent worktrees, 2 check-ins in 2h, and core.agents
+# status='active' is never reaped (565 stale "active", newest 45m old). So
+# sourcing liveness from the substrate returns a confident lie ("0 siblings"),
+# which trains agents the tool is junk — worse than silence.
+#
+# Git worktree state is the check-in-INDEPENDENT ground truth: it knows every
+# concurrent branch for free, and UNCOMMITTED edits in a sibling worktree are
+# the highest-value collision signal a fresh agent can get before touching a
+# shared file. Task-blind at session start, we surface only siblings that
+# carry uncommitted work (the actionable hotspots) — precision-or-silence: if
+# nothing is dirty, we emit nothing. Fully fail-safe: any git error yields an
+# empty briefing and never blocks session start.
+# ---------------------------------------------------------------------------
+WORKSPACE_BRIEFING=""
+if command -v git >/dev/null 2>&1 && git -C "${PWD}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  SELF_WT="$(git -C "${PWD}" rev-parse --show-toplevel 2>/dev/null || true)"
+  BRIEF_LINES=""
+  LIVE_COUNT=0
+  CUR_WT=""
+  while IFS= read -r _line; do
+    case "${_line}" in
+      "worktree "*)
+        CUR_WT="${_line#worktree }"
+        ;;
+      "branch refs/heads/"*)
+        _br="${_line#branch refs/heads/}"
+        # Only agent-authored branches count as sibling sessions; skip self,
+        # master, detached cron/backup worktrees.
+        if [ "${CUR_WT}" != "${SELF_WT}" ]; then
+          case "${_br}" in
+            claude/*|codex/*)
+              LIVE_COUNT=$((LIVE_COUNT + 1))
+              _dirty="$(git -C "${CUR_WT}" status --porcelain 2>/dev/null | awk '{print $NF}' | head -3 | paste -sd, - 2>/dev/null)"
+              if [ -n "${_dirty}" ]; then
+                BRIEF_LINES="${BRIEF_LINES}
+  - ${_br} -- uncommitted: ${_dirty}"
+              fi
+              ;;
+          esac
+        fi
+        ;;
+    esac
+  done < <(git -C "${PWD}" worktree list --porcelain 2>/dev/null | head -200)
+  if [ -n "${BRIEF_LINES}" ]; then
+    WORKSPACE_BRIEFING="Workspace coordination (git-sourced -- concurrent worktrees of this repo, NOT governance state):
+${LIVE_COUNT} sibling agent branch(es) are checked out in this repo. The following carry UNCOMMITTED edits that will collide if you touch the same files -- coordinate (or branch from their head) before editing those paths:${BRIEF_LINES}
+This is local git ground truth (adoption-independent). 'Checked out' is not a proven-running process; treat it as a heads-up, not a lock."
+  fi
+fi
+
+if [ -n "${WORKSPACE_BRIEFING}" ]; then
+  CONTEXT="${CONTEXT}
+
+${WORKSPACE_BRIEFING}"
+fi
+
 ESCAPED_CONTEXT="$(escape_for_json "${CONTEXT}")"
 cat <<ENDJSON
 {
