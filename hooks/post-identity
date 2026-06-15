@@ -5,10 +5,9 @@
 # Captures the UUID + token + label from the tool response and writes them
 # to the slot-scoped session cache.
 #
-# Part C Session A: with this hook in place, the agent's first MCP tool call
-# becomes the sole source of truth for session identity, making it possible
-# to eventually remove the HTTP pre-onboard from session-start
-# (UNITARES_DISABLE_AUTO_ONBOARD=1 opts in early).
+# Agent-initiated identity calls remain authoritative for the slot cache. If
+# the agent never calls one, post-stop may lazily onboard with the same cache
+# shape so end-of-turn summaries still carry a real client_session_id.
 #
 # Runs async — must never block or produce output on failure.
 set -uo pipefail
