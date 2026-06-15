@@ -46,7 +46,7 @@ The intended workflow is:
 
 1. `start_session(force_new=true)` as your first step in the session, to mint a fresh process identity (`onboard(...)` is the canonical equivalent) — until you onboard, your work this session is invisible to governance, which is the main source of uninitialized, 0-update agents
 2. if continuing prior work, pass `parent_agent_id=<prior uuid>` and `spawn_reason="new_session"`
-3. call `sync_state()` after meaningful work (`process_agent_update(...)` is the canonical equivalent) — an identity that never checks in produces no governance signal
+3. call `sync_state()` once per assistant turn as a behavioral baseline, and after meaningful work (`process_agent_update(...)` is the canonical equivalent) — an identity that never checks in produces no governance signal
 4. call `get_governance_metrics()` for read-only state
 5. use `identity(agent_uuid=..., continuity_token=..., resume=true)` only for same-owner proof-owned rebinds
 6. call `identity()` and `health_check()` when diagnosis is needed
@@ -58,14 +58,14 @@ lift `next_action`, `state_summary`, `risk_summary`, `memory_suggestions`, and
 directly. Use `memory_suggestions` as retrieval cues, and prefer
 `recovery_hint` before inventing a recovery path.
 
-The principle is simple: prefer high-signal governance over high-frequency governance. Meaningful check-ins beat noisy check-ins.
+The principle is simple: prefer regular behavioral baselines over raw activity noise. One real check-in per assistant turn is useful; per-tool or per-edit check-ins are usually not.
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
 | `/governance-start` | Create or declare lineage for a Codex/ChatGPT UNITARES session |
-| `/checkin` | Manual check-in after meaningful work |
+| `/checkin` | Manual turn-baseline check-in, plus meaningful milestones |
 | `/diagnose` | Show current governance state plus identity/health diagnostics when needed |
 | `/dialectic` | Request a dialectic review |
 

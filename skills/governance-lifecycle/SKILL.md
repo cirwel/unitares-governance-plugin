@@ -22,7 +22,7 @@ canonical names when you need legacy/raw compatibility.
 | Job | Friendly alias | Canonical tool |
 | --- | --- | --- |
 | Start working | `start_session(force_new=true, ...)` | `onboard` |
-| Check in after meaningful work | `sync_state(response_text=..., complexity=...)` | `process_agent_update` |
+| Check in for the turn baseline and meaningful work | `sync_state(response_text=..., complexity=...)` | `process_agent_update` |
 | Check your working state | `check_working_state()` | `get_governance_metrics` |
 | Avoid duplicate work | `search_shared_memory(query=...)` | `knowledge(action="search")` |
 | Record what actually happened | `record_result(...)` | `outcome_event` |
@@ -40,8 +40,9 @@ go.** Until you onboard, your MCP transport is unbound and your work is invisibl
 to governance: no identity, no trajectory, and the turn/edit/end check-in hooks
 have nothing to attach to, so they stay silent the entire session. A session
 that never onboards is the main source of *uninitialized, 0-update* agents. The
-lifecycle is: `start_session()` first, then land a real `sync_state()` after
-each meaningful unit of work so the identity carries real signal.
+lifecycle is: `start_session()` first, then land a real `sync_state()` once per
+assistant turn and after each meaningful unit of work so the identity carries
+regular signal.
 
 Per identity.md v2 ontology, a fresh process-instance is a fresh agent. To continue prior work across processes, **declare lineage** — do not resume via token:
 
@@ -105,7 +106,8 @@ The PATH semantics, the rare same-live-process rebind case, the S13 fresh-instan
 
 ## Check-ins
 
-Call `sync_state()` (`process_agent_update(...)` canonically) after meaningful work:
+Call `sync_state()` (`process_agent_update(...)` canonically) once per assistant
+turn as a behavioral baseline, and after meaningful work:
 
 ```
 sync_state(
@@ -121,10 +123,11 @@ Ordinary check-ins use the active session binding or `client_session_id`; do **n
 If you include `ethical_drift`, current runtimes return `input_glossary.ethical_drift` naming the three positional components. Use that response metadata instead of guessing what each slot means.
 
 When to check in:
+- Once per assistant turn as the baseline signal
 - After completing a meaningful unit of work
 - Before and after high-complexity tasks
 - When you feel uncertain or notice drift
-- **Not** after every single tool call — use judgment
+- **Not** after every single tool call or edit — use judgment
 
 Returns a verdict plus current EISV metrics. The response also includes an `identity_assurance` block (`tier`, `score`, `session_source`, `trajectory_confidence`, `reason`) — read it after check-in to confirm strong continuity, especially if calling with `require_strong_identity=true`.
 
