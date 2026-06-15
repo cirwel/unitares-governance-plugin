@@ -161,6 +161,32 @@ def test_payload_shape(monkeypatch, tmp_path):
     assert args["metadata"]["source"] == "plugin_hook"
     assert args["metadata"]["event"] == "turn_stop"
     assert args["metadata"]["plugin_version"] == checkin._plugin_version()
+    assert "epistemic_class" not in args
+
+
+def test_payload_can_label_hook_interpretation(monkeypatch, tmp_path):
+    """Hook-authored summaries should be distinguishable from agent reports."""
+    monkeypatch.setenv("UNITARES_CHECKIN_LOG", str(tmp_path / "cl.log"))
+    captured: dict = {}
+
+    def fake_post(url, payload, timeout=5.0):
+        captured["payload"] = payload
+        return True, 33, None
+
+    with patch("checkin._post_to_governance", side_effect=fake_post):
+        checkin.submit_checkin(
+            event="auto_edit",
+            response_text="Auto: 5 edits [hook]",
+            complexity=0.4,
+            confidence=0.6,
+            client_session_id="agent-abc1234567",
+            slot="slot-1",
+            epistemic_class="substrate_interpretation",
+        )
+
+    args = captured["payload"]["arguments"]
+    assert args["epistemic_class"] == "substrate_interpretation"
+    assert args["metadata"]["event"] == "auto_edit"
 
 
 def test_plugin_version_matches_package_metadata():

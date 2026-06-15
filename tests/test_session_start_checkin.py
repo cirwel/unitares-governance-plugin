@@ -183,13 +183,26 @@ class TestSessionStartMakesNoToolCalls:
 class TestSessionStartContext:
     """Context wording teaches the agent how to bind its own identity."""
 
-    def test_online_context_offers_fresh_start_session_with_onboard_fallback(self, tmp_path):
+    def test_online_context_offers_optional_start_session_with_onboard_fallback(self, tmp_path):
         stdout, _ = _serve_and_run(tmp_path)
         ctx = json.loads(stdout).get("additional_context", "")
         assert "UNITARES Governance: ONLINE" in ctx
+        assert "Optional identity attribution" in ctx
         assert "No identity has been created on your behalf" in ctx
         assert "start_session(" in ctx
         assert "onboard(" in ctx
+        assert "continuing without onboarding is allowed" in ctx
+
+    def test_online_context_avoids_pressure_framing(self, tmp_path):
+        stdout, _ = _serve_and_run(tmp_path)
+        ctx = json.loads(stdout).get("additional_context", "")
+        assert "ACTION REQUIRED" not in ctx
+        assert "onboard now" not in ctx
+        assert "invisible to governance" not in ctx
+        assert "goes ungoverned" not in ctx
+        assert "uninitialized, 0-update" not in ctx
+        assert "Do not manufacture a check-in" in ctx
+        assert "Substrate hooks may record observations automatically" in ctx
 
     def test_online_context_instructs_force_new_on_fresh_onboard(self, tmp_path):
         """Regression guard: a bare `onboard()` / `start_session()` suggestion lets the server
@@ -767,9 +780,11 @@ class TestCompactMode:
         stdout, _ = _serve_and_run(tmp_path, cwd=workspace, claude_session_id=slot)
         ctx = json.loads(stdout).get("additional_context", "")
 
-        # Compact prose markers: the banner nudges prompt onboarding
-        assert "ACTION REQUIRED" in ctx
-        assert "onboard now" in ctx
+        # Compact prose markers: no pressure nudge, but security and recovery
+        # pointers remain available.
+        assert "Slot-scoped governance state is present" in ctx
+        assert "ACTION REQUIRED" not in ctx
+        assert "onboard now" not in ctx
         assert "force_new=true" in ctx  # security regression guard still applies
         assert "/diagnose" in ctx  # operator escape hatch retained
         assert "next_action" in ctx
@@ -876,6 +891,27 @@ class TestCompactMode:
         assert compact_len < full_len * 0.4, (
             f"compact={compact_len}, full={full_len} — expected >=60% reduction"
         )
+
+
+class TestOnboardingNudgeOnce:
+    """Issue #735: the optional onboarding note must not repeat every turn
+    when an agent chooses not to onboard."""
+
+    def test_no_cache_repeats_suppress_optional_note_for_same_session(self, tmp_path):
+        slot = "same-session-no-cache"
+        first_stdout, _ = _serve_and_run(tmp_path, claude_session_id=slot)
+        first_ctx = json.loads(first_stdout).get("additional_context", "")
+        assert "Optional identity attribution" in first_ctx
+        assert "start_session(force_new=true)" in first_ctx
+        assert "Governance Fundamentals" in first_ctx
+
+        second_stdout, _ = _serve_and_run(tmp_path, claude_session_id=slot)
+        second_ctx = json.loads(second_stdout).get("additional_context", "")
+        assert "Optional onboarding context was already shown" in second_ctx
+        assert "Optional identity attribution" not in second_ctx
+        assert "start_session(" not in second_ctx
+        assert "Governance Fundamentals" not in second_ctx
+        assert "no check-in should be manufactured" in second_ctx
 
 
 class TestOrchestratorProvisionedLineage:

@@ -185,6 +185,8 @@ PY
 fi
 
 WORKSPACE_CACHE=""
+NUDGE_MARKER=""
+NUDGE_ALREADY_SHOWN=0
 if [[ -n "${CLAUDE_SESSION_ID}" ]]; then
   # Match session_cache.py _slot_suffix: alnum + [-_], cap at 64 chars.
   SAFE_SLOT=$(python3 - "${CLAUDE_SESSION_ID}" <<'PY' 2>/dev/null || true
@@ -196,6 +198,7 @@ PY
   )
   if [[ -n "${SAFE_SLOT}" ]]; then
     WORKSPACE_CACHE="${PWD}/.unitares/session-${SAFE_SLOT}.json"
+    NUDGE_MARKER="${PWD}/.unitares/session-start-nudge-${SAFE_SLOT}.json"
   fi
 fi
 
@@ -228,6 +231,9 @@ PY
   if (( CACHE_MTIME > 0 && CACHE_AGE_SECS >= 0 && CACHE_AGE_SECS < COMPACT_TTL_SECS )); then
     COMPACT_MODE=1
   fi
+fi
+if [[ -n "${NUDGE_MARKER}" && ! -f "${WORKSPACE_CACHE}" && -f "${NUDGE_MARKER}" ]]; then
+  NUDGE_ALREADY_SHOWN=1
 fi
 
 # ---------------------------------------------------------------------------
@@ -462,7 +468,7 @@ HEALTH_STATUS=$(curl -sS --max-time 3 "${SERVER_URL}/health" 2>>"${HEALTH_LOG}")
 printf '[%s] curl exit=%d len=%d url=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${HEALTH_EXIT}" "${#HEALTH_STATUS}" "${SERVER_URL}/health" >> "${HEALTH_LOG}" 2>/dev/null || true
 
 if [[ -z "${HEALTH_STATUS}" ]]; then
-  CONTEXT="UNITARES Governance: OFFLINE (${SERVER_URL} unreachable). Agent not onboarded. Governance tools may be unavailable."
+  CONTEXT="UNITARES Governance: OFFLINE (${SERVER_URL} unreachable). No governance identity is currently bound for this session. Governance tools may be unavailable."
   if [[ -n "${SKILL_CONTENT}" ]]; then
     CONTEXT="${CONTEXT}
 
@@ -471,40 +477,53 @@ ${SKILL_CONTENT}"
   fi
 else
   if [[ "${COMPACT_MODE}" == "1" ]]; then
-    # Compact prose: assumes the agent saw the full prompt + Fundamentals
+    # Compact prose: assumes the agent saw the full note + Fundamentals
     # excerpt earlier this hour (workspace cache mtime < TTL). Keep
     # `force_new=true` (force_new pin-resume guard, regression-tested),
     # the ontology pointer (so a forgetful agent can re-read), and the
     # operator escape hatch — drop everything else.
     CONTEXT="UNITARES Governance: ONLINE
-ACTION REQUIRED: onboard now — until you do, this session is invisible to governance (no identity, no trajectory, no check-ins). Call \`start_session(force_new=true)\` (\`onboard(...)\` canonical) — onboard fresh; declare \`parent_agent_id\` only for a real spawn/handoff (see lineage hint below), not for co-location. Then \`sync_state(...)\` after meaningful work.
-· After binding, read \`next_action\`, \`memory_suggestions\`, and \`recovery_hint\` when present.
-· Recovery: run /diagnose."
+Slot-scoped governance state is present for this session. Continue normally.
+Use \`sync_state(...)\` only for meaningful state worth reporting; do not create a check-in just to satisfy a hook reminder.
+If you intentionally need a fresh governance identity for this process, use \`start_session(force_new=true)\` (\`onboard(...)\` canonical) and declare \`parent_agent_id\` only for a real spawn/handoff (see lineage hint below), not for co-location.
+After governance calls, read \`next_action\`, \`memory_suggestions\`, and \`recovery_hint\` when present.
+Recovery: run /diagnose."
+  elif [[ "${NUDGE_ALREADY_SHOWN}" == "1" ]]; then
+    CONTEXT="UNITARES Governance: ONLINE
+Optional onboarding context was already shown for this session. Continuing without governance identity attribution is allowed; no action is required and no check-in should be manufactured for this reminder.
+Use \`sync_state(...)\` only for meaningful state worth reporting. Substrate hooks may record observations automatically; those are not agent-authored check-ins.
+Recovery: run /diagnose."
   else
+    if [[ -n "${NUDGE_MARKER}" ]]; then
+      mkdir -p "$(dirname "${NUDGE_MARKER}")" 2>/dev/null || true
+      printf '{"shown_at":"%s"}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"${NUDGE_MARKER}" 2>/dev/null || true
+    fi
     CONTEXT="UNITARES Governance: ONLINE
 
-ACTION REQUIRED — onboard now, as your first governance tool call, before
-other work. No identity has been created on your behalf (identity-honesty:
-the harness will not mint one for you). Until you onboard, your MCP transport
-is unbound and everything you do this session is invisible to governance —
-no identity, no trajectory, no verdicts, no check-ins. A session that never
-onboards is the #1 cause of \"uninitialized, 0-update\" agents.
+Optional identity attribution: if this process should have a governance
+identity, call:
 
     start_session(force_new=true)          # canonical/raw: onboard(force_new=true)
 
-Then check in after meaningful work so your identity carries real signal:
+No identity has been created on your behalf (identity-honesty: the harness
+will not mint one for you), and continuing without onboarding is allowed.
+Do not manufacture a check-in to satisfy this note. If you do onboard, use
+\`sync_state(...)\` only when there is meaningful state worth reporting:
 
     sync_state(response_text=..., complexity=..., confidence=...)
+
+Substrate hooks may record observations automatically. Those observations are
+not agent-authored check-ins and do not require you to echo them.
 
 Under the identity ontology, fresh process-instances mint fresh
 governance-identity. \`force_new=true\` is the default posture; lineage, when
 applicable, is declared via \`parent_agent_id\` (see hint below) rather than
 resumed via token.
 
-The post-identity hook records your UUID locally so the turn/edit/end
-check-in hooks can find your session. If you skip onboarding, those hooks
-have nothing to attach to and stay silent the entire session — your work
-goes ungoverned.
+The post-identity hook records your UUID locally so hook-generated summaries
+can attach to the chosen identity. Hook-generated summaries are labeled as
+substrate interpretation; they should not pressure you to speak in the
+agent voice.
 
 After onboarding, read the agent-experience fields in the response:
 \`next_action\`, \`state_summary\`, \`risk_summary\`, \`memory_suggestions\`,
@@ -526,7 +545,7 @@ ${WORKSPACE_LINEAGE_HINT}"
   # Skip the Fundamentals excerpt in compact mode. The freshness warning
   # (if any) still injects on the *next* fresh-workspace fire when the
   # full block returns, so calibration on stale skill files isn't lost.
-  if [[ "${COMPACT_MODE}" != "1" && -n "${SKILL_CONTENT}" ]]; then
+  if [[ "${COMPACT_MODE}" != "1" && "${NUDGE_ALREADY_SHOWN}" != "1" && -n "${SKILL_CONTENT}" ]]; then
     CONTEXT="${CONTEXT}
 
 --- Governance Fundamentals (excerpt)${SKILL_SOURCE_SUFFIX} ---

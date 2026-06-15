@@ -257,6 +257,7 @@ python3 "${PLUGIN_ROOT}/scripts/checkin.py" \
   --response-text "${RESPONSE_TEXT}" \
   --complexity "${COMPLEXITY}" \
   --confidence 0.6 \
+  --epistemic-class substrate_interpretation \
   --client-session-id "${CLIENT_SESSION_ID}" \
   --uuid "${UUID_HINT}" \
   --slot "${SLOT}" \

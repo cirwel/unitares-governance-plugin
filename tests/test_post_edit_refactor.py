@@ -94,4 +94,5 @@ def test_post_edit_routes_through_checkin_py_with_plugin_hook_metadata(tmp_path)
         f"events: {[c['arguments'].get('metadata', {}).get('event') for c in checkins]}"
     )
     assert auto_edit[0]["arguments"]["metadata"]["source"] == "plugin_hook"
+    assert auto_edit[0]["arguments"]["epistemic_class"] == "substrate_interpretation"
     assert "continuity_token" not in auto_edit[0]["arguments"]
