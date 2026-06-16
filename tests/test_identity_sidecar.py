@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 import threading
-from http.server import BaseHTTPRequestHandler
+import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from socketserver import TCPServer
 
@@ -15,10 +16,14 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from identity_sidecar import IdentitySidecar  # noqa: E402
+from identity_sidecar import IdentitySidecar, make_handler  # noqa: E402
 
 
 class _ReusableTCPServer(TCPServer):
+    allow_reuse_address = True
+
+
+class _ReusableThreadingHTTPServer(ThreadingHTTPServer):
     allow_reuse_address = True
 
 
@@ -117,6 +122,37 @@ def _sidecar(tmp_path: Path, fake_server: str) -> IdentitySidecar:
         default_slot="slot-a",
         log_path=tmp_path / "checkins.log",
     )
+
+
+def _serve_sidecar(sidecar: IdentitySidecar):
+    srv = _ReusableThreadingHTTPServer(("127.0.0.1", 0), make_handler(sidecar))
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    return srv, thread, f"http://127.0.0.1:{srv.server_address[1]}"
+
+
+def _stop_server(srv: TCPServer, thread: threading.Thread) -> None:
+    srv.shutdown()
+    thread.join(timeout=2)
+    srv.server_close()
+
+
+def _http_post_json(url: str, payload: object, *, headers: dict[str, str] | None = None) -> tuple[int, object]:
+    body = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(url, data=body, method="POST")
+    req.add_header("Content-Type", "application/json")
+    for key, value in (headers or {}).items():
+        req.add_header(key, value)
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        return int(resp.status), json.loads(resp.read().decode("utf-8"))
+
+
+def _http_get_json(url: str, *, headers: dict[str, str] | None = None) -> tuple[int, object]:
+    req = urllib.request.Request(url, method="GET")
+    for key, value in (headers or {}).items():
+        req.add_header(key, value)
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        return int(resp.status), json.loads(resp.read().decode("utf-8"))
 
 
 def test_tool_proxy_lazy_onboards_and_injects_client_session_id(tmp_path: Path, fake_server: str) -> None:
@@ -293,3 +329,58 @@ def test_mcp_checkin_stamps_existing_session(tmp_path: Path, fake_server: str) -
     assert sent_args["client_session_id"] == "agent-sidecar-111"
     cache = json.loads((cache_dir / "session-slot-a.json").read_text())
     assert "last_checkin_ts" in cache
+
+
+def test_http_client_config_returns_slot_scoped_mcp_snippet(tmp_path: Path, fake_server: str) -> None:
+    sidecar = _sidecar(tmp_path, fake_server)
+    srv, thread, base_url = _serve_sidecar(sidecar)
+    try:
+        status, payload = _http_get_json(f"{base_url}/client-config?slot=codex-local")
+    finally:
+        _stop_server(srv, thread)
+
+    assert status == 200
+    assert isinstance(payload, dict)
+    assert payload["success"] is True
+    assert payload["sidecar_url"] == base_url
+    assert payload["slot"] == "codex-local"
+    assert payload["transport"]["mcp"]["mode"] == "jsonrpc-http"
+    assert payload["transport"]["mcp"]["url"] == f"{base_url}/mcp/"
+    config = payload["mcp_config"]["mcpServers"]["unitares-governance-sidecar"]
+    assert config == {
+        "type": "url",
+        "url": f"{base_url}/mcp/",
+        "headers": {"X-UNITARES-Slot": "codex-local"},
+    }
+
+
+def test_http_mcp_route_lazy_onboards_and_injects_client_session_id(tmp_path: Path, fake_server: str) -> None:
+    sidecar = _sidecar(tmp_path, fake_server)
+    srv, thread, base_url = _serve_sidecar(sidecar)
+    try:
+        status, payload = _http_post_json(
+            f"{base_url}/mcp/",
+            {
+                "jsonrpc": "2.0",
+                "id": 10,
+                "method": "tools/call",
+                "params": {"name": "knowledge", "arguments": {"action": "search"}},
+            },
+            headers={"X-UNITARES-Slot": "codex-http"},
+        )
+    finally:
+        _stop_server(srv, thread)
+
+    assert status == 200
+    assert isinstance(payload, dict)
+    assert payload["jsonrpc"] == "2.0"
+    assert payload["id"] == 10
+    assert [call.get("name") or call.get("method") for call in FakeGovernanceHandler.calls] == [
+        "onboard",
+        "tools/call",
+    ]
+    mcp_args = FakeGovernanceHandler.calls[1]["params"]["arguments"]
+    assert mcp_args["client_session_id"] == "agent-sidecar-111"
+    cache = json.loads((tmp_path / ".unitares" / "session-codex-http.json").read_text())
+    assert cache["client_session_id"] == "agent-sidecar-111"
+    assert "continuity_token" not in cache

@@ -24,6 +24,10 @@ REST tool calls through it.
 python3 scripts/identity_sidecar.py --server-url http://localhost:8767 --workspace "$PWD" --slot codex-local
 ```
 
+Then read `http://127.0.0.1:8768/client-config?slot=codex-local` for the
+slot-scoped MCP URL/header snippet to paste into clients that can use a URL MCP
+server.
+
 The sidecar wraps REST `/v1/tools/call` and minimal JSON-RPC MCP `/mcp/`
 requests, lazily onboards when the slot has no cached `client_session_id`,
 injects that session id into attribution-relevant governance calls, and provides

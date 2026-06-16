@@ -87,6 +87,17 @@ def _read_request_json(handler: BaseHTTPRequestHandler) -> Any:
     return data
 
 
+def _handler_base_url(handler: BaseHTTPRequestHandler) -> str:
+    forwarded_proto = handler.headers.get("X-Forwarded-Proto", "")
+    scheme = (forwarded_proto.split(",")[0].strip() if forwarded_proto else "") or "http"
+    forwarded_host = handler.headers.get("X-Forwarded-Host", "")
+    host = (forwarded_host.split(",")[0].strip() if forwarded_host else "") or handler.headers.get("Host")
+    if not host:
+        address = handler.server.server_address
+        host = f"{address[0]}:{address[1]}"
+    return f"{scheme}://{host}".rstrip("/")
+
+
 def _has_proof_field(arguments: dict[str, Any]) -> bool:
     for field in PROOF_FIELDS:
         value = arguments.get(field)
@@ -445,6 +456,52 @@ class IdentitySidecar:
             "findings": [f.as_dict() for f in findings],
         }
 
+    def client_config(self, *, sidecar_url: str, slot: str) -> dict[str, Any]:
+        base = sidecar_url.rstrip("/")
+        slot = slot.strip() or self.default_slot
+        mcp_url = f"{base}/mcp/"
+        return {
+            "success": True,
+            "sidecar_url": base,
+            "server_url": self.server_url,
+            "workspace": str(self.workspace),
+            "default_slot": self.default_slot,
+            "slot": slot,
+            "transport": {
+                "mcp": {
+                    "mode": "jsonrpc-http",
+                    "url": mcp_url,
+                    "slot_header": "X-UNITARES-Slot",
+                    "intercepts": ["tools/call"],
+                    "passes_through": ["tools/list", "initialize", "notifications/*"],
+                },
+                "rest_tool_call": f"{base}/v1/tools/call",
+                "turn_checkin": f"{base}/turn/checkin",
+                "turn_stop": f"{base}/turn/stop",
+                "session": f"{base}/session",
+                "audit": f"{base}/audit?log_tail=200",
+            },
+            "mcp_config": {
+                "mcpServers": {
+                    "unitares-governance-sidecar": {
+                        "type": "url",
+                        "url": mcp_url,
+                        "headers": {"X-UNITARES-Slot": slot},
+                    }
+                }
+            },
+            "environment": {
+                "UNITARES_SIDECAR_URL": base,
+                "UNITARES_SIDECAR_SLOT": slot,
+                "UNITARES_SERVER_URL": self.server_url,
+            },
+            "notes": [
+                "Use this sidecar MCP URL only for clients that send JSON request/response MCP over HTTP.",
+                "Clients requiring streamable HTTP or SSE should use the upstream governance MCP endpoint until sidecar support is added.",
+                "The sidecar stores slot-scoped client_session_id continuity and never persists continuity_token.",
+            ],
+        }
+
 
 def make_handler(sidecar: IdentitySidecar) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
@@ -464,7 +521,19 @@ def make_handler(sidecar: IdentitySidecar) -> type[BaseHTTPRequestHandler]:
                     "server_url": sidecar.server_url,
                     "workspace": str(sidecar.workspace),
                     "default_slot": sidecar.default_slot,
+                    "client_config": f"{_handler_base_url(self)}/client-config",
+                    "mcp": f"{_handler_base_url(self)}/mcp/",
                 })
+                return
+            if path in {"/client-config", "/config"}:
+                requested_slot = (query.get("slot") or [""])[0]
+                body = {"slot": requested_slot} if requested_slot else {}
+                slot = sidecar.slot_from(body, self.headers)
+                _json_response(
+                    self,
+                    200,
+                    sidecar.client_config(sidecar_url=_handler_base_url(self), slot=slot),
+                )
                 return
             if path == "/session":
                 slot = sidecar.slot_from({}, self.headers)

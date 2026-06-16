@@ -166,6 +166,7 @@ implementation. It wraps REST `/v1/tools/call` and minimal JSON-RPC MCP
 `force_new=true` for bare `onboard` / `start_session`, stamps the slot cache
 after check-ins, and exposes `GET /audit`. Useful endpoints:
 
+- `GET http://127.0.0.1:8768/client-config?slot=codex-local` for a generated MCP/client snippet
 - `POST http://127.0.0.1:8768/v1/tools/call` with `{"name": "...", "arguments": {...}}`
 - `POST http://127.0.0.1:8768/mcp/` for JSON-RPC MCP requests; `tools/call` is intercepted and other JSON requests pass through
 - `POST http://127.0.0.1:8768/turn/checkin` with `response_text`, `complexity`, and `confidence`
@@ -177,9 +178,11 @@ multiple clients. Without an explicit slot, the sidecar uses a workspace-derived
 default slot.
 
 For clients that accept a URL MCP server, point them at
-`http://127.0.0.1:8768/mcp/` only when they use JSON request/response MCP. If a
-client requires streamable HTTP/SSE semantics, use the upstream governance MCP
-endpoint until the sidecar grows that transport path.
+`http://127.0.0.1:8768/mcp/` only when they use JSON request/response MCP. The
+generated `GET /client-config` response includes the URL, `X-UNITARES-Slot`
+header, and a minimal `mcpServers` snippet. If a client requires streamable
+HTTP/SSE semantics, use the upstream governance MCP endpoint until the sidecar
+grows that transport path.
 
 ## Non-Goals
 
