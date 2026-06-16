@@ -52,5 +52,11 @@ If `health_check()` is used, also show:
 
 If the live identity differs from the slot-scoped cache, refresh that slot's cache with the latest continuity data via `scripts/session_cache.py set session --slot=<client_session_id> --merge --stamp`.
 
+For a local contract audit, run
+`python3 scripts/audit_identity_contract.py --workspace "$PWD"`. Treat `error`
+findings as cache contract violations. Treat `warning` findings as operator
+signals: weak resolution source, flat legacy cache, floor observation, or
+delivery failure.
+
 Do not dump raw JSON unless the user explicitly asks for it.
 Prefer a short interpreted summary.

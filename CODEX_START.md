@@ -94,6 +94,15 @@ Do not treat every file edit or tool call as a governance event. Turn-level base
 - `session_resolution_source`: if this falls back to a weak source, rerun `/governance-start`
 - `identity_assurance`: strong is better than implicit
 
+Use the local audit when continuity looks suspicious:
+
+```bash
+python3 scripts/audit_identity_contract.py --workspace "$PWD"
+```
+
+It checks the neutral cache and check-in log for token-at-rest violations, empty
+identity stubs, weak resolution sources, and floor/failure log statuses.
+
 ## Commands
 
 - `/governance-start` to create or declare lineage and refresh local continuity state

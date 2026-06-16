@@ -196,6 +196,23 @@ Expected line format:
 
 Statuses: `sent` (accepted by governance), `fail` (POST failed — see `err=...`), `skip_kill_switch` (suppressed by `UNITARES_CHECKINS=off`), `error` (client-side exception; caller passed garbage values).
 
+### Protective audit
+
+Run the local identity-contract audit when check-ins look wrong, before shipping
+adapter changes, or from a lightweight monitor:
+
+```bash
+python3 scripts/audit_identity_contract.py --workspace "$PWD"
+```
+
+The audit checks slot-scoped session caches and the hook diagnostic log without
+contacting the governance server. Hard failures include non-empty
+`continuity_token` at rest, unreadable session JSON, and session caches with no
+`uuid` or `client_session_id`. Warnings include flat legacy `session.json`, weak
+`session_resolution_source` values such as `ip_ua_fingerprint`, and log statuses
+like `floor_sent`, `floor_fail`, `fail`, or `error`. Use `--json` for monitor
+output and `--fail-on-warning` when warnings should break CI.
+
 ### Known limitation
 
 The edit-threshold auto-checkin previously supported `UNITARES_HTTP_API_TOKEN`
