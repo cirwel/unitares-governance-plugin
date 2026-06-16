@@ -108,7 +108,7 @@ Do not treat every file edit or tool call as a governance event. Turn-level base
 Use the local audit when continuity looks suspicious:
 
 ```bash
-python3 scripts/audit_identity_contract.py --workspace "$PWD"
+python3 scripts/audit_identity_contract.py --workspace "$PWD" --log-tail 200
 ```
 
 It checks the neutral cache and check-in log for token-at-rest violations, empty

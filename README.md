@@ -168,7 +168,7 @@ after check-ins, and exposes `GET /audit`. Useful endpoints:
 - `POST http://127.0.0.1:8768/v1/tools/call` with `{"name": "...", "arguments": {...}}`
 - `POST http://127.0.0.1:8768/turn/checkin` with `response_text`, `complexity`, and `confidence`
 - `POST http://127.0.0.1:8768/turn/stop` for an end-of-turn check-in
-- `GET http://127.0.0.1:8768/audit` for local cache/log contract findings
+- `GET http://127.0.0.1:8768/audit?log_tail=200` for bounded local cache/log contract findings
 
 Use `X-UNITARES-Slot` or top-level `{"slot": "..."}` when one sidecar serves
 multiple clients. Without an explicit slot, the sidecar uses a workspace-derived
@@ -230,7 +230,7 @@ Run the local identity-contract audit when check-ins look wrong, before shipping
 adapter changes, or from a lightweight monitor:
 
 ```bash
-python3 scripts/audit_identity_contract.py --workspace "$PWD"
+python3 scripts/audit_identity_contract.py --workspace "$PWD" --log-tail 200
 ```
 
 The audit checks slot-scoped session caches and the hook diagnostic log without
@@ -238,8 +238,9 @@ contacting the governance server. Hard failures include non-empty
 `continuity_token` at rest, unreadable session JSON, and session caches with no
 `uuid` or `client_session_id`. Warnings include flat legacy `session.json`, weak
 `session_resolution_source` values such as `ip_ua_fingerprint`, and log statuses
-like `floor_sent`, `floor_fail`, `fail`, or `error`. Use `--json` for monitor
-output and `--fail-on-warning` when warnings should break CI.
+like `floor_sent`, `floor_fail`, `fail`, or `error`. Use `--log-tail N` or
+`--since 24h` for operational monitoring, `--json` for monitor output, and
+`--fail-on-warning` when warnings should break CI.
 
 ### Known limitation
 

@@ -23,6 +23,7 @@ import os
 import re
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -175,7 +176,54 @@ def _parse_log_line(line: str) -> dict[str, str]:
     return fields
 
 
-def audit_checkin_log(log_path: Path) -> list[Finding]:
+def _parse_log_timestamp(line: str) -> datetime | None:
+    raw = line.split("|", 1)[0].strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def parse_since(raw: str | None, *, now: datetime | None = None) -> datetime | None:
+    """Parse a monitor window.
+
+    Supports ISO-8601 timestamps plus shorthand durations: 30m, 12h, 7d.
+    """
+    if not raw:
+        return None
+    text = raw.strip()
+    if not text:
+        return None
+    match = re.fullmatch(r"(\d+)([mhd])", text, flags=re.IGNORECASE)
+    if match:
+        value = int(match.group(1))
+        unit = match.group(2).lower()
+        current = now or datetime.now(timezone.utc)
+        if unit == "m":
+            return current - timedelta(minutes=value)
+        if unit == "h":
+            return current - timedelta(hours=value)
+        return current - timedelta(days=value)
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("--since must be ISO-8601 or shorthand like 30m, 12h, 7d") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def audit_checkin_log(
+    log_path: Path,
+    *,
+    log_tail: int | None = None,
+    since: datetime | None = None,
+) -> list[Finding]:
     findings: list[Finding] = []
     if not log_path.exists():
         return findings
@@ -189,8 +237,15 @@ def audit_checkin_log(log_path: Path) -> list[Finding]:
             f"check-in log could not be read: {exc}",
         )]
 
-    for index, line in enumerate(lines, start=1):
+    indexed_lines = list(enumerate(lines, start=1))
+    if log_tail is not None and log_tail > 0:
+        indexed_lines = indexed_lines[-log_tail:]
+
+    for index, line in indexed_lines:
         if not line.strip():
+            continue
+        stamp = _parse_log_timestamp(line)
+        if since is not None and stamp is not None and stamp < since:
             continue
         fields = _parse_log_line(line)
         status = fields.get("status", "")
@@ -245,14 +300,25 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--workspace", default=None, help="workspace root to inspect; default: cwd")
     parser.add_argument("--log", default=None, help="check-in log path; default: UNITARES_CHECKIN_LOG or ~/.unitares/checkins.log")
+    parser.add_argument("--log-tail", type=int, default=None, help="inspect only the last N check-in log lines")
+    parser.add_argument("--since", default=None, help="inspect log lines at or after ISO timestamp or shorthand duration such as 24h, 30m, 7d")
     parser.add_argument("--json", action="store_true", help="emit JSON instead of text")
     parser.add_argument("--fail-on-warning", action="store_true", help="exit 1 when warnings are present")
     args = parser.parse_args(argv)
 
     workspace = _workspace_path(args.workspace)
     log_path = Path(args.log).expanduser() if args.log else _default_log_path()
+    try:
+        since = parse_since(args.since)
+    except ValueError as exc:
+        print(f"audit_identity_contract.py: {exc}", file=sys.stderr)
+        return 2
 
-    findings = audit_session_caches(workspace) + audit_checkin_log(log_path)
+    findings = audit_session_caches(workspace) + audit_checkin_log(
+        log_path,
+        log_tail=args.log_tail,
+        since=since,
+    )
     errors = [f for f in findings if f.severity == "error"]
     warnings = [f for f in findings if f.severity == "warning"]
 
@@ -260,6 +326,8 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({
             "workspace": str(workspace),
             "log": str(log_path),
+            "log_tail": args.log_tail,
+            "since": since.isoformat() if since else None,
             "errors": len(errors),
             "warnings": len(warnings),
             "findings": [f.as_dict() for f in findings],

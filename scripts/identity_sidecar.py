@@ -24,6 +24,7 @@ import os
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -32,7 +33,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from audit_identity_contract import audit_checkin_log, audit_session_caches  # noqa: E402
+from audit_identity_contract import audit_checkin_log, audit_session_caches, parse_since  # noqa: E402
 from checkin import _plugin_version, submit_checkin  # noqa: E402
 from governance_call_inject import INJECT_SUFFIXES, PROOF_FIELDS  # noqa: E402
 from onboard_helper import (  # noqa: E402
@@ -126,6 +127,7 @@ class IdentitySidecar:
         timeout: float = DEFAULT_TIMEOUT,
         auth_token: str | None = None,
         log_path: Path | None = None,
+        audit_log_tail: int | None = 200,
     ) -> None:
         self.server_url = server_url.rstrip("/")
         self.workspace = workspace
@@ -135,6 +137,7 @@ class IdentitySidecar:
         self.timeout = timeout
         self.auth_token = auth_token
         self.log_path = log_path or Path(os.environ.get("UNITARES_CHECKIN_LOG", "~/.unitares/checkins.log")).expanduser()
+        self.audit_log_tail = audit_log_tail
 
     def slot_from(self, body: dict[str, Any], headers: Any) -> str:
         header_slot = headers.get("X-UNITARES-Slot") if headers else ""
@@ -307,12 +310,20 @@ class IdentitySidecar:
             "uuid": session.get("uuid", ""),
         }
 
-    def audit(self) -> dict[str, Any]:
-        findings = audit_session_caches(self.workspace) + audit_checkin_log(self.log_path)
+    def audit(self, *, log_tail: int | None = None, since: str | None = None) -> dict[str, Any]:
+        since_dt = parse_since(since)
+        tail = self.audit_log_tail if log_tail is None else log_tail
+        findings = audit_session_caches(self.workspace) + audit_checkin_log(
+            self.log_path,
+            log_tail=tail,
+            since=since_dt,
+        )
         return {
             "success": True,
             "workspace": str(self.workspace),
             "log": str(self.log_path),
+            "log_tail": tail,
+            "since": since_dt.isoformat() if since_dt else None,
             "errors": sum(1 for f in findings if f.severity == "error"),
             "warnings": sum(1 for f in findings if f.severity == "warning"),
             "findings": [f.as_dict() for f in findings],
@@ -328,7 +339,10 @@ def make_handler(sidecar: IdentitySidecar) -> type[BaseHTTPRequestHandler]:
                 super().log_message(fmt, *args)
 
         def do_GET(self) -> None:  # noqa: N802
-            if self.path == "/health":
+            parsed = urllib.parse.urlparse(self.path)
+            query = urllib.parse.parse_qs(parsed.query)
+            path = parsed.path
+            if path == "/health":
                 _json_response(self, 200, {
                     "success": True,
                     "server_url": sidecar.server_url,
@@ -336,14 +350,26 @@ def make_handler(sidecar: IdentitySidecar) -> type[BaseHTTPRequestHandler]:
                     "default_slot": sidecar.default_slot,
                 })
                 return
-            if self.path == "/session":
+            if path == "/session":
                 slot = sidecar.slot_from({}, self.headers)
                 session = dict(sidecar.read_session(slot))
                 session.pop("continuity_token", None)
                 _json_response(self, 200, {"success": True, "slot": slot, "session": session})
                 return
-            if self.path == "/audit":
-                _json_response(self, 200, sidecar.audit())
+            if path == "/audit":
+                raw_tail = (query.get("log_tail") or [None])[0]
+                try:
+                    log_tail = int(raw_tail) if raw_tail else None
+                    _json_response(
+                        self,
+                        200,
+                        sidecar.audit(
+                            log_tail=log_tail,
+                            since=(query.get("since") or [None])[0],
+                        ),
+                    )
+                except ValueError as exc:
+                    _json_response(self, 400, {"success": False, "error": str(exc)})
                 return
             _json_response(self, 404, {"success": False, "error": "not found"})
 
@@ -390,6 +416,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--name", default=os.environ.get("UNITARES_AGENT_NAME", ""))
     parser.add_argument("--model-type", default=os.environ.get("UNITARES_MODEL_TYPE", "sidecar"))
     parser.add_argument("--timeout", type=float, default=float(os.environ.get("UNITARES_SIDECAR_TIMEOUT", DEFAULT_TIMEOUT)))
+    parser.add_argument("--audit-log-tail", type=int, default=int(os.environ.get("UNITARES_SIDECAR_AUDIT_LOG_TAIL", "200")),
+                        help="default number of check-in log lines included by GET /audit")
     args = parser.parse_args(argv)
 
     workspace = Path(args.workspace).expanduser().resolve()
@@ -402,6 +430,7 @@ def main(argv: list[str] | None = None) -> int:
         default_slot=default_slot,
         timeout=args.timeout,
         auth_token=os.environ.get("UNITARES_HTTP_API_TOKEN") or None,
+        audit_log_tail=args.audit_log_tail,
     )
     httpd = ThreadingHTTPServer((args.host, args.port), make_handler(sidecar))
     print(json.dumps({

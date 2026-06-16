@@ -163,3 +163,28 @@ def test_audit_endpoint_reports_local_contract_findings(tmp_path: Path, fake_ser
         "session_cache_token_at_rest",
         "session_cache_missing_identity",
     }
+
+
+def test_audit_endpoint_uses_bounded_log_tail(tmp_path: Path, fake_server: str) -> None:
+    log = tmp_path / "checkins.log"
+    log.write_text(
+        "\n".join([
+            "2026-06-16T00:00:00Z | slot=s1 | event=turn_stop | uuid=u1 | status=fail",
+            "2026-06-16T00:01:00Z | slot=s1 | event=turn_stop | uuid=u1 | status=sent",
+        ]) + "\n",
+        encoding="utf-8",
+    )
+    sidecar = IdentitySidecar(
+        server_url=fake_server,
+        workspace=tmp_path,
+        agent_name="sidecar-agent",
+        model_type="sidecar-test",
+        default_slot="slot-a",
+        log_path=log,
+        audit_log_tail=1,
+    )
+
+    payload = sidecar.audit()
+
+    assert payload["log_tail"] == 1
+    assert payload["warnings"] == 0

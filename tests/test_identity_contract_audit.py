@@ -118,3 +118,40 @@ def test_fail_on_warning_exits_one(tmp_path: Path) -> None:
     assert payload["errors"] == 0
     assert payload["warnings"] == 1
     assert payload["findings"][0]["code"] == "flat_session_cache_present"
+
+
+def test_log_tail_limits_historical_noise(tmp_path: Path) -> None:
+    log = tmp_path / "checkins.log"
+    log.write_text(
+        "\n".join([
+            "2026-06-16T00:00:00Z | slot=s1 | event=turn_stop | uuid=u1 | status=fail",
+            "2026-06-16T00:01:00Z | slot=s1 | event=turn_stop | uuid=u1 | status=sent",
+            "2026-06-16T00:02:00Z | slot=s1 | event=turn_stop | uuid=u1 | status=sent",
+        ]) + "\n",
+        encoding="utf-8",
+    )
+
+    result = _run(tmp_path, log, "--log-tail", "2")
+
+    assert result.returncode == 0
+    payload = _payload(result)
+    assert payload["log_tail"] == 2
+    assert payload["warnings"] == 0
+
+
+def test_since_filters_older_log_lines(tmp_path: Path) -> None:
+    log = tmp_path / "checkins.log"
+    log.write_text(
+        "\n".join([
+            "2026-06-15T23:59:00Z | slot=s1 | event=turn_stop | uuid=u1 | status=fail",
+            "2026-06-16T00:01:00Z | slot=s1 | event=turn_stop | uuid=u1 | status=floor_sent",
+        ]) + "\n",
+        encoding="utf-8",
+    )
+
+    result = _run(tmp_path, log, "--since", "2026-06-16T00:00:00Z")
+
+    assert result.returncode == 0
+    payload = _payload(result)
+    assert payload["warnings"] == 1
+    assert payload["findings"][0]["code"] == "checkin_fallback_status"
