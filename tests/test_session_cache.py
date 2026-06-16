@@ -315,6 +315,20 @@ def test_set_session_allows_empty_token_erasure(tmp_path: Path) -> None:
     assert cached["schema_version"] == 2
 
 
+def test_set_session_rejects_empty_token_only_stub(tmp_path: Path) -> None:
+    """An empty continuity_token is allowed only as an erasure field alongside
+    a real identity anchor. Token-only v2 stubs are not addressable and should
+    not satisfy the session identity guard."""
+    result = _run_raw(
+        ["set", "session", "--slot", "test-slot",
+         "--json", '{"continuity_token": "", "schema_version": 2}'],
+        tmp_path,
+    )
+    assert result.returncode == 1
+    assert "without any identity field" in result.stderr
+    assert not (tmp_path / ".unitares" / "session-test-slot.json").exists()
+
+
 def test_set_session_token_check_runs_after_merge(tmp_path: Path) -> None:
     """The token rejection must apply to the *merged* payload, not just the
     incoming JSON. Otherwise a caller could seed an empty token and merge

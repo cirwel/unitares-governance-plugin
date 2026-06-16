@@ -19,7 +19,10 @@ If a matching cache exists:
 
 If current binding is unclear, call `identity()` first to inspect the active binding.
 
-If you must rebind to a cached UUID, include the matching `continuity_token`: `identity(agent_uuid=<uuid>, continuity_token=<token>, resume=true)`.
+If you must rebind to a cached UUID, include a matching live `continuity_token`
+from the same process response: `identity(agent_uuid=<uuid>,
+continuity_token=<token>, resume=true)`. Do not look for this token in the v2
+slot cache; it is not persisted there.
 
 If this is a fresh process and no ownership proof is available, use `/governance-start` to mint a fresh identity with `parent_agent_id=<cached uuid>` rather than bare UUID resume.
 

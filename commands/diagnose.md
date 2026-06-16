@@ -16,7 +16,7 @@ If continuity state exists:
 - treat `uuid` as a local identity anchor and lineage candidate
 - use `continuity_token` only for proof-owned UUID rebinds
 
-Do not verify by bare UUID resume. If you need to test ownership of a cached UUID, call `identity(agent_uuid=<uuid>, continuity_token=<token>, resume=true)` only when a matching current token is available.
+Do not verify by bare UUID resume. If you need to test ownership of a cached UUID, call `identity(agent_uuid=<uuid>, continuity_token=<token>, resume=true)` only when a matching current live token is available. Do not expect v2 slot caches to persist that token.
 
 If no proof-owned UUID rebind is available, call `identity()` to inspect current binding. Use `/governance-start` to create a fresh process identity with `parent_agent_id=<cached uuid>` if this process should inherit prior work.
 
