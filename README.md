@@ -146,6 +146,34 @@ Codex and ChatGPT support should stay minimal and explicit:
 - use `scripts/session_cache.py` as the shared cache helper across adapters
 - avoid client-specific auto-checkin behavior until there is a Codex-native reason to add it
 
+### Sidecar
+
+For clients without lifecycle hooks, run the local identity sidecar and send
+governance REST tool calls through it:
+
+```bash
+python3 scripts/identity_sidecar.py \
+  --server-url http://localhost:8767 \
+  --workspace "$PWD" \
+  --slot codex-local \
+  --port 8768
+```
+
+Phase 1 is a dependency-free REST sidecar, not a full streamable-MCP proxy. It
+wraps `/v1/tools/call`, lazily onboards a slot when needed, injects
+`client_session_id` into attribution-relevant governance calls, forces
+`force_new=true` for bare `onboard` / `start_session`, stamps the slot cache
+after check-ins, and exposes `GET /audit`. Useful endpoints:
+
+- `POST http://127.0.0.1:8768/v1/tools/call` with `{"name": "...", "arguments": {...}}`
+- `POST http://127.0.0.1:8768/turn/checkin` with `response_text`, `complexity`, and `confidence`
+- `POST http://127.0.0.1:8768/turn/stop` for an end-of-turn check-in
+- `GET http://127.0.0.1:8768/audit` for local cache/log contract findings
+
+Use `X-UNITARES-Slot` or top-level `{"slot": "..."}` when one sidecar serves
+multiple clients. Without an explicit slot, the sidecar uses a workspace-derived
+default slot.
+
 ## Non-Goals
 
 This repo should not:

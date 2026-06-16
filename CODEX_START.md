@@ -16,7 +16,18 @@ Use `explicit` mode unless you are deliberately dogfooding tighter automation.
 - `dogfood-light`: explicit check-ins plus stronger milestone reminders
 - `dogfood-heavy`: research mode for tighter automation and deterministic outcome capture
 
-This plugin currently optimizes for `explicit`.
+This plugin currently optimizes for `explicit`. If you want adapter-like
+onboarding/check-in behavior from Codex, run the sidecar and send governance
+REST tool calls through it.
+
+```bash
+python3 scripts/identity_sidecar.py --server-url http://localhost:8767 --workspace "$PWD" --slot codex-local
+```
+
+The sidecar wraps `/v1/tools/call`, lazily onboards when the slot has no cached
+`client_session_id`, injects that session id into attribution-relevant
+governance calls, and provides `/turn/checkin`, `/turn/stop`, and `/audit`.
+It is not a full MCP transport proxy yet.
 
 ## Recommended Flow
 
