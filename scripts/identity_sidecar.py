@@ -10,9 +10,11 @@ It wraps the server's `/v1/tools/call` surface with local lifecycle help:
 * force fresh posture for bare `onboard` / `start_session` calls
 * stamp the slot cache after successful check-ins
 * expose the local identity-contract audit
+* proxy minimal JSON-RPC MCP `tools/call` requests through `/mcp/`
 
-Phase 1 intentionally stays REST-only. A full streamable-MCP proxy can reuse the
-same core behavior once the transport boundary is worth owning directly.
+Phase 1 intentionally stays dependency-free: REST plus minimal JSON-RPC MCP.
+A full streamable-MCP/SSE proxy can reuse the same core behavior once that
+transport boundary is worth owning directly.
 """
 
 from __future__ import annotations
@@ -60,7 +62,7 @@ def _workspace_hash(workspace: Path) -> str:
     return hashlib.md5(str(workspace).encode("utf-8")).hexdigest()[:8]
 
 
-def _json_response(handler: BaseHTTPRequestHandler, status: int, payload: dict[str, Any]) -> None:
+def _json_response(handler: BaseHTTPRequestHandler, status: int, payload: Any) -> None:
     body = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
     handler.send_response(status)
     handler.send_header("Content-Type", "application/json")
@@ -69,7 +71,7 @@ def _json_response(handler: BaseHTTPRequestHandler, status: int, payload: dict[s
     handler.wfile.write(body)
 
 
-def _read_request_json(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
+def _read_request_json(handler: BaseHTTPRequestHandler) -> Any:
     raw_len = handler.headers.get("Content-Length") or "0"
     try:
         length = max(0, int(raw_len))
@@ -82,7 +84,7 @@ def _read_request_json(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
         data = json.loads(raw.decode("utf-8"))
     except Exception:
         return {}
-    return data if isinstance(data, dict) else {}
+    return data
 
 
 def _has_proof_field(arguments: dict[str, Any]) -> bool:
@@ -113,6 +115,35 @@ def _post_json(url: str, payload: dict[str, Any], timeout: float, token: str | N
     except Exception as exc:
         return {}, int((time.monotonic() - started) * 1000), f"invalid json: {exc}"
     return data if isinstance(data, dict) else {}, int((time.monotonic() - started) * 1000), None
+
+
+def _post_json_any(
+    url: str,
+    payload: Any,
+    timeout: float,
+    token: str | None,
+) -> tuple[Any, int, int, str | None]:
+    body = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(url, data=body, method="POST")
+    req.add_header("Content-Type", "application/json")
+    req.add_header("Accept", "application/json")
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    started = time.monotonic()
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read().decode("utf-8")
+            status = int(resp.status)
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode("utf-8", errors="replace")
+        status = int(exc.code)
+    except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
+        return None, 502, int((time.monotonic() - started) * 1000), str(getattr(exc, "reason", exc))
+    try:
+        data = json.loads(raw) if raw else {}
+    except Exception as exc:
+        return None, status, int((time.monotonic() - started) * 1000), f"invalid json: {exc}"
+    return data, status, int((time.monotonic() - started) * 1000), None
 
 
 class IdentitySidecar:
@@ -224,19 +255,14 @@ class IdentitySidecar:
         }
         self.write_session(slot, payload)
 
-    def tool_call(self, body: dict[str, Any], headers: Any) -> tuple[int, dict[str, Any]]:
-        name = body.get("name")
-        if not isinstance(name, str) or not name.strip():
-            return 400, {"success": False, "error": "missing tool name"}
-        name = name.strip()
-        arguments = body.get("arguments")
-        if arguments is None:
-            arguments = {}
-        if not isinstance(arguments, dict):
-            return 400, {"success": False, "error": "arguments must be an object"}
+    def prepare_tool_arguments(
+        self,
+        *,
+        name: str,
+        arguments: dict[str, Any],
+        slot: str,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
         arguments = dict(arguments)
-        slot = self.slot_from(body, headers)
-
         lifecycle: dict[str, Any] = {"slot": slot, "injected_client_session_id": False}
 
         if name in START_TOOL_NAMES:
@@ -250,6 +276,33 @@ class IdentitySidecar:
             if isinstance(sid, str) and sid.strip():
                 arguments["client_session_id"] = sid.strip()
                 lifecycle["injected_client_session_id"] = True
+        return arguments, lifecycle
+
+    def process_tool_response(self, *, name: str, slot: str, raw: Any) -> None:
+        if not isinstance(raw, dict):
+            return
+        parsed = unwrap_tool_response(raw)
+        if name in IDENTITY_TOOL_NAMES:
+            self.update_cache_from_identity_response(slot, parsed)
+        if name in CHECKIN_TOOL_NAMES:
+            self.stamp_session(slot)
+
+    def tool_call(self, body: dict[str, Any], headers: Any) -> tuple[int, dict[str, Any]]:
+        name = body.get("name")
+        if not isinstance(name, str) or not name.strip():
+            return 400, {"success": False, "error": "missing tool name"}
+        name = name.strip()
+        arguments = body.get("arguments")
+        if arguments is None:
+            arguments = {}
+        if not isinstance(arguments, dict):
+            return 400, {"success": False, "error": "arguments must be an object"}
+        slot = self.slot_from(body, headers)
+        arguments, lifecycle = self.prepare_tool_arguments(
+            name=name,
+            arguments=arguments,
+            slot=slot,
+        )
 
         upstream_payload = {"name": name, "arguments": arguments}
         raw, latency_ms, error = _post_json(
@@ -265,16 +318,79 @@ class IdentitySidecar:
                 "sidecar": lifecycle | {"upstream_latency_ms": latency_ms},
             }
 
-        parsed = unwrap_tool_response(raw)
-        if name in IDENTITY_TOOL_NAMES:
-            self.update_cache_from_identity_response(slot, parsed)
-        if name in CHECKIN_TOOL_NAMES:
-            self.stamp_session(slot)
+        self.process_tool_response(name=name, slot=slot, raw=raw)
 
         raw.setdefault("sidecar", {})
         if isinstance(raw["sidecar"], dict):
             raw["sidecar"].update(lifecycle | {"upstream_latency_ms": latency_ms})
         return 200, raw
+
+    def mcp_proxy(self, body: Any, headers: Any, path: str) -> tuple[int, Any]:
+        """Proxy a minimal JSON-RPC MCP request, intercepting tools/call.
+
+        This intentionally covers JSON request/response MCP traffic. It is not
+        an SSE stream implementation; callers needing full streamable transport
+        should continue to use the upstream MCP endpoint directly until that
+        path is explicitly implemented here.
+        """
+        slot = self.slot_from(body if isinstance(body, dict) else {}, headers)
+        requests = body if isinstance(body, list) else [body]
+        if not all(isinstance(item, dict) for item in requests):
+            return 400, {
+                "jsonrpc": "2.0",
+                "id": None,
+                "error": {"code": -32600, "message": "invalid JSON-RPC request"},
+            }
+
+        metadata_by_id: dict[Any, tuple[str, dict[str, Any]]] = {}
+        mutated: list[dict[str, Any]] = []
+        for item in requests:
+            req = dict(item)
+            if req.get("method") == "tools/call":
+                params = req.get("params")
+                if isinstance(params, dict):
+                    name = params.get("name")
+                    arguments = params.get("arguments")
+                    if isinstance(name, str):
+                        prepared, lifecycle = self.prepare_tool_arguments(
+                            name=name,
+                            arguments=arguments if isinstance(arguments, dict) else {},
+                            slot=slot,
+                        )
+                        new_params = dict(params)
+                        new_params["arguments"] = prepared
+                        req["params"] = new_params
+                        metadata_by_id[req.get("id")] = (name, lifecycle)
+            mutated.append(req)
+
+        outbound: Any = mutated if isinstance(body, list) else mutated[0]
+        upstream_path = path if path.startswith("/") else f"/{path}"
+        upstream, status, _latency_ms, error = _post_json_any(
+            f"{self.server_url}{upstream_path}",
+            outbound,
+            self.timeout,
+            self.auth_token,
+        )
+        if error:
+            first_id = requests[0].get("id") if requests and isinstance(requests[0], dict) else None
+            return 502, {
+                "jsonrpc": "2.0",
+                "id": first_id,
+                "error": {"code": -32000, "message": error},
+            }
+
+        responses = upstream if isinstance(upstream, list) else [upstream]
+        for response in responses:
+            if not isinstance(response, dict):
+                continue
+            if "error" in response:
+                continue
+            meta = metadata_by_id.get(response.get("id"))
+            if not meta:
+                continue
+            name, _lifecycle = meta
+            self.process_tool_response(name=name, slot=slot, raw=response)
+        return status, upstream
 
     def turn_checkin(self, body: dict[str, Any], headers: Any) -> tuple[int, dict[str, Any]]:
         slot = self.slot_from(body, headers)
@@ -375,18 +491,27 @@ def make_handler(sidecar: IdentitySidecar) -> type[BaseHTTPRequestHandler]:
 
         def do_POST(self) -> None:  # noqa: N802
             body = _read_request_json(self)
-            if self.path == "/v1/tools/call":
+            parsed = urllib.parse.urlparse(self.path)
+            path = parsed.path
+            if path not in {"/mcp", "/mcp/"} and not isinstance(body, dict):
+                _json_response(self, 400, {"success": False, "error": "JSON object required"})
+                return
+            if path == "/v1/tools/call":
                 status, payload = sidecar.tool_call(body, self.headers)
                 _json_response(self, status, payload)
                 return
-            if self.path in {"/turn/checkin", "/turn/stop"}:
-                if self.path == "/turn/stop":
+            if path in {"/mcp", "/mcp/"}:
+                status, payload = sidecar.mcp_proxy(body, self.headers, path or "/mcp/")
+                _json_response(self, status, payload)
+                return
+            if path in {"/turn/checkin", "/turn/stop"}:
+                if path == "/turn/stop":
                     body.setdefault("event", "turn_stop")
                     body.setdefault("epistemic_class", "substrate_interpretation")
                 status, payload = sidecar.turn_checkin(body, self.headers)
                 _json_response(self, status, payload)
                 return
-            if self.path == "/session/start":
+            if path == "/session/start":
                 slot = sidecar.slot_from(body, self.headers)
                 result = run_onboard(
                     server_url=sidecar.server_url,

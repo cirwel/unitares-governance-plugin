@@ -24,10 +24,11 @@ REST tool calls through it.
 python3 scripts/identity_sidecar.py --server-url http://localhost:8767 --workspace "$PWD" --slot codex-local
 ```
 
-The sidecar wraps `/v1/tools/call`, lazily onboards when the slot has no cached
-`client_session_id`, injects that session id into attribution-relevant
-governance calls, and provides `/turn/checkin`, `/turn/stop`, and `/audit`.
-It is not a full MCP transport proxy yet.
+The sidecar wraps REST `/v1/tools/call` and minimal JSON-RPC MCP `/mcp/`
+requests, lazily onboards when the slot has no cached `client_session_id`,
+injects that session id into attribution-relevant governance calls, and provides
+`/turn/checkin`, `/turn/stop`, and `/audit`. It is not a full streamable-MCP/SSE
+transport proxy yet.
 
 ## Recommended Flow
 

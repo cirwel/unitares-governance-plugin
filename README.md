@@ -159,13 +159,15 @@ python3 scripts/identity_sidecar.py \
   --port 8768
 ```
 
-Phase 1 is a dependency-free REST sidecar, not a full streamable-MCP proxy. It
-wraps `/v1/tools/call`, lazily onboards a slot when needed, injects
+Phase 1 is a dependency-free sidecar, not a full streamable-MCP/SSE
+implementation. It wraps REST `/v1/tools/call` and minimal JSON-RPC MCP
+`/mcp/` requests, lazily onboards a slot when needed, injects
 `client_session_id` into attribution-relevant governance calls, forces
 `force_new=true` for bare `onboard` / `start_session`, stamps the slot cache
 after check-ins, and exposes `GET /audit`. Useful endpoints:
 
 - `POST http://127.0.0.1:8768/v1/tools/call` with `{"name": "...", "arguments": {...}}`
+- `POST http://127.0.0.1:8768/mcp/` for JSON-RPC MCP requests; `tools/call` is intercepted and other JSON requests pass through
 - `POST http://127.0.0.1:8768/turn/checkin` with `response_text`, `complexity`, and `confidence`
 - `POST http://127.0.0.1:8768/turn/stop` for an end-of-turn check-in
 - `GET http://127.0.0.1:8768/audit?log_tail=200` for bounded local cache/log contract findings
@@ -173,6 +175,11 @@ after check-ins, and exposes `GET /audit`. Useful endpoints:
 Use `X-UNITARES-Slot` or top-level `{"slot": "..."}` when one sidecar serves
 multiple clients. Without an explicit slot, the sidecar uses a workspace-derived
 default slot.
+
+For clients that accept a URL MCP server, point them at
+`http://127.0.0.1:8768/mcp/` only when they use JSON request/response MCP. If a
+client requires streamable HTTP/SSE semantics, use the upstream governance MCP
+endpoint until the sidecar grows that transport path.
 
 ## Non-Goals
 

@@ -32,6 +32,39 @@ class FakeGovernanceHandler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", "0"))
         data = json.loads(self.rfile.read(length).decode("utf-8"))
         self.__class__.calls.append(data)
+        if self.path.startswith("/mcp"):
+            if data.get("method") == "tools/call":
+                params = data.get("params") or {}
+                name = params.get("name")
+                if name in {"process_agent_update", "sync_state"}:
+                    result = {
+                        "content": [{"type": "text", "text": json.dumps({
+                            "success": True,
+                            "verdict": {"value": "proceed"},
+                            "identity_assurance": {"tier": "strong"},
+                        })}]
+                    }
+                else:
+                    result = {
+                        "content": [{"type": "text", "text": json.dumps({
+                            "success": True,
+                            "echo": params.get("arguments", {}),
+                        })}]
+                    }
+            else:
+                result = {"tools": [{"name": "knowledge"}]}
+            body = json.dumps({
+                "jsonrpc": "2.0",
+                "id": data.get("id"),
+                "result": result,
+            }).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
         name = data.get("name")
         if name in {"onboard", "start_session"}:
             payload = {
@@ -188,3 +221,75 @@ def test_audit_endpoint_uses_bounded_log_tail(tmp_path: Path, fake_server: str) 
 
     assert payload["log_tail"] == 1
     assert payload["warnings"] == 0
+
+
+def test_mcp_tools_call_lazy_onboards_and_injects(tmp_path: Path, fake_server: str) -> None:
+    sidecar = _sidecar(tmp_path, fake_server)
+
+    status, payload = sidecar.mcp_proxy(
+        {
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "tools/call",
+            "params": {"name": "knowledge", "arguments": {"action": "search"}},
+        },
+        headers={},
+        path="/mcp/",
+    )
+
+    assert status == 200
+    assert payload["jsonrpc"] == "2.0"
+    assert payload["id"] == 7
+    assert [call.get("name") or call.get("method") for call in FakeGovernanceHandler.calls] == [
+        "onboard",
+        "tools/call",
+    ]
+    mcp_call = FakeGovernanceHandler.calls[1]
+    assert mcp_call["params"]["arguments"]["client_session_id"] == "agent-sidecar-111"
+    cache = json.loads((tmp_path / ".unitares" / "session-slot-a.json").read_text())
+    assert cache["client_session_id"] == "agent-sidecar-111"
+    assert "continuity_token" not in cache
+
+
+def test_mcp_non_tool_call_passes_through_without_onboard(tmp_path: Path, fake_server: str) -> None:
+    sidecar = _sidecar(tmp_path, fake_server)
+
+    status, payload = sidecar.mcp_proxy(
+        {"jsonrpc": "2.0", "id": 8, "method": "tools/list", "params": {}},
+        headers={},
+        path="/mcp/",
+    )
+
+    assert status == 200
+    assert payload["result"]["tools"] == [{"name": "knowledge"}]
+    assert [call.get("method") for call in FakeGovernanceHandler.calls] == ["tools/list"]
+    assert not (tmp_path / ".unitares").exists()
+
+
+def test_mcp_checkin_stamps_existing_session(tmp_path: Path, fake_server: str) -> None:
+    sidecar = _sidecar(tmp_path, fake_server)
+    cache_dir = tmp_path / ".unitares"
+    cache_dir.mkdir()
+    (cache_dir / "session-slot-a.json").write_text(json.dumps({
+        "uuid": "11111111-2222-4333-8444-555555555555",
+        "client_session_id": "agent-sidecar-111",
+        "schema_version": 2,
+    }))
+
+    status, _payload = sidecar.mcp_proxy(
+        {
+            "jsonrpc": "2.0",
+            "id": 9,
+            "method": "tools/call",
+            "params": {"name": "sync_state", "arguments": {"response_text": "did work"}},
+        },
+        headers={},
+        path="/mcp/",
+    )
+
+    assert status == 200
+    assert [call.get("method") for call in FakeGovernanceHandler.calls] == ["tools/call"]
+    sent_args = FakeGovernanceHandler.calls[0]["params"]["arguments"]
+    assert sent_args["client_session_id"] == "agent-sidecar-111"
+    cache = json.loads((cache_dir / "session-slot-a.json").read_text())
+    assert "last_checkin_ts" in cache
