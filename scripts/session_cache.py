@@ -100,12 +100,12 @@ def _read_json(path: Path) -> dict[str, Any]:
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     """Atomic write with mode 0600.
 
-    The session cache carries continuity tokens. A world-readable cache
-    (the default when using Path.write_text, which inherits umask 022)
-    lets any same-UID process impersonate the cached identity against
-    the governance API. Inlined rather than imported from unitares_sdk
-    because this helper is intentionally dependency-free — shared by
-    thin plugin clients that don't pull in the SDK.
+    Legacy v1 session caches may contain continuity tokens; v2 cache writes
+    intentionally do not. A world-readable legacy cache (the default when using
+    Path.write_text, which inherits umask 022) lets any same-UID process
+    impersonate the cached identity against the governance API. Inlined rather
+    than imported from unitares_sdk because this helper is intentionally
+    dependency-free — shared by thin plugin clients that don't pull in the SDK.
 
     On any write/chmod/replace failure, the temp file is unlinked rather
     than left as a turd in the cache directory.
@@ -165,7 +165,7 @@ def cmd_get(args: argparse.Namespace) -> int:
     return 0
 
 
-_SESSION_IDENTITY_FIELDS = ("uuid", "client_session_id", "continuity_token")
+_SESSION_IDENTITY_FIELDS = ("uuid", "client_session_id")
 
 
 def cmd_set(args: argparse.Namespace) -> int:
@@ -228,7 +228,7 @@ def cmd_set(args: argparse.Namespace) -> int:
             )
             return 2
         if not any(k in payload for k in _SESSION_IDENTITY_FIELDS):
-            # A session cache with NONE of [uuid, client_session_id, continuity_token]
+            # A session cache with neither uuid nor client_session_id
             # is a stub: subsequent hooks read it, find no addressable identity,
             # and silently no-op. Refuse so the failure is visible (caller
             # ignores via `|| true`) instead of silently bricking the next

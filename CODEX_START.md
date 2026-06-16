@@ -63,12 +63,15 @@ Shared helper:
 
 Treat this as local runtime state. It should not be used as a source of truth over the server, but it is the first place to look for:
 
-- `continuity_token` when present for in-process proof-owned calls, not startup resume
 - `client_session_id`
 - `uuid`
 - `agent_id`
 - `display_name`
 - `session_resolution_source`
+
+Do not persist `continuity_token` in this cache. v2 slot caches are lineage and
+transport-continuity hints only; a token belongs only to the live response that
+returned it and to rare same-live-process proof-owned rebinds.
 
 ## Minimal Session Pattern
 
