@@ -5,7 +5,7 @@
 [![Codex Plugin](https://img.shields.io/badge/Codex-plugin-10a37f.svg)](./CODEX_START.md)
 [![Version](https://img.shields.io/badge/version-0.4.7-blue.svg)](.claude-plugin/plugin.json)
 
-Client and integration layer for **UNITARES** — the runtime telemetry and coordination layer for heterogeneous AI-agent fleets. This repo provides agent-facing skills, commands, and adapters for connecting coding agents (Claude Code, Codex/ChatGPT, others) to a running UNITARES governance server. The runtime itself lives in [`cirwel/unitares`](https://github.com/cirwel/unitares).
+Client and integration layer for **UNITARES** — the runtime telemetry and coordination layer for heterogeneous AI-agent fleets. This repo provides agent-facing skills, command guidance, and adapters for connecting coding agents (Claude Code, Codex/ChatGPT, others) to a running UNITARES governance server. The runtime itself lives in [`cirwel/unitares`](https://github.com/cirwel/unitares).
 
 ## Purpose
 
@@ -29,7 +29,7 @@ This repo should not duplicate server business logic or become the source of tru
 
 ## Current Adapters
 
-- Codex/ChatGPT adapter: plugin packaging plus shared skills and commands
+- Codex/ChatGPT adapter: plugin packaging plus shared skills and explicit command guidance
 - Claude adapter: hooks, session helpers, and command docs
 
 The shared value in this repo is the workflow guidance and client integration surface, not a second copy of the governance model.
@@ -141,7 +141,7 @@ The `session-start` hook remains read-only: it tells the agent to call `start_se
 Codex and ChatGPT support should stay minimal and explicit:
 
 - package shared skills through `.codex-plugin/plugin.json`
-- expose manual commands
+- document manual command flows for agents that can use them
 - treat `.unitares/session-<slot>.json` as the neutral local continuity cache; flat `.unitares/session.json` is legacy/read-only
 - use `scripts/session_cache.py` as the shared cache helper across adapters
 - avoid client-specific auto-checkin behavior until there is a Codex-native reason to add it

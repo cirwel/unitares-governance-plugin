@@ -55,6 +55,12 @@ After the call:
 - if verdict is `pause` or `reject`, recommend `dialectic(action="request")`
 - if verdict is `guide`, summarize the guidance and adjust behavior
 
-The plugin's PostToolUse hook on `process_agent_update` automatically resets
-the local milestone accumulator and stamps `last_checkin_ts` when the tool
-call succeeds, so the auto-checkin hook will not immediately re-fire.
+For Codex, there is no client hook in this plugin that automatically stamps the
+local cache after `process_agent_update`. When a check-in succeeds and you are
+maintaining slot-scoped continuity, update the current slot explicitly with
+`scripts/session_cache.py set session --slot=<client_session_id> --merge --stamp`
+and then reset any local milestone accumulator with
+`scripts/session_cache.py reset-milestone`.
+
+Claude adapters may do this through hooks, but Codex should treat it as an
+explicit step unless a Codex-native lifecycle hook is added later.
