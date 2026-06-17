@@ -40,6 +40,16 @@ If you are using ChatGPT or Codex, start with [CODEX_START.md](./CODEX_START.md)
 
 That path is now the preferred default. Claude hook automation remains supported, but it is no longer the canonical mental model for UNITARES usage.
 
+## Documentation
+
+| Document | What it covers |
+|---|---|
+| [CODEX_START.md](./CODEX_START.md) | Preferred entry path for Codex/ChatGPT — modes, recommended flow, continuity cache |
+| [docs/](./docs/) | Documentation index and design-rationale notes (why the plugin is shaped this way) |
+| [skills/](./skills/) | Agent-facing capability docs — governance fundamentals, lifecycle, dialectic, knowledge graph, Discord bridge |
+| [commands/](./commands/) | Slash-command guidance — `/governance-start`, `/checkin`, `/diagnose`, `/dialectic` |
+| [CONTRIBUTING.md](./CONTRIBUTING.md) | Branch/PR convention and review standard |
+
 ## Core Workflow
 
 The intended workflow is:
