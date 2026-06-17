@@ -1,0 +1,75 @@
+# Check-In Triggers
+
+The Claude adapter emits canonical `process_agent_update` calls at three trigger points.
+`session-start` is deliberately read-only: it checks server reachability,
+fetches the governance fundamentals excerpt, and prompts the agent to call
+`start_session(force_new=true)` / `onboard(force_new=true)` itself. If the
+agent does not do that before the turn ends, `post-stop` lazily onboards a
+slot-scoped identity before emitting `turn_stop`; if that fails, it records
+an identity-free floor observation instead.
+
+| Trigger | Hook script | Frequency | `metadata.event` |
+|---|---|---|---|
+| Claude turn ends | `post-stop` | per Claude turn | `turn_stop` |
+| Edit threshold crossed | `post-edit` | every N edits or T seconds | `auto_edit` |
+| Session closes | `session-end` | once per session | `session_end` |
+
+All emissions share one shared helper (`scripts/checkin.py`) that:
+- Applies secret-pattern redaction to `response_text` before POST
+- Truncates `response_text` to 512 chars
+- Logs one status line per attempt to `~/.unitares/checkins.log`
+- Returns fire-and-forget: never raises, never blocks a Claude turn on failure
+
+## Kill switch
+
+`UNITARES_CHECKINS=off` in the environment suppresses every plugin-emitted
+check-in. Disable a single trigger by removing its entry from
+`hooks/hooks.json`.
+
+## Diagnosing check-in behavior
+
+```bash
+tail -f ~/.unitares/checkins.log
+```
+
+Expected line format:
+```
+2026-04-17T02:45:12Z | slot=abc12345 | event=turn_stop | uuid=86ae619f | status=sent | latency_ms=42
+```
+
+Statuses: `sent` (accepted by governance), `fail` (POST failed — see `err=...`), `skip_kill_switch` (suppressed by `UNITARES_CHECKINS=off`), `error` (client-side exception; caller passed garbage values).
+
+## Protective audit
+
+Run the local identity-contract audit when check-ins look wrong, before shipping
+adapter changes, or from a lightweight monitor:
+
+```bash
+python3 scripts/audit_identity_contract.py --workspace "$PWD" --log-tail 200
+```
+
+The audit checks slot-scoped session caches and the hook diagnostic log without
+contacting the governance server. Hard failures include non-empty
+`continuity_token` at rest, unreadable session JSON, and session caches with no
+`uuid` or `client_session_id`. Warnings include flat legacy `session.json`, weak
+`session_resolution_source` values such as `ip_ua_fingerprint`, and log statuses
+like `floor_sent`, `floor_fail`, `fail`, or `error`. Use `--log-tail N` or
+`--since 24h` for operational monitoring, `--json` for monitor output, and
+`--fail-on-warning` when warnings should break CI.
+
+## Known limitation
+
+The edit-threshold auto-checkin previously supported `UNITARES_HTTP_API_TOKEN`
+for Bearer-token auth against remote governance. The refactored helper uses
+stdlib urllib and does not pass this header. Local-only deployments (the
+supported default) are unaffected.
+
+## Upgrading from plugin 0.2.0
+
+Claude Code caches installed plugins at `~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/`. A cache at version `0.2.0` predates the check-in trigger hooks shipped in `0.3.0`. To force a refresh:
+
+```bash
+rm -rf ~/.claude/plugins/cache/unitares-governance-plugin/unitares-governance/0.2.0/
+```
+
+The cache will repopulate on the next Claude Code launch. Verify the refresh landed by checking `hooks/` contains `post-stop` and `session-end` under the new version path.

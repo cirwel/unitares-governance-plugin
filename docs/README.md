@@ -9,8 +9,10 @@ configuration, and the day-to-day workflow, start with the
 
 | Surface | Where | Read it for |
 |---|---|---|
-| Project overview, install, config | [`README.md`](../README.md) | What this repo is, server bring-up, env vars, adapter notes, check-in triggers |
+| Project overview, install, config | [`README.md`](../README.md) | What this repo is, server bring-up, env vars, workflow |
 | Codex/ChatGPT quickstart | [`CODEX_START.md`](../CODEX_START.md) | The preferred entry path — modes, recommended flow, continuity cache |
+| Adapter reference | [`adapters.md`](./adapters.md) | Claude hooks, Codex/ChatGPT, and the local sidecar — full detail and endpoints |
+| Check-in reference | [`check-ins.md`](./check-ins.md) | Claude check-in triggers, kill switch, diagnostic log, protective audit, upgrade steps |
 | Contributing | [`CONTRIBUTING.md`](../CONTRIBUTING.md) | Branch/PR convention and review standard |
 | Design notes | this directory | Why the plugin is shaped the way it is, and what it deliberately does not build |
 | Skills | [`../skills/`](../skills/) | Agent-facing capability docs (governance fundamentals, lifecycle, dialectic, knowledge graph, Discord bridge) |
