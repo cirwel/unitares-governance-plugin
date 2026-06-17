@@ -40,6 +40,16 @@ If you are using ChatGPT or Codex, start with [CODEX_START.md](./CODEX_START.md)
 
 That path is now the preferred default. Claude hook automation remains supported, but it is no longer the canonical mental model for UNITARES usage.
 
+## Documentation
+
+| Document | What it covers |
+|---|---|
+| [CODEX_START.md](./CODEX_START.md) | Preferred entry path for Codex/ChatGPT — modes, recommended flow, continuity cache |
+| [docs/](./docs/) | Documentation index and design-rationale notes (why the plugin is shaped this way) |
+| [skills/](./skills/) | Agent-facing capability docs — governance fundamentals, lifecycle, dialectic, knowledge graph, Discord bridge |
+| [commands/](./commands/) | Slash-command guidance — `/governance-start`, `/checkin`, `/diagnose`, `/dialectic` |
+| [CONTRIBUTING.md](./CONTRIBUTING.md) | Branch/PR convention and review standard |
+
 ## Core Workflow
 
 The intended workflow is:
@@ -128,61 +138,15 @@ Environment variables:
 
 ## Adapter Notes
 
-### Claude
+Adapters are a convenience layer over the governance server, not the canonical
+policy — the server stays the source of truth and the client stays thin.
 
-The current Claude adapter includes session-start, pre-edit, post-edit, and session-end hooks. Those hooks should be treated as an adapter convenience, not the canonical governance policy. In particular, frequent file writes should not automatically be interpreted as meaningful governance events.
+- **Claude** — session-start, pre-edit, post-edit, and session-end hooks, plus BEAM file leases.
+- **Codex/ChatGPT** — minimal and explicit; shared skills, manual command flows, slot-scoped continuity cache.
+- **Sidecar** — a dependency-free local proxy for clients without lifecycle hooks.
 
-The pre-edit hook acquires a BEAM file lease before Edit/Write/MultiEdit. Missing lease-plane configuration fails open by default, while real `held_by_other` contention blocks the edit with a visible explanation. Post-edit releases the just-edited file lease immediately; session-end remains a best-effort cleanup path for any lease that survived an interrupted edit.
-
-The `session-start` hook remains read-only: it tells the agent to call `start_session(force_new=true)` before substantive work. If the agent has not onboarded by the end of the turn, `post-stop` uses `scripts/onboard_helper.py` to lazily mint a fresh, slot-scoped identity and then emits the normal `turn_stop` summary under that identity. Set `UNITARES_AUTO_ONBOARD=off` or legacy `UNITARES_DISABLE_AUTO_ONBOARD=1` to fall back to identity-free floor observations for un-onboarded sessions.
-
-### Codex
-
-Codex and ChatGPT support should stay minimal and explicit:
-
-- package shared skills through `.codex-plugin/plugin.json`
-- document manual command flows for agents that can use them
-- treat `.unitares/session-<slot>.json` as the neutral local continuity cache; flat `.unitares/session.json` is legacy/read-only
-- use `scripts/session_cache.py` as the shared cache helper across adapters
-- avoid client-specific auto-checkin behavior until there is a Codex-native reason to add it
-
-### Sidecar
-
-For clients without lifecycle hooks, run the local identity sidecar and send
-governance REST tool calls through it:
-
-```bash
-python3 scripts/identity_sidecar.py \
-  --server-url http://localhost:8767 \
-  --workspace "$PWD" \
-  --slot codex-local \
-  --port 8768
-```
-
-Phase 1 is a dependency-free sidecar, not a full streamable-MCP/SSE
-implementation. It wraps REST `/v1/tools/call` and minimal JSON-RPC MCP
-`/mcp/` requests, lazily onboards a slot when needed, injects
-`client_session_id` into attribution-relevant governance calls, forces
-`force_new=true` for bare `onboard` / `start_session`, stamps the slot cache
-after check-ins, and exposes `GET /audit`. Useful endpoints:
-
-- `GET http://127.0.0.1:8768/client-config?slot=codex-local` for a generated MCP/client snippet
-- `POST http://127.0.0.1:8768/v1/tools/call` with `{"name": "...", "arguments": {...}}`
-- `POST http://127.0.0.1:8768/mcp/` for JSON-RPC MCP requests; `tools/call` is intercepted and other JSON requests pass through
-- `POST http://127.0.0.1:8768/turn/checkin` with `response_text`, `complexity`, and `confidence`
-- `POST http://127.0.0.1:8768/turn/stop` for an end-of-turn check-in
-- `GET http://127.0.0.1:8768/audit?log_tail=200` for bounded local cache/log contract findings
-
-Use `X-UNITARES-Slot` or top-level `{"slot": "..."}` when one sidecar serves
-multiple clients. Without an explicit slot, the sidecar uses a workspace-derived
-default slot.
-
-For clients that accept a URL MCP server, point them at
-`http://127.0.0.1:8768/mcp/` only when they use JSON request/response MCP. The
-generated `GET /client-config` response includes the URL, `X-UNITARES-Slot`
-header, and a minimal `mcpServers` snippet. If a client requires streamable
-HTTP/SSE semantics, use the upstream governance MCP endpoint until the sidecar
-grows that transport path.
+Full details, endpoints, and configuration are in [docs/adapters.md](./docs/adapters.md).
+The Codex/ChatGPT quickstart is [CODEX_START.md](./CODEX_START.md).
 
 ## Non-Goals
 
@@ -195,79 +159,14 @@ This repo should not:
 
 ## Check-In Triggers
 
-The Claude adapter emits canonical `process_agent_update` calls at three trigger points.
-`session-start` is deliberately read-only: it checks server reachability,
-fetches the governance fundamentals excerpt, and prompts the agent to call
-`start_session(force_new=true)` / `onboard(force_new=true)` itself. If the
-agent does not do that before the turn ends, `post-stop` lazily onboards a
-slot-scoped identity before emitting `turn_stop`; if that fails, it records
-an identity-free floor observation instead.
+The Claude adapter emits canonical `process_agent_update` calls at three trigger
+points (`turn_stop`, `auto_edit`, `session_end`) through one shared helper
+(`scripts/checkin.py`) that redacts secrets, truncates, logs, and is
+fire-and-forget. A `UNITARES_CHECKINS=off` kill switch suppresses all of them.
 
-| Trigger | Hook script | Frequency | `metadata.event` |
-|---|---|---|---|
-| Claude turn ends | `post-stop` | per Claude turn | `turn_stop` |
-| Edit threshold crossed | `post-edit` | every N edits or T seconds | `auto_edit` |
-| Session closes | `session-end` | once per session | `session_end` |
-
-All emissions share one shared helper (`scripts/checkin.py`) that:
-- Applies secret-pattern redaction to `response_text` before POST
-- Truncates `response_text` to 512 chars
-- Logs one status line per attempt to `~/.unitares/checkins.log`
-- Returns fire-and-forget: never raises, never blocks a Claude turn on failure
-
-### Kill switch
-
-`UNITARES_CHECKINS=off` in the environment suppresses every plugin-emitted
-check-in. Disable a single trigger by removing its entry from
-`hooks/hooks.json`.
-
-### Diagnosing check-in behavior
-
-```bash
-tail -f ~/.unitares/checkins.log
-```
-
-Expected line format:
-```
-2026-04-17T02:45:12Z | slot=abc12345 | event=turn_stop | uuid=86ae619f | status=sent | latency_ms=42
-```
-
-Statuses: `sent` (accepted by governance), `fail` (POST failed — see `err=...`), `skip_kill_switch` (suppressed by `UNITARES_CHECKINS=off`), `error` (client-side exception; caller passed garbage values).
-
-### Protective audit
-
-Run the local identity-contract audit when check-ins look wrong, before shipping
-adapter changes, or from a lightweight monitor:
-
-```bash
-python3 scripts/audit_identity_contract.py --workspace "$PWD" --log-tail 200
-```
-
-The audit checks slot-scoped session caches and the hook diagnostic log without
-contacting the governance server. Hard failures include non-empty
-`continuity_token` at rest, unreadable session JSON, and session caches with no
-`uuid` or `client_session_id`. Warnings include flat legacy `session.json`, weak
-`session_resolution_source` values such as `ip_ua_fingerprint`, and log statuses
-like `floor_sent`, `floor_fail`, `fail`, or `error`. Use `--log-tail N` or
-`--since 24h` for operational monitoring, `--json` for monitor output, and
-`--fail-on-warning` when warnings should break CI.
-
-### Known limitation
-
-The edit-threshold auto-checkin previously supported `UNITARES_HTTP_API_TOKEN`
-for Bearer-token auth against remote governance. The refactored helper uses
-stdlib urllib and does not pass this header. Local-only deployments (the
-supported default) are unaffected.
-
-### Upgrading from plugin 0.2.0
-
-Claude Code caches installed plugins at `~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/`. A cache at version `0.2.0` predates the check-in trigger hooks shipped in `0.3.0`. To force a refresh:
-
-```bash
-rm -rf ~/.claude/plugins/cache/unitares-governance-plugin/unitares-governance/0.2.0/
-```
-
-The cache will repopulate on the next Claude Code launch. Verify the refresh landed by checking `hooks/` contains `post-stop` and `session-end` under the new version path.
+For the trigger table, the diagnostic log format, the protective audit, the
+known token-auth limitation, and plugin-cache upgrade steps, see
+[docs/check-ins.md](./docs/check-ins.md).
 
 ## Development Workflow
 
