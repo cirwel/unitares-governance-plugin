@@ -476,7 +476,26 @@ if [[ -z "${HEALTH_STATUS}" ]]; then
 ${SKILL_CONTENT}"
   fi
 else
-  if [[ "${COMPACT_MODE}" == "1" ]]; then
+  if [[ -n "${UNITARES_CLIENT_SESSION_ID:-}" ]]; then
+    # Anchored conversation (e.g. Discord / dispatch_beam): a stable resume
+    # anchor (UNITARES_CLIENT_SESSION_ID) is set, so every turn must resolve to
+    # ONE governance identity. Nudging force_new here is actively wrong — it
+    # mints a fresh uuid per turn and breaks the per-conversation continuity the
+    # anchor exists to provide. Lazy onboarding at Stop passes the anchor to the
+    # server, which resumes the same identity across turns. (Takes precedence
+    # over compact / already-shown: the message is short enough to repeat.)
+    CONTEXT="UNITARES Governance: ONLINE (anchored session)
+This conversation carries a stable governance resume anchor, so your identity
+resumes automatically across turns — ONE identity per conversation, not a fresh
+one per turn. Do NOT call \`start_session(force_new=true)\`: force_new mints a
+new identity and breaks that continuity. If a turn needs governance MCP calls,
+the lazy onboarding at turn stop binds the resumed identity — rely on it rather
+than minting. Declare \`parent_agent_id\` only for a real spawn/handoff, never
+for the turn-to-turn flow of this conversation.
+Use \`sync_state(...)\` only for meaningful state worth reporting; do not
+manufacture a check-in to satisfy this note.
+Recovery: run /diagnose."
+  elif [[ "${COMPACT_MODE}" == "1" ]]; then
     # Compact prose: assumes the agent saw the full note + Fundamentals
     # excerpt earlier this hour (workspace cache mtime < TTL). Keep
     # `force_new=true` (force_new pin-resume guard, regression-tested),
@@ -542,7 +561,9 @@ operator action — run /diagnose for guided recovery rather than guessing
 a UUID."
   fi
 
-  if [[ -n "${WORKSPACE_LINEAGE_HINT}" ]]; then
+  # Suppress the lineage hint on anchored sessions: it nudges force_new /
+  # parent declaration, which contradicts resume-one-identity-per-anchor.
+  if [[ -z "${UNITARES_CLIENT_SESSION_ID:-}" && -n "${WORKSPACE_LINEAGE_HINT}" ]]; then
     CONTEXT="${CONTEXT}
 
 ${WORKSPACE_LINEAGE_HINT}"
@@ -551,7 +572,7 @@ ${WORKSPACE_LINEAGE_HINT}"
   # Skip the Fundamentals excerpt in compact mode. The freshness warning
   # (if any) still injects on the *next* fresh-workspace fire when the
   # full block returns, so calibration on stale skill files isn't lost.
-  if [[ "${COMPACT_MODE}" != "1" && "${NUDGE_ALREADY_SHOWN}" != "1" && -n "${SKILL_CONTENT}" ]]; then
+  if [[ -z "${UNITARES_CLIENT_SESSION_ID:-}" && "${COMPACT_MODE}" != "1" && "${NUDGE_ALREADY_SHOWN}" != "1" && -n "${SKILL_CONTENT}" ]]; then
     CONTEXT="${CONTEXT}
 
 --- Governance Fundamentals (excerpt)${SKILL_SOURCE_SUFFIX} ---
