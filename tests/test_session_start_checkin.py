@@ -252,6 +252,33 @@ class TestSessionStartContext:
         assert "retrieval prompts" in ctx
         assert "first recovery route" in ctx
 
+    def test_anchored_session_does_not_nudge_force_new(self, tmp_path):
+        """When a stable resume anchor (UNITARES_CLIENT_SESSION_ID) is set —
+        the Discord / dispatch_beam case where each turn is a fresh `claude -p`
+        — the banner must NOT push `force_new=true`. force_new mints a new uuid
+        per turn and defeats the anchor's resume-one-identity-per-conversation
+        guarantee, which is the whole point of the anchor. Lazy onboarding at
+        Stop carries the anchor to the server and resumes the same identity.
+
+        Regression guard for the "every BEAM turn mints a new id" bug.
+        """
+        stdout, _ = _serve_and_run(
+            tmp_path, extra_env={"UNITARES_CLIENT_SESSION_ID": "agent:/thread-123"}
+        )
+        ctx = json.loads(stdout).get("additional_context", "")
+        assert "UNITARES Governance: ONLINE" in ctx
+        assert "anchored session" in ctx
+        # force_new must appear ONLY inside an explicit prohibition, never as an
+        # affirmative bind instruction. The non-anchored branches lead with an
+        # "Identity attribution: bind this process" nudge + a bare
+        # `start_session(force_new=true)` call line — both must be absent here.
+        assert "Do NOT call `start_session(force_new=true)`" in ctx
+        assert "Identity attribution: bind this process" not in ctx
+        assert "SessionStart has not created an identity yet" not in ctx
+        # The lineage hint also nudges force_new / a concrete parent declaration;
+        # it must be suppressed on anchored sessions.
+        assert "parent_agent_id=\"" not in ctx
+
     def test_offline_context_reports_offline_without_fake_identity(self, tmp_path):
         stdout, _ = _run_hook(tmp_path, "http://127.0.0.1:1")
         ctx = json.loads(stdout).get("additional_context", "")
