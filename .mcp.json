@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "unitares-governance": {
+      "type": "http",
+      "url": "${UNITARES_SERVER_URL:-http://localhost:8767}/mcp/"
+    }
+  }
+}
