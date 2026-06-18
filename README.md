@@ -7,6 +7,17 @@
 
 Client and integration layer for **UNITARES** — the runtime telemetry and coordination layer for heterogeneous AI-agent fleets. This repo provides agent-facing skills, command guidance, and adapters for connecting coding agents (Claude Code, Codex/ChatGPT, others) to a running UNITARES governance server. The runtime itself lives in [`cirwel/unitares`](https://github.com/cirwel/unitares).
 
+## Install (Claude Code)
+
+This repo *is* a Claude Code plugin marketplace — add it and install, two commands, no clone:
+
+```
+/plugin marketplace add cirwel/unitares-governance-plugin
+/plugin install unitares-governance@unitares-governance
+```
+
+The plugin **auto-registers its governance MCP client on install** (it ships an `.mcp.json` — see [Configuration](#configuration)), so there is no `mcpServers` JSON to hand-edit. Once a governance server is reachable at `http://localhost:8767` (or wherever `UNITARES_SERVER_URL` points), you are governed with no further setup. You still need a running server — see [Prerequisites](#prerequisites). For Codex/ChatGPT, start with [CODEX_START.md](./CODEX_START.md).
+
 ## Purpose
 
 This repo is not the governance engine itself. It is the client and integration layer.
