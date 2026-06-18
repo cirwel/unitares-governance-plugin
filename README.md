@@ -3,7 +3,7 @@
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Claude Code Plugin](https://img.shields.io/badge/Claude%20Code-plugin-d97757.svg)](https://docs.claude.com/en/docs/claude-code/plugins)
 [![Codex Plugin](https://img.shields.io/badge/Codex-plugin-10a37f.svg)](./CODEX_START.md)
-[![Version](https://img.shields.io/badge/version-0.4.8-blue.svg)](.claude-plugin/plugin.json)
+[![Version](https://img.shields.io/badge/version-0.4.9-blue.svg)](.claude-plugin/plugin.json)
 
 Client and integration layer for **UNITARES** — the runtime telemetry and coordination layer for heterogeneous AI-agent fleets. This repo provides agent-facing skills, command guidance, and adapters for connecting coding agents (Claude Code, Codex/ChatGPT, others) to a running UNITARES governance server. The runtime itself lives in [`cirwel/unitares`](https://github.com/cirwel/unitares).
 
@@ -107,20 +107,20 @@ docker compose up
 
 That single command brings up Postgres+AGE+pgvector, Redis, and the governance server. The Pi/Lumen embodiment side is optional — governance runs standalone. For bare-metal install (Homebrew Postgres, native AGE compile) see [unitares/README.md](https://github.com/CIRWEL/unitares#installation).
 
-Once the server is up, point this plugin's MCP client at it:
+Once the server is up, **the plugin registers its MCP client automatically** — it
+ships an `.mcp.json` pointing at `http://localhost:8767/mcp/`, so there is nothing
+to hand-edit. Installing the plugin and starting Claude Code is enough.
 
-```json
-{
-  "mcpServers": {
-    "unitares-governance": {
-      "type": "url",
-      "url": "http://localhost:8767/mcp/"
-    }
-  }
-}
+If your server is on a different host or port, set `UNITARES_SERVER_URL` to the
+**base** URL (no `/mcp/` suffix — the plugin appends it):
+
+```bash
+export UNITARES_SERVER_URL=https://gov.example.org   # plugin uses .../mcp/
 ```
 
-If your server is on a different host or port, set `UNITARES_SERVER_URL` (see Configuration below).
+To override the auto-registered server (e.g. point at a sidecar), a
+manually-configured `unitares-governance` server in your own settings takes
+precedence over the plugin's.
 
 ## Configuration
 
