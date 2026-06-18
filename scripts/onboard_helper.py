@@ -259,6 +259,7 @@ def run_onboard(
     workspace: Path,
     slot: str | None = None,
     force_new: bool = False,
+    client_session_id: str | None = None,
     auth_token: str | None = None,
     timeout: float = DEFAULT_TIMEOUT,
     initial_state: dict | None = None,
@@ -273,36 +274,61 @@ def run_onboard(
     workspace can each own their own identity (typically the Claude Code
     session_id from hook input). When omitted, falls back to the legacy
     shared session.json — preserves single-process behavior.
+
+    ``client_session_id`` is a stable per-conversation **resume anchor**
+    (typically ``UNITARES_CLIENT_SESSION_ID``, e.g. ``"agent:/thread-<id>"``).
+    When set, every process under it resolves to the SAME governance uuid
+    (server resume) instead of minting a fresh identity per call — the canonical
+    case is the Discord bridge, where each user turn is a fresh ``claude -p``
+    process. Gated + additive: a blank anchor is byte-identical to the legacy
+    fresh-mint flow; an explicit ``force_new`` overrides it (a deliberate break).
     """
     url = f"{server_url.rstrip('/')}/v1/tools/call"
     cache = read_cache(workspace, slot)
 
+    # Resume-by-anchor vs. fresh-mint. Resume is continuity, NOT lineage: the
+    # turns are the *same* agent resumed, so we send ``client_session_id``, OMIT
+    # ``force_new``, and declare no parent. ``force_new`` (explicit operator
+    # break) suppresses resume.
+    anchor = (client_session_id or "").strip()
+    resume = bool(anchor) and not force_new
+
     parent_agent_id = ""
-    if not force_new:
+    if not resume and not force_new:
         parent_agent_id = (cache.get("uuid") or cache.get("agent_uuid") or "").strip()
 
-    # Scope the name by slot so the server's name-claim lookup doesn't bind
-    # this slot's onboard to an agent owned by another slot. force_new is
-    # still explicit, but display-name scoping keeps parallel slots legible.
-    scoped_name = _scope_name_by_slot(agent_name, slot)
-    arguments: dict[str, Any] = {
-        "name": scoped_name,
-        "model_type": model_type,
-        "force_new": True,
-    }
-    if parent_agent_id:
-        arguments["parent_agent_id"] = parent_agent_id
-        arguments["spawn_reason"] = "new_session"
+    if resume:
+        # Stable name (NOT slot-scoped): one identity per anchor across turns.
+        # The server resolves by the anchor, so name-claim can't cross-bind.
+        arguments: dict[str, Any] = {
+            "name": agent_name,
+            "model_type": model_type,
+            "client_session_id": anchor,
+        }
+    else:
+        # Scope the name by slot so the server's name-claim lookup doesn't bind
+        # this slot's onboard to an agent owned by another slot. force_new is
+        # still explicit, but display-name scoping keeps parallel slots legible.
+        scoped_name = _scope_name_by_slot(agent_name, slot)
+        arguments = {
+            "name": scoped_name,
+            "model_type": model_type,
+            "force_new": True,
+        }
+        if parent_agent_id:
+            arguments["parent_agent_id"] = parent_agent_id
+            arguments["spawn_reason"] = "new_session"
 
-    # Optional genesis anchor (OFF by default — see BOOTSTRAP_* above; it is
-    # NOT a fix for the "uninitialized" symptom). An explicit caller-supplied
-    # ``initial_state`` always wins; otherwise a default seed is attached only
-    # when opted in per-call (``bootstrap=True``) or globally
-    # (``UNITARES_ONBOARD_BOOTSTRAP=1``).
-    if initial_state is None and (bootstrap or _bootstrap_enabled()):
-        initial_state = _default_bootstrap_state()
-    if initial_state:
-        arguments["initial_state"] = initial_state
+        # Optional genesis anchor (OFF by default — see BOOTSTRAP_* above; it is
+        # NOT a fix for the "uninitialized" symptom). An explicit caller-supplied
+        # ``initial_state`` always wins; otherwise a default seed is attached only
+        # when opted in per-call (``bootstrap=True``) or globally
+        # (``UNITARES_ONBOARD_BOOTSTRAP=1``). Genesis is for a fresh identity, so
+        # it does not apply on resume.
+        if initial_state is None and (bootstrap or _bootstrap_enabled()):
+            initial_state = _default_bootstrap_state()
+        if initial_state:
+            arguments["initial_state"] = initial_state
 
     raw = post_json(url, {"name": "onboard", "arguments": arguments}, timeout, auth_token)
     parsed = unwrap_tool_response(raw)
@@ -378,12 +404,21 @@ def main(argv: list[str] | None = None) -> int:
              "parallel processes in the same workspace don't collide on "
              "the same cache file.",
     )
+    parser.add_argument(
+        "--client-session-id",
+        default=os.environ.get("UNITARES_CLIENT_SESSION_ID", ""),
+        help="Stable per-conversation resume anchor (e.g. 'agent:/thread-<id>'). "
+             "When set, every process under this anchor resumes the SAME identity "
+             "instead of minting a fresh one per turn. Empty = legacy fresh-mint; "
+             "--force-new overrides (clean break).",
+    )
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT)
     args = parser.parse_args(argv)
 
     auth_token = os.environ.get("UNITARES_HTTP_API_TOKEN") or None
     workspace = Path(args.workspace).expanduser().resolve()
     slot = (args.slot or "").strip() or None
+    client_session_id = (args.client_session_id or "").strip() or None
     result = run_onboard(
         server_url=args.server_url,
         agent_name=args.name,
@@ -391,6 +426,7 @@ def main(argv: list[str] | None = None) -> int:
         workspace=workspace,
         slot=slot,
         force_new=args.force_new,
+        client_session_id=client_session_id,
         auth_token=auth_token,
         timeout=args.timeout,
         bootstrap=args.bootstrap,
