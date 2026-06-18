@@ -23,9 +23,11 @@ Contract:
   verified to accept client_session_id (schemas inherit AgentIdentityMixin
   server-side). Unknown/new tools get NO injection — they degrade to today's
   pin behavior rather than risking an extra-field validation error.
-- NEVER fires for identity-minting/binding tools (onboard, start_session,
-  bind_session): presence of client_session_id is a resume proof signal
-  there, and injecting one would silently flip fresh-mint semantics.
+- For identity minting tools, only fires for anchored bare onboard/start_session
+  calls: when UNITARES_CLIENT_SESSION_ID is set and force_new is absent, inject
+  that anchor so manual start_session() follows the same per-thread resume path
+  as lazy onboarding. Explicit force_new and explicit proof fields still win.
+  Never injects into bind_session/identity.
 - Skips when the call already carries any identity proof field
   (client_session_id, continuity_token, agent_uuid, agent_id) — explicit
   caller intent always wins.
@@ -58,6 +60,7 @@ agent-asserted proof — the agent never typed the token.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -79,11 +82,11 @@ except Exception:  # pragma: no cover - identity injection must work alone
 
 # Attribution-relevant tools whose server schemas accept client_session_id
 # (all inherit AgentIdentityMixin), plus their friendly-workflow aliases.
-# Deliberately EXCLUDES every identity-minting/resuming/binding tool —
-# onboard, start_session, identity, bind_session — because a present
-# client_session_id is a resume proof signal there: injecting one would
-# silently flip fresh-mint/assert semantics, and the post-identity hook
-# would then cache the poisoned response (council finding 2026-06-12).
+# Deliberately EXCLUDES every identity-minting/resuming/binding tool from the
+# general slot-cache injector. onboard/start_session have a narrower anchored
+# exception below: inject UNITARES_CLIENT_SESSION_ID only when force_new is
+# absent. identity/bind_session remain excluded because injecting proof there
+# would silently flip assert/bind semantics (council finding 2026-06-12).
 # Also excludes any tool not verified against the server schemas.
 INJECT_SUFFIXES = frozenset({
     "process_agent_update", "sync_state",
@@ -96,6 +99,7 @@ INJECT_SUFFIXES = frozenset({
     "list_tools", "describe_tool", "health_check",
 })
 
+ANCHORED_MINT_SUFFIXES = frozenset({"onboard", "start_session"})
 PROOF_FIELDS = ("client_session_id", "continuity_token", "agent_uuid", "agent_id")
 
 
@@ -117,6 +121,11 @@ def _has_proof_field(tool_input: dict) -> bool:
     return False
 
 
+def _env_anchor() -> str:
+    value = os.environ.get("UNITARES_CLIENT_SESSION_ID", "")
+    return value.strip()
+
+
 def main() -> int:
     try:
         raw = sys.stdin.read()
@@ -136,7 +145,7 @@ def main() -> int:
     suffix = parts[-1].lower()
     if not _is_governance_server(server):
         return 0
-    if suffix not in INJECT_SUFFIXES:
+    if suffix not in INJECT_SUFFIXES and suffix not in ANCHORED_MINT_SUFFIXES:
         return 0
 
     tool_input = data.get("tool_input")
@@ -147,6 +156,26 @@ def main() -> int:
 
     updated = dict(tool_input)
     changed = False
+
+    if suffix in ANCHORED_MINT_SUFFIXES:
+        # Anchored dispatch/beam conversations provide a stable per-thread
+        # resume proof through the environment. A manual bare start_session()
+        # should resume through that anchor just like the Stop hook's lazy
+        # onboarding path. The exception is intentionally narrow: if the agent
+        # explicitly names force_new or any proof field, pass the call through.
+        anchor = _env_anchor()
+        if anchor and "force_new" not in tool_input and not _has_proof_field(tool_input):
+            updated["client_session_id"] = anchor
+            changed = True
+        if not changed:
+            return 0
+        print(json.dumps({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "updatedInput": updated,
+            }
+        }))
+        return 0
 
     # Tag normalization runs independently of identity injection: it applies
     # whenever a tag-bearing knowledge call carries a `tags` list, regardless

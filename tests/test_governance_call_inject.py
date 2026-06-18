@@ -164,11 +164,60 @@ class TestTagNormalization:
         assert updated["client_session_id"] == SID
 
 
+class TestAnchoredMintingTools:
+
+    def test_anchored_start_session_without_force_new_injects_env_anchor(self, tmp_path, monkeypatch):
+        # Mirrors the anchored-session banner contract: a forgetful agent's
+        # bare start_session() resumes through the per-thread anchor instead
+        # of falling back to server-side pin/name heuristics.
+        monkeypatch.setenv("UNITARES_CLIENT_SESSION_ID", "agent:/thread-123")
+        result = _run(_hook_input(
+            "mcp__unitares-governance__start_session", {}), tmp_path)
+        updated = _updated_input(result)
+        assert updated is not None
+        assert updated["client_session_id"] == "agent:/thread-123"
+
+    def test_anchored_onboard_without_force_new_injects_env_anchor(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("UNITARES_CLIENT_SESSION_ID", "agent:/thread-123")
+        result = _run(_hook_input(
+            "mcp__unitares-governance__onboard", {"name": "claude-thread"}), tmp_path)
+        updated = _updated_input(result)
+        assert updated is not None
+        assert updated["name"] == "claude-thread"
+        assert updated["client_session_id"] == "agent:/thread-123"
+
+    def test_unanchored_bare_start_session_stays_bare(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("UNITARES_CLIENT_SESSION_ID", raising=False)
+        result = _run(_hook_input(
+            "mcp__unitares-governance__start_session", {}), tmp_path)
+        assert result.stdout.strip() == ""
+
+    def test_explicit_force_new_blocks_anchor_injection(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("UNITARES_CLIENT_SESSION_ID", "agent:/thread-123")
+        result = _run(_hook_input(
+            "mcp__unitares-governance__start_session", {"force_new": True}), tmp_path)
+        assert result.stdout.strip() == ""
+
+    def test_force_new_key_blocks_anchor_injection_even_when_false(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("UNITARES_CLIENT_SESSION_ID", "agent:/thread-123")
+        result = _run(_hook_input(
+            "mcp__unitares-governance__start_session", {"force_new": False}), tmp_path)
+        assert result.stdout.strip() == ""
+
+    def test_explicit_proof_field_blocks_anchor_injection(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("UNITARES_CLIENT_SESSION_ID", "agent:/thread-123")
+        result = _run(_hook_input(
+            "mcp__unitares-governance__start_session",
+            {"client_session_id": "agent:/explicit"},
+        ), tmp_path)
+        assert result.stdout.strip() == ""
+
+
 class TestExclusions:
 
     def test_never_injects_into_onboard(self, tmp_path):
-        # client_session_id presence is a resume proof signal on onboard —
-        # injection would silently flip fresh-mint semantics.
+        # Explicit force_new keeps its fresh-mint semantics even when the
+        # minting tool has an anchored-session exception for bare calls.
         _write_cache(tmp_path)
         result = _run(_hook_input(
             "mcp__unitares-governance__onboard", {"force_new": True}), tmp_path)
