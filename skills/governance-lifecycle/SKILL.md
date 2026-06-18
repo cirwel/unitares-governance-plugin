@@ -7,7 +7,7 @@ description: >
 license: Apache-2.0
 compatibility: Requires UNITARES governance MCP server (gov.cirwel.org or local http://127.0.0.1:8767/mcp/)
 metadata:
-  unitares.last_verified: "2026-06-13"
+  unitares.last_verified: "2026-06-18"
   unitares.freshness_days: "14"
 ---
 
@@ -33,6 +33,29 @@ their canonical tools. Alias responses put `next_action`, `state_summary`,
 `risk_summary`, `memory_suggestions`, and `recovery_hint` first when present,
 with the full canonical payload preserved under `raw_governance`.
 
+## Simple Identity Contract
+
+Strict identity is a write gate: reads can be loose, but check-ins, KG writes,
+and operator actions need an accountable caller. For normal agent work, use this
+contract and ignore the deeper ontology unless debugging:
+
+1. New driver process: `start_session(force_new=true)`, then save the returned
+   `uuid` and `client_session_id`.
+2. Same running process: pass `client_session_id` on later `sync_state()` and
+   KG write calls. Adapters should do this automatically.
+3. Continuing prior work in a fresh process: mint fresh and declare the handoff
+   with `start_session(force_new=true, parent_agent_id="<prior-uuid>",
+   spawn_reason="new_session")`.
+4. Short dispatched subagent: usually do not onboard. If it needs its own
+   identity, declare `spawn_reason="subagent"`, set `parent_agent_id` to the
+   driver, and land one real `sync_state()` before exit.
+5. Persistent/substrate agent: use the substrate-earned pattern; ordinary
+   interactive sessions should not imitate it.
+
+Do not pass `continuity_token` during normal check-ins, do not use `name=` as
+identity, and do not declare `parent_agent_id` just because another session
+shares the workspace.
+
 ## Starting a Session
 
 **Onboard at the start of the session, before other work — then check in as you
@@ -44,12 +67,13 @@ lifecycle is: `start_session()` first, then land a real `sync_state()` once per
 assistant turn and after each meaningful unit of work so the identity carries
 regular signal.
 
-Per identity.md v2 ontology, a fresh process-instance is a fresh agent. To continue prior work across processes, **declare lineage** — do not resume via token:
+Per the simple contract, a fresh process-instance is a fresh agent. To continue
+prior work across processes, **declare lineage** — do not resume via token:
 
 ```
-onboard(force_new=true, spawn_reason="explicit")            # genuinely new work, no lineage
-onboard(force_new=true, parent_agent_id="<prior-uuid>",     # continuing prior work in a fresh process
-        spawn_reason="new_session")
+start_session(force_new=true)                               # new work, no lineage
+start_session(force_new=true, parent_agent_id="<prior-uuid>", # continuing prior work
+              spawn_reason="new_session")
 ```
 
 `name=` is cosmetic — passing `name="Same-Agent"` does not re-bind to an existing agent.
@@ -100,9 +124,15 @@ So, for short-lived dispatched/Task subagents:
   to anchor it). An identity that
   cannot meet (c) should not be minted.
 
-You get back a **UUID** (your identity for this process), a **client_session_id** (within-process transport continuity), and a **continuity_token** (per-process anti-hijack proof, narrowly scoped — see `references/resume-semantics.md` before passing it forward to anything). The response also includes `session_resolution_source`, `continuity_token_supported`, `ownership_proof_version`, and a `deprecations` field when present.
+You get back a **UUID** (the server record for this process) and a
+**client_session_id** (the accountable write binding for this running process).
+The response may also include `continuity_token` and diagnostic fields; normal
+callers should not pass the token forward.
 
-The PATH semantics, the rare same-live-process rebind case, the S13 fresh-instance gate detail, the canonical hijack pattern, and why "save the token and pass it everywhere" is now an anti-pattern — all in `references/resume-semantics.md`. Read that before designing any client that handles tokens.
+The rare same-live-process rebind case, S13 fresh-instance gate detail, and why
+"save the token and pass it everywhere" is an anti-pattern are in
+`references/resume-semantics.md`. Read that only when designing a client that
+handles tokens or debugging identity binding.
 
 ## Check-ins
 
@@ -118,7 +148,9 @@ sync_state(
 )
 ```
 
-Ordinary check-ins use the active session binding or `client_session_id`; do **not** pass `continuity_token` to `process_agent_update`. Tokens are reserved for explicit PATH 0 ownership rebinds such as `identity(agent_uuid=..., continuity_token=..., resume=true)`.
+Ordinary check-ins use the active session binding or `client_session_id`; do
+**not** pass `continuity_token` to `process_agent_update`. Tokens are reserved
+for rare same-live-process ownership rebinds.
 
 If you include `ethical_drift`, current runtimes return `input_glossary.ethical_drift` naming the three positional components. Use that response metadata instead of guessing what each slot means.
 
@@ -150,11 +182,17 @@ Use in every session:
 - `start_session(force_new=true, parent_agent_id=...)` / `onboard(...)` — register a fresh process identity, optionally declaring lineage. Never call bare `onboard()`.
 - `sync_state()` / `process_agent_update()` — check in with work summary, complexity, confidence
 - `check_working_state()` / `get_governance_metrics()` — read current EISV state; read-only, and for an unbound caller it returns an `unbound` diagnostic plus `next_action` instead of creating a ghost identity
-- `identity()` — confirm who the runtime thinks you are within this process; rare same-live-process PATH 0 rebind via `(agent_uuid=..., continuity_token=..., resume=true)` (see `references/resume-semantics.md`)
-- `bind_session()` — explicit session rebind for a known `agent_uuid + client_session_id`; use only when bridging transports (e.g., REST hook → MCP session)
+- `identity()` — confirm who the runtime thinks you are within this process or set a display name
 - `health_check()` — operator-facing server health when behavior seems odd
 - `search_shared_memory(query=...)` / `knowledge(action="search")` — find existing knowledge before creating new entries
 - `knowledge(action="note")` — quick contribution to the knowledge graph; `leave_note()` is legacy compatibility only
+
+Advanced or rare:
+
+- `bind_session()` — explicit bridge for a known `agent_uuid + client_session_id`,
+  usually REST hook to MCP session
+- same-live-process token rebinds — see `references/resume-semantics.md` before
+  using them
 
 ## Going Deeper
 
