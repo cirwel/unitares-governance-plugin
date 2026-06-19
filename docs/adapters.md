@@ -4,6 +4,18 @@ How each client connects to a running UNITARES governance server. Adapters are a
 convenience layer — the server is the source of truth and the client stays thin.
 For env-var configuration see the [Configuration section of the README](../README.md#configuration).
 
+## Boundary with `unitares-host-adapter`
+
+This repo owns Claude/Codex plugin packaging, hook scripts, shared guidance, and
+the generic identity sidecar. The Hermes-native lifecycle binding does **not**
+live here; it lives in [`unitares-host-adapter`](https://github.com/CIRWEL/unitares-host-adapter)
+as `unitares_host_adapter.bindings.hermes` and is loaded by a thin Hermes user
+plugin at `~/.hermes/plugins/unitares`.
+
+A direct Hermes MCP server entry is a third surface: it exposes callable
+UNITARES tools, but it does not add lazy onboarding or automatic turn check-ins
+unless the Hermes plugin/host-adapter layer is also enabled.
+
 ## Claude
 
 The current Claude adapter includes session-start, pre-edit, post-edit, and session-end hooks. Those hooks should be treated as an adapter convenience, not the canonical governance policy. In particular, frequent file writes should not automatically be interpreted as meaningful governance events.

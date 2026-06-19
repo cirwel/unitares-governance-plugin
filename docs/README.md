@@ -39,7 +39,9 @@ it — so the reasoning survives past the conversation that produced it.
   server. Entity resolution, richer edge types, and an ontology agent stay
   documented and unbuilt.
 
-A recurring theme runs through all three: this repo is the **client adapter**,
-the server (`cirwel/unitares`) is the source of truth, and the client stays
-thin. New design notes should keep that altitude — argue a decision, mark what
-is deferred, and say which side of the client/server line the work lands on.
+A recurring theme runs through all three: this repo is the **Claude/Codex
+client/plugin integration layer**, the server (`cirwel/unitares`) is the source
+of truth, and host lifecycle bindings such as Hermes live in
+`cirwel/unitares-host-adapter`. New design notes should keep that altitude —
+argue a decision, mark what is deferred, and say which side of the
+client/server/host-adapter line the work lands on.
