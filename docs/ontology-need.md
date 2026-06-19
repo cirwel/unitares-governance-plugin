@@ -78,11 +78,12 @@ idea; do not pre-build the vocabulary.
 
 ## What to do
 
-Split by where the work lives. This repo is the **client adapter**, but it
-already owns a write-time chokepoint — the `pre-governance-call` PreToolUse
-hook that rewrites knowledge-call inputs — so the *formatting* half of the fix
-lands here. The durable, fleet-wide half (reconciling rows already stored, and
-the curated synonym map) still belongs in the `cirwel/unitares` server.
+Split by where the work lives. This repo is the **Claude/Codex client/plugin
+integration layer**, and it already owns a write-time chokepoint — the
+`pre-governance-call` PreToolUse hook that rewrites knowledge-call inputs — so
+the *formatting* half of the fix lands here. The durable, fleet-wide half
+(reconciling rows already stored, and the curated synonym map) still belongs in
+the `cirwel/unitares` server.
 
 | Fix | Where | Status |
 |---|---|---|

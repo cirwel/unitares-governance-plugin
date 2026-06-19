@@ -5,7 +5,7 @@
 [![Codex Plugin](https://img.shields.io/badge/Codex-plugin-10a37f.svg)](./CODEX_START.md)
 [![Version](https://img.shields.io/badge/version-0.4.9-blue.svg)](.claude-plugin/plugin.json)
 
-Client and integration layer for **UNITARES** — the runtime telemetry and coordination layer for heterogeneous AI-agent fleets. This repo provides agent-facing skills, command guidance, and adapters for connecting coding agents (Claude Code, Codex/ChatGPT, others) to a running UNITARES governance server. The runtime itself lives in [`cirwel/unitares`](https://github.com/cirwel/unitares).
+Client/plugin integration layer for **UNITARES** — the runtime telemetry and coordination layer for heterogeneous AI-agent fleets. This repo provides Claude/Codex-facing skills, command guidance, hook scripts, and sidecar tooling for connecting coding agents to a running UNITARES governance server. The runtime itself lives in [`cirwel/unitares`](https://github.com/cirwel/unitares); Hermes-native lifecycle bindings live in [`cirwel/unitares-host-adapter`](https://github.com/cirwel/unitares-host-adapter).
 
 ## Purpose
 
@@ -22,15 +22,19 @@ Use it to:
 ## What Lives Elsewhere
 
 - `unitares` contains the runtime, MCP server, storage, health checks, and governance logic
-- `unitares-governance` contains the agent-facing plugin and integration layer
+- `unitares-host-adapter` contains host lifecycle bindings, including the Hermes-native adapter used through a thin Hermes user plugin
+- `unitares-governance-plugin` contains the Claude/Codex-facing plugin package, skills, command guidance, hook scripts, and sidecar tooling
 - optional bridges like Discord can remain separate integrations
 
 This repo should not duplicate server business logic or become the source of truth for thresholds that already live in the runtime.
 
-## Current Adapters
+## Current Surfaces in This Repo
 
-- Codex/ChatGPT adapter: plugin packaging plus shared skills and explicit command guidance
-- Claude adapter: hooks, session helpers, and command docs
+- Codex/ChatGPT: plugin packaging plus shared skills and explicit command guidance
+- Claude: hooks, session helpers, command docs, and optional file-lease/check-in conveniences
+- Sidecar: local proxy for clients without native lifecycle hooks
+
+Hermes Agent is intentionally not listed here as the native path. For Hermes, use `unitares-host-adapter` and install a thin Hermes user plugin that imports `unitares_host_adapter.bindings.hermes`. Direct Hermes MCP config only exposes tools; it does not provide automatic lifecycle check-ins by itself.
 
 The shared value in this repo is the workflow guidance and client integration surface, not a second copy of the governance model.
 
@@ -94,7 +98,7 @@ The principle is simple: prefer regular behavioral baselines over raw activity n
 1. A running UNITARES governance server
 2. The governance MCP endpoint reachable by the client
 
-This repo is a **client adapter only** — it does not include the governance engine. You need a server running before any of these commands or skills do anything useful.
+This repo is a **client/plugin integration layer only** — it does not include the governance engine. You need a server running before any of these commands or skills do anything useful.
 
 **Easiest server bring-up — Docker Compose:**
 
@@ -144,6 +148,7 @@ policy — the server stays the source of truth and the client stays thin.
 - **Claude** — session-start, pre-edit, post-edit, and session-end hooks, plus BEAM file leases.
 - **Codex/ChatGPT** — minimal and explicit; shared skills, manual command flows, slot-scoped continuity cache.
 - **Sidecar** — a dependency-free local proxy for clients without lifecycle hooks.
+- **Hermes Agent** — native lifecycle binding lives in `unitares-host-adapter`; this repo is only relevant to Hermes if you deliberately route through the generic sidecar instead.
 
 Full details, endpoints, and configuration are in [docs/adapters.md](./docs/adapters.md).
 The Codex/ChatGPT quickstart is [CODEX_START.md](./CODEX_START.md).
