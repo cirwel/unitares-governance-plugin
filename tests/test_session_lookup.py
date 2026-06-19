@@ -35,6 +35,12 @@ def test_extract_slot_reads_session_id():
     assert _extract_slot('{"session_id":"abc-123"}') == "abc-123"
 
 
+def test_extract_slot_uses_codex_transcript_fallback():
+    transcript = "/Users/cirwel/.codex/sessions/2026/06/18/rollout.jsonl"
+    expected = "codex-transcript_path-" + hashlib.sha256(transcript.encode()).hexdigest()[:16]
+    assert _extract_slot(json.dumps({"transcript_path": transcript})) == expected
+
+
 def test_resolve_prefers_slotted_file(tmp_path):
     (tmp_path / ".unitares").mkdir()
     slotted_name = _slot_filename("my-slot")
@@ -84,6 +90,24 @@ def test_load_session_for_hook_empty_stdin_returns_empty(tmp_path):
     unslotted.write_text('{"uuid":"u","client_session_id":"c","continuity_token":"t","slot":"s"}')
     result = load_session_for_hook(tmp_path, "")
     assert result == {}
+
+
+def test_load_session_for_hook_reads_codex_fallback_slot(tmp_path):
+    (tmp_path / ".unitares").mkdir()
+    transcript = "/Users/cirwel/.codex/sessions/2026/06/18/rollout.jsonl"
+    slot = "codex-transcript_path-" + hashlib.sha256(transcript.encode()).hexdigest()[:16]
+    path = tmp_path / ".unitares" / _slot_filename(slot)
+    payload = {
+        "uuid": "codex-u",
+        "client_session_id": "agent-codex",
+        "slot": slot,
+    }
+    path.write_text(json.dumps(payload))
+
+    result = load_session_for_hook(tmp_path, json.dumps({"transcript_path": transcript}))
+
+    assert result["uuid"] == "codex-u"
+    assert result["client_session_id"] == "agent-codex"
 
 
 def test_home_fallback_removed_closes_cross_agent_siphoning(tmp_path, monkeypatch):

@@ -98,6 +98,13 @@ if isinstance(_tool_input, dict):
         _skip("subagent_onboard_not_cached")
 
 session_id = data.get("session_id") or ""
+if not session_id:
+    try:
+        sys.path.insert(0, sys.argv[2])
+        from _slot_from_stdin import slot_from_payload
+        session_id = slot_from_payload(sys.argv[1])
+    except Exception:
+        session_id = ""
 
 resp = data.get("tool_response")
 # Claude Code delivers MCP tool responses in two observed shapes:

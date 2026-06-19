@@ -9,6 +9,7 @@ for session identity — Part C of the identity honesty series.
 from __future__ import annotations
 
 import json
+import hashlib
 import subprocess
 from pathlib import Path
 
@@ -132,6 +133,23 @@ class TestPostIdentityRecordsResponse:
         result = _run_hook(hook_input, tmp_path)
         assert result.returncode == 0
         assert _read_session_cache(tmp_path, "slot-alias")["uuid"] == "u-alias-1"
+
+    def test_codex_transcript_path_writes_hashed_slot_cache(self, tmp_path):
+        transcript = "/Users/cirwel/.codex/sessions/2026/06/18/rollout.jsonl"
+        slot = "codex-transcript_path-" + hashlib.sha256(transcript.encode()).hexdigest()[:16]
+        hook_input = {
+            "transcript_path": transcript,
+            "tool_name": "mcp__governance__start_session",
+            "tool_input": {"force_new": True},
+            "tool_response": _mcp_response(uuid="u-codex-1"),
+        }
+
+        result = _run_hook(hook_input, tmp_path)
+
+        assert result.returncode == 0
+        cache = _read_session_cache(tmp_path, slot)
+        assert cache["uuid"] == "u-codex-1"
+        assert cache["client_session_id"] == "agent-abc"
 
 
 class TestSubagentOnboardGuard:

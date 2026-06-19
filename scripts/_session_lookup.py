@@ -15,11 +15,14 @@ Public API:
 current working directory plus whatever came in on stdin, get back
 a dict with ``uuid``, ``client_session_id``, ``continuity_token``,
 ``slot`` (and whatever else the cache wrote). Returns an empty dict
-if nothing matches.
+if nothing matches. Claude supplies ``session_id``. Codex may expose only
+stable conversation/transcript fields, so those are hashed into a slot key
+rather than collapsing onto the retired flat cache.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -43,6 +46,15 @@ def _slot_filename(slot: Optional[str]) -> str:
     safe = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in slot)
     safe = safe[:64]  # keep file names sane
     return f"session-{safe}.json"
+
+
+def _codex_fallback_slot(data: dict[str, Any]) -> Optional[str]:
+    for field in ("thread_id", "conversation_id", "transcript_path"):
+        value = data.get(field)
+        if isinstance(value, str) and value.strip():
+            digest = hashlib.sha256(value.strip().encode("utf-8")).hexdigest()[:16]
+            return f"codex-{field}-{digest}"
+    return None
 
 
 def resolve_session_file(workspace: str | Path, slot: Optional[str]) -> Optional[Path]:
@@ -95,9 +107,11 @@ def resolve_session_file(workspace: str | Path, slot: Optional[str]) -> Optional
 
 
 def _extract_slot(stdin_payload: str) -> Optional[str]:
-    """Extract the slot identifier (session_id) from the hook stdin JSON.
-    Matches onboard_helper's convention — the raw session_id is hashed
-    downstream, so we pass it through unchanged here."""
+    """Extract the slot identifier from hook stdin JSON.
+
+    Prefer raw ``session_id`` to preserve the existing Claude convention. If
+    absent, use stable Codex fields hashed into safe slot names.
+    """
     if not stdin_payload:
         return None
     try:
@@ -107,7 +121,9 @@ def _extract_slot(stdin_payload: str) -> Optional[str]:
     if not isinstance(data, dict):
         return None
     sid = data.get("session_id")
-    return sid if isinstance(sid, str) and sid else None
+    if isinstance(sid, str) and sid.strip():
+        return sid
+    return _codex_fallback_slot(data)
 
 
 def load_session_for_hook(workspace: str | Path, stdin_payload: str) -> dict[str, Any]:
