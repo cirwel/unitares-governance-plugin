@@ -6,6 +6,7 @@ same Python heredoc."""
 from __future__ import annotations
 
 import json
+import hashlib
 import subprocess
 import sys
 from pathlib import Path
@@ -52,6 +53,22 @@ def test_truncates_to_64_chars():
     out = slot_from_payload(json.dumps({"session_id": long_id}))
     assert len(out) == 64
     assert out == "a" * 64
+
+
+def test_codex_transcript_path_fallback_hashes_to_safe_slot():
+    transcript = "/Users/cirwel/.codex/sessions/2026/06/18/rollout-long-common-prefix.jsonl"
+    expected = "codex-transcript_path-" + hashlib.sha256(transcript.encode()).hexdigest()[:16]
+    assert slot_from_payload(json.dumps({"transcript_path": transcript})) == expected
+
+
+def test_codex_thread_id_fallback_wins_before_transcript_path():
+    thread_id = "thread:abc/123"
+    transcript = "/tmp/other.jsonl"
+    expected = "codex-thread_id-" + hashlib.sha256(thread_id.encode()).hexdigest()[:16]
+    assert slot_from_payload(json.dumps({
+        "thread_id": thread_id,
+        "transcript_path": transcript,
+    })) == expected
 
 
 def test_cli_round_trip_via_stdin():

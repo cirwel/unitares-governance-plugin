@@ -9,6 +9,12 @@ Connect to a running UNITARES governance server, preserve continuity cleanly, an
 ## Recommended Default
 
 Use `explicit` mode unless you are deliberately dogfooding tighter automation.
+When Codex lifecycle hooks are configured and trusted, Codex also has a light
+native hook path: `SessionStart` shows the governance nudge, `PostToolUse`
+records identity/check-in cache updates, `PreToolUse` injects the cached
+`client_session_id` into later governance calls, and `Stop` emits one
+turn-level substrate check-in. This does **not** turn every edit or tool call
+into a check-in.
 
 ### Modes
 
@@ -16,9 +22,10 @@ Use `explicit` mode unless you are deliberately dogfooding tighter automation.
 - `dogfood-light`: explicit check-ins plus stronger milestone reminders
 - `dogfood-heavy`: research mode for tighter automation and deterministic outcome capture
 
-This plugin currently optimizes for `explicit`. If you want adapter-like
-onboarding/check-in behavior from Codex, run the sidecar and send governance
-REST tool calls through it.
+This plugin still optimizes for `explicit` agent-authored check-ins. If you
+want adapter-like onboarding/check-in behavior from a client that cannot load
+the Codex lifecycle hooks, run the sidecar and send governance REST tool calls
+through it.
 
 ```bash
 python3 scripts/identity_sidecar.py --server-url http://localhost:8767 --workspace "$PWD" --slot codex-local
@@ -42,6 +49,11 @@ transport proxy yet.
 4. Run `/checkin` once per assistant turn, and after meaningful milestones
 5. Run `/diagnose` when continuity or governance state looks wrong
 6. Use `/dialectic` when you need structured review
+
+With Codex lifecycle hooks configured/trusted, step 4 becomes a baseline rather
+than the only safety net: the Stop hook emits one turn-stop check-in, while
+manual `/checkin` remains the right tool for meaningful milestones and
+agent-authored state.
 
 If you are not using commands directly, the equivalent raw tool flow is:
 
