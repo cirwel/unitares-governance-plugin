@@ -467,6 +467,16 @@ HEALTH_EXIT=0
 HEALTH_STATUS=$(curl -sS --max-time 3 "${SERVER_URL}/health" 2>>"${HEALTH_LOG}") || HEALTH_EXIT=$?
 printf '[%s] curl exit=%d len=%d url=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${HEALTH_EXIT}" "${#HEALTH_STATUS}" "${SERVER_URL}/health" >> "${HEALTH_LOG}" 2>/dev/null || true
 
+ORCHESTRATED_MODE="$(printf '%s' "${UNITARES_ORCHESTRATED:-0}" | tr '[:upper:]' '[:lower:]')"
+ANCHOR_RESUME_ENABLED=0
+if [[ -n "${UNITARES_CLIENT_SESSION_ID:-}" \
+      && ( "${ORCHESTRATED_MODE}" == "1" \
+           || "${ORCHESTRATED_MODE}" == "true" \
+           || "${ORCHESTRATED_MODE}" == "yes" \
+           || "${ORCHESTRATED_MODE}" == "on" ) ]]; then
+  ANCHOR_RESUME_ENABLED=1
+fi
+
 if [[ -z "${HEALTH_STATUS}" ]]; then
   CONTEXT="UNITARES Governance: OFFLINE (${SERVER_URL} unreachable). No governance identity is currently bound for this session. Governance tools may be unavailable."
   if [[ -n "${SKILL_CONTENT}" ]]; then
@@ -476,14 +486,17 @@ if [[ -z "${HEALTH_STATUS}" ]]; then
 ${SKILL_CONTENT}"
   fi
 else
-  if [[ -n "${UNITARES_CLIENT_SESSION_ID:-}" ]]; then
+  if [[ "${ANCHOR_RESUME_ENABLED}" == "1" ]]; then
     # Anchored conversation (e.g. Discord / dispatch_beam): a stable resume
-    # anchor (UNITARES_CLIENT_SESSION_ID) is set, so every turn must resolve to
-    # ONE governance identity. Nudging force_new here is actively wrong — it
-    # mints a fresh uuid per turn and breaks the per-conversation continuity the
-    # anchor exists to provide. Lazy onboarding at Stop passes the anchor to the
-    # server, which resumes the same identity across turns. (Takes precedence
-    # over compact / already-shown: the message is short enough to repeat.)
+    # anchor (UNITARES_CLIENT_SESSION_ID) is set by an orchestrator together
+    # with UNITARES_ORCHESTRATED=1, so every turn must resolve to ONE governance
+    # identity. A bare leaked anchor without the orchestration marker is treated
+    # like a normal fresh process. Nudging force_new here is actively wrong for
+    # true orchestrated anchors — it mints a fresh uuid per turn and breaks the
+    # per-conversation continuity the anchor exists to provide. Lazy onboarding
+    # at Stop passes the anchor to the server, which resumes the same identity
+    # across turns. (Takes precedence over compact / already-shown: the message
+    # is short enough to repeat.)
     CONTEXT="UNITARES Governance: ONLINE (anchored session)
 This conversation carries a stable governance resume anchor, so your identity
 resumes automatically across turns — ONE identity per conversation, not a fresh
@@ -563,7 +576,7 @@ a UUID."
 
   # Suppress the lineage hint on anchored sessions: it nudges force_new /
   # parent declaration, which contradicts resume-one-identity-per-anchor.
-  if [[ -z "${UNITARES_CLIENT_SESSION_ID:-}" && -n "${WORKSPACE_LINEAGE_HINT}" ]]; then
+  if [[ "${ANCHOR_RESUME_ENABLED}" != "1" && -n "${WORKSPACE_LINEAGE_HINT}" ]]; then
     CONTEXT="${CONTEXT}
 
 ${WORKSPACE_LINEAGE_HINT}"
@@ -572,7 +585,7 @@ ${WORKSPACE_LINEAGE_HINT}"
   # Skip the Fundamentals excerpt in compact mode. The freshness warning
   # (if any) still injects on the *next* fresh-workspace fire when the
   # full block returns, so calibration on stale skill files isn't lost.
-  if [[ -z "${UNITARES_CLIENT_SESSION_ID:-}" && "${COMPACT_MODE}" != "1" && "${NUDGE_ALREADY_SHOWN}" != "1" && -n "${SKILL_CONTENT}" ]]; then
+  if [[ "${ANCHOR_RESUME_ENABLED}" != "1" && "${COMPACT_MODE}" != "1" && "${NUDGE_ALREADY_SHOWN}" != "1" && -n "${SKILL_CONTENT}" ]]; then
     CONTEXT="${CONTEXT}
 
 --- Governance Fundamentals (excerpt)${SKILL_SOURCE_SUFFIX} ---

@@ -5,10 +5,11 @@ canonical case: one `claude -p` process per user turn), every turn must resume
 the SAME governance identity instead of minting a fresh uuid each time. This is
 continuity, not lineage — the turns are the same agent resumed.
 
-Pins the client-side contract: anchor set => send `client_session_id`, omit
-`force_new`, declare no lineage, and do not slot-scope the name. Gated +
-additive: no anchor => byte-identical to the legacy fresh-mint flow; an explicit
-`force_new` overrides the anchor (a deliberate clean break).
+Pins the client-side contract: anchor + orchestrated marker set => send
+`client_session_id`, omit `force_new`, declare no lineage, and do not slot-scope
+the name. A bare anchor without the marker is ignored and mints normally.
+Gated + additive: no anchor => byte-identical to the legacy fresh-mint flow; an
+explicit `force_new` overrides the anchor (a deliberate clean break).
 """
 
 from __future__ import annotations
@@ -20,7 +21,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from onboard_helper import run_onboard  # noqa: E402
+from onboard_helper import _env_truthy, run_onboard  # noqa: E402
 
 
 class _FakeTransport:
@@ -62,12 +63,14 @@ def test_anchor_resumes_sends_csid_omits_force_new_and_lineage(tmp_path: Path) -
         workspace=tmp_path,
         slot="turn-2-session-id",  # changes per turn — must NOT scope the name
         client_session_id="agent:/thread-x",
+        orchestrated=True,
         post_json=transport,
     )
 
     assert result["status"] == "ok"
     args = _sent_args(transport)
     assert args["client_session_id"] == "agent:/thread-x"
+    assert args["orchestrated"] is True
     # Resume, not mint: no force_new, no lineage.
     assert "force_new" not in args
     assert "parent_agent_id" not in args
@@ -91,12 +94,34 @@ def test_anchor_ignores_cached_uuid_no_lineage(tmp_path: Path) -> None:
         workspace=tmp_path,
         slot="turn-1",
         client_session_id="agent:/thread-x",
+        orchestrated=True,
         post_json=transport,
     )
 
     args = _sent_args(transport)
     assert "parent_agent_id" not in args
     assert args["client_session_id"] == "agent:/thread-x"
+    assert args["orchestrated"] is True
+
+
+def test_anchor_without_orchestrated_marker_mints_not_resumes(tmp_path: Path) -> None:
+    transport = _FakeTransport(_onboard_ok("2222bbbb-0000-0000-0000-000000000000"))
+
+    run_onboard(
+        server_url="http://unit-test",
+        agent_name="claude-thread-x",
+        model_type="claude-code",
+        workspace=tmp_path,
+        slot="turn-1",
+        client_session_id="agent:/leaked-global-anchor",
+        orchestrated=False,
+        post_json=transport,
+    )
+
+    args = _sent_args(transport)
+    assert args["force_new"] is True
+    assert "client_session_id" not in args
+    assert args["name"].startswith("claude-thread-x#")
 
 
 def test_explicit_force_new_overrides_anchor(tmp_path: Path) -> None:
@@ -109,6 +134,7 @@ def test_explicit_force_new_overrides_anchor(tmp_path: Path) -> None:
         workspace=tmp_path,
         slot="s1",
         client_session_id="agent:/thread-x",
+        orchestrated=True,
         force_new=True,  # deliberate clean break wins
         post_json=transport,
     )
@@ -128,6 +154,7 @@ def test_blank_anchor_falls_back_to_fresh_mint(tmp_path: Path) -> None:
         workspace=tmp_path,
         slot="s1",
         client_session_id="   ",  # blank => legacy fresh-mint
+        orchestrated=True,
         post_json=transport,
     )
 
@@ -155,3 +182,12 @@ def test_no_anchor_is_byte_identical_to_legacy(tmp_path: Path) -> None:
     assert "client_session_id" not in args
     # Name IS slot-scoped in the legacy path.
     assert args["name"].startswith("claude-thread-x#")
+
+
+def test_orchestrated_env_truthy_fails_closed() -> None:
+    assert _env_truthy("1") is True
+    assert _env_truthy("true") is True
+    assert _env_truthy("YES") is True
+    assert _env_truthy("on") is True
+    for value in (None, "", "0", "false", "no", "off", "  ", "maybe"):
+        assert _env_truthy(value) is False, value

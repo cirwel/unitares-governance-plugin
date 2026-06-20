@@ -100,9 +100,11 @@ if [[ -z "${CSID:-}" && -n "${RAW_SLOT:-}" \
     WORKSPACE_NAME="$(basename "${PWD}")"
     AGENT_NAME="${UNITARES_AGENT_NAME:-${UNITARES_AGENT_PREFIX:-claude}-${WORKSPACE_NAME}}"
     MODEL_TYPE="${UNITARES_MODEL_TYPE:-claude-code}"
-    # Resume anchor (UNITARES_CLIENT_SESSION_ID, e.g. "agent:/thread-<id>"): when
-    # a spawner sets it, every turn of the conversation resumes ONE identity
-    # instead of minting a fresh uuid per turn. Empty => legacy fresh-mint.
+    # Resume anchor (UNITARES_CLIENT_SESSION_ID, e.g. "agent:/thread-<id>") is
+    # honored only when the spawner also declares UNITARES_ORCHESTRATED=1. That
+    # fail-closed marker lets headless orchestrated turn-children resume one
+    # identity across turns while a leaked bare anchor in an interactive shell
+    # falls back to normal fresh-mint behavior.
     python3 "${ONBOARD_HELPER}" \
       --server-url "${SERVER_URL}" \
       --name "${AGENT_NAME}" \
