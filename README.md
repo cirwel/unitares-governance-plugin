@@ -5,7 +5,7 @@
 [![Codex Plugin](https://img.shields.io/badge/Codex-plugin-10a37f.svg)](./CODEX_START.md)
 [![Version](https://img.shields.io/badge/version-0.4.9-blue.svg)](.claude-plugin/plugin.json)
 
-Client/plugin integration layer for **UNITARES** — the runtime telemetry and coordination layer for heterogeneous AI-agent fleets. This repo provides Claude/Codex-facing skills, command guidance, hook scripts, and sidecar tooling for connecting coding agents to a running UNITARES governance server. The runtime itself lives in [`cirwel/unitares`](https://github.com/cirwel/unitares); Hermes-native lifecycle bindings live in [`cirwel/unitares-host-adapter`](https://github.com/cirwel/unitares-host-adapter).
+Client/plugin integration layer for **UNITARES** — the runtime governance layer for heterogeneous AI-agent fleets. This repo provides Claude/Codex-facing skills, command guidance, hook scripts, and sidecar tooling for connecting coding agents to a running UNITARES governance server. The runtime itself lives in [`cirwel/unitares`](https://github.com/cirwel/unitares); Hermes-native lifecycle bindings live in [`cirwel/unitares-host-adapter`](https://github.com/cirwel/unitares-host-adapter).
 
 ## Purpose
 
@@ -103,13 +103,13 @@ This repo is a **client/plugin integration layer only** — it does not include 
 **Easiest server bring-up — Docker Compose:**
 
 ```bash
-git clone https://github.com/CIRWEL/unitares.git
+git clone https://github.com/cirwel/unitares.git
 cd unitares
 docker compose up
 # server now at http://localhost:8767/mcp/
 ```
 
-That single command brings up Postgres+AGE+pgvector, Redis, and the governance server. The Pi/Lumen embodiment side is optional — governance runs standalone. For bare-metal install (Homebrew Postgres, native AGE compile) see [unitares/README.md](https://github.com/CIRWEL/unitares#installation).
+That single command brings up Postgres+AGE+pgvector, Redis, and the governance server. The Pi/Lumen embodiment side is optional — governance runs standalone. For bare-metal install (Homebrew Postgres, native AGE compile) see [unitares/README.md](https://github.com/cirwel/unitares#installation).
 
 Once the server is up, **the plugin registers its MCP client automatically** — it
 ships an `.mcp.json` pointing at `http://localhost:8767/mcp/`, so there is nothing

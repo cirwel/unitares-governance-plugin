@@ -8,5 +8,5 @@
   "homepage": "https://github.com/CIRWEL/unitares-governance-plugin",
   "repository": "https://github.com/CIRWEL/unitares-governance-plugin",
   "license": "Apache-2.0",
-  "keywords": ["governance", "eisv", "thermodynamic", "multi-agent", "dialectic", "coherence"]
+  "keywords": ["governance", "eisv", "runtime-governance", "multi-agent", "dialectic", "coherence"]
 }
