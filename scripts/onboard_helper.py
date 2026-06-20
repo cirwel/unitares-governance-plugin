@@ -58,6 +58,11 @@ BOOTSTRAP_COMPLEXITY = 0.1
 BOOTSTRAP_CONFIDENCE = 0.5
 
 
+def _env_truthy(value: str | None) -> bool:
+    """Return True only for explicit affirmative env values."""
+    return (value or "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def _default_bootstrap_state() -> dict:
     """Minimal genesis check-in payload for ``onboard(initial_state=...)``.
 
@@ -75,10 +80,7 @@ def _default_bootstrap_state() -> dict:
 
 def _bootstrap_enabled() -> bool:
     """Global opt-in for genesis seeding (``UNITARES_ONBOARD_BOOTSTRAP=1``). Off by default."""
-    return (
-        os.environ.get("UNITARES_ONBOARD_BOOTSTRAP", "off").strip().lower()
-        in ("1", "on", "true", "yes")
-    )
+    return _env_truthy(os.environ.get("UNITARES_ONBOARD_BOOTSTRAP"))
 
 
 def _slot_filename(slot: str | None) -> str:
@@ -260,6 +262,7 @@ def run_onboard(
     slot: str | None = None,
     force_new: bool = False,
     client_session_id: str | None = None,
+    orchestrated: bool = False,
     auth_token: str | None = None,
     timeout: float = DEFAULT_TIMEOUT,
     initial_state: dict | None = None,
@@ -277,11 +280,13 @@ def run_onboard(
 
     ``client_session_id`` is a stable per-conversation **resume anchor**
     (typically ``UNITARES_CLIENT_SESSION_ID``, e.g. ``"agent:/thread-<id>"``).
-    When set, every process under it resolves to the SAME governance uuid
-    (server resume) instead of minting a fresh identity per call — the canonical
-    case is the Discord bridge, where each user turn is a fresh ``claude -p``
-    process. Gated + additive: a blank anchor is byte-identical to the legacy
-    fresh-mint flow; an explicit ``force_new`` overrides it (a deliberate break).
+    It is honored only when ``orchestrated`` is true. That fail-closed marker
+    distinguishes headless orchestrated turn-children (the Discord bridge /
+    dispatch_beam case, where each user turn is a fresh ``claude -p`` process)
+    from normal interactive sessions. A leaked bare anchor on an interactive
+    shell must be inert: it falls back to the default fresh-mint path, never
+    silently resume-sharing multiple subjects onto one governance UUID.
+    ``force_new`` still overrides the anchor as a deliberate break.
     """
     url = f"{server_url.rstrip('/')}/v1/tools/call"
     cache = read_cache(workspace, slot)
@@ -291,7 +296,7 @@ def run_onboard(
     # ``force_new``, and declare no parent. ``force_new`` (explicit operator
     # break) suppresses resume.
     anchor = (client_session_id or "").strip()
-    resume = bool(anchor) and not force_new
+    resume = bool(anchor) and orchestrated and not force_new
 
     parent_agent_id = ""
     if not resume and not force_new:
@@ -304,11 +309,13 @@ def run_onboard(
             "name": agent_name,
             "model_type": model_type,
             "client_session_id": anchor,
+            "orchestrated": True,
         }
     else:
         # Scope the name by slot so the server's name-claim lookup doesn't bind
-        # this slot's onboard to an agent owned by another slot. force_new is
-        # still explicit, but display-name scoping keeps parallel slots legible.
+        # this slot's onboard to an agent owned by another slot. This is also
+        # the path for a bare anchor without the orchestration marker: mint, do
+        # not resume-share.
         scoped_name = _scope_name_by_slot(agent_name, slot)
         arguments = {
             "name": scoped_name,
@@ -408,9 +415,17 @@ def main(argv: list[str] | None = None) -> int:
         "--client-session-id",
         default=os.environ.get("UNITARES_CLIENT_SESSION_ID", ""),
         help="Stable per-conversation resume anchor (e.g. 'agent:/thread-<id>'). "
-             "When set, every process under this anchor resumes the SAME identity "
-             "instead of minting a fresh one per turn. Empty = legacy fresh-mint; "
-             "--force-new overrides (clean break).",
+             "Honored only with --orchestrated / UNITARES_ORCHESTRATED=1, so a "
+             "leaked anchor in an interactive shell cannot resume-share. Empty "
+             "= legacy fresh-mint; --force-new overrides (clean break).",
+    )
+    parser.add_argument(
+        "--orchestrated",
+        action="store_true",
+        default=_env_truthy(os.environ.get("UNITARES_ORCHESTRATED")),
+        help="Declare this process as an orchestrated headless turn-child. "
+             "Required for --client-session-id to trigger resume; without it "
+             "the anchor is ignored and onboarding mints normally.",
     )
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT)
     args = parser.parse_args(argv)
@@ -427,6 +442,7 @@ def main(argv: list[str] | None = None) -> int:
         slot=slot,
         force_new=args.force_new,
         client_session_id=client_session_id,
+        orchestrated=args.orchestrated,
         auth_token=auth_token,
         timeout=args.timeout,
         bootstrap=args.bootstrap,

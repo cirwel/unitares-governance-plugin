@@ -35,7 +35,9 @@ def _run_hook_with_mock_server(
     hook_name: str,
     workspace: Path,
     slot: str,
-    extra_stdin_fields: dict = None,
+    extra_stdin_fields: dict | None = None,
+    extra_env: dict | None = None,
+    return_all: bool = False,
 ):
     """Launch mock server, invoke hook with {"session_id": slot}, collect calls."""
     RecordingHandler.calls = []
@@ -57,6 +59,8 @@ def _run_hook_with_mock_server(
             "CLAUDE_PLUGIN_ROOT": str(PLUGIN_ROOT),
             "PWD": str(workspace),
         }
+        if extra_env:
+            env.update(extra_env)
         hook = PLUGIN_ROOT / "hooks" / hook_name
         subprocess.run(
             [str(hook)],
@@ -70,6 +74,8 @@ def _run_hook_with_mock_server(
     finally:
         srv.shutdown()
         thread.join(timeout=2)
+    if return_all:
+        return list(RecordingHandler.calls)
     return [c for c in RecordingHandler.calls if c.get("name") == "process_agent_update"]
 
 
@@ -87,6 +93,50 @@ def test_post_stop_reads_slotted_cache(tmp_path):
         f"post-stop did not fire turn_stop when only the slotted cache existed; "
         f"events: {events}"
     )
+
+
+def _onboard_args(calls: list[dict]) -> dict:
+    onboard_calls = [c for c in calls if c.get("name") == "onboard"]
+    assert onboard_calls, f"expected onboard call in {calls!r}"
+    return onboard_calls[0]["arguments"]
+
+
+def test_post_stop_bare_anchor_mints_instead_of_resuming(tmp_path):
+    """A leaked UNITARES_CLIENT_SESSION_ID is inert without the orchestration marker."""
+    calls = _run_hook_with_mock_server(
+        "post-stop",
+        tmp_path,
+        "turn-slot-bare-anchor",
+        extra_env={"UNITARES_CLIENT_SESSION_ID": "agent:/leaked-global-anchor"},
+        return_all=True,
+    )
+
+    args = _onboard_args(calls)
+    assert args["force_new"] is True
+    assert "client_session_id" not in args
+    assert "orchestrated" not in args
+    assert "#" in args["name"]
+
+
+def test_post_stop_orchestrated_anchor_resumes(tmp_path):
+    """Headless orchestrated turn-children opt into one identity per anchor."""
+    calls = _run_hook_with_mock_server(
+        "post-stop",
+        tmp_path,
+        "turn-slot-orchestrated-anchor",
+        extra_env={
+            "UNITARES_CLIENT_SESSION_ID": "agent:/thread-123",
+            "UNITARES_ORCHESTRATED": "yes",
+        },
+        return_all=True,
+    )
+
+    args = _onboard_args(calls)
+    assert args["client_session_id"] == "agent:/thread-123"
+    assert args["orchestrated"] is True
+    assert "force_new" not in args
+    assert "parent_agent_id" not in args
+    assert "#" not in args["name"]
 
 
 def test_session_end_reads_slotted_cache(tmp_path):
