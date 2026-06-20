@@ -57,6 +57,31 @@ like `floor_sent`, `floor_fail`, `fail`, or `error`. Use `--log-tail N` or
 `--since 24h` for operational monitoring, `--json` for monitor output, and
 `--fail-on-warning` when warnings should break CI.
 
+## Strict thread-anchor canary
+
+Before changing the Discord/dispatch thread identity path or advancing a
+`STRICT_IDENTITY_REQUIRED` rollout, run the thread-anchor contract canary:
+
+```bash
+python3 scripts/dev/strict_thread_anchor_contract.py --json
+```
+
+That local mode checks the plugin envelope only: a thread
+`UNITARES_CLIENT_SESSION_ID` is forwarded only when the orchestrated marker is
+present, and a bare anchor falls back to fresh minting. To probe a live strict
+governance server, add `--live`:
+
+```bash
+python3 scripts/dev/strict_thread_anchor_contract.py \
+  --live \
+  --server-url "http://127.0.0.1:8767" \
+  --json
+```
+
+Live mode writes a unique canary identity. It asserts the full boundary: a bare
+`agent:/thread-*` resume miss returns `lineage_declaration_required`, while
+`orchestrated=true` first-binds and a second turn resumes the same UUID.
+
 ## Known limitation
 
 The edit-threshold auto-checkin previously supported `UNITARES_HTTP_API_TOKEN`
