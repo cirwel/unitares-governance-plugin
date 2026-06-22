@@ -155,3 +155,64 @@ def test_since_filters_older_log_lines(tmp_path: Path) -> None:
     payload = _payload(result)
     assert payload["warnings"] == 1
     assert payload["findings"][0]["code"] == "checkin_fallback_status"
+
+
+def test_response_capture_rejects_competing_agent_signature_handles(tmp_path: Path) -> None:
+    response = tmp_path / "response.json"
+    response.write_text(json.dumps({
+        "success": True,
+        "agent_signature": {
+            "uuid": "00000000-0000-0000-0000-000000000001",
+            "agent_id": "claude-opus48-dogfood",
+            "structured_agent_id": "Claude_Opus_4_8_20260613",
+            "display_name": "claude-opus48-dogfood",
+            "label_source": "claimed",
+        },
+    }), encoding="utf-8")
+
+    result = _run(tmp_path, tmp_path / "missing.log", "--response", str(response))
+
+    assert result.returncode == 2
+    codes = {finding["code"] for finding in _payload(result)["findings"]}
+    assert "agent_signature_competing_public_handles" in codes
+    assert "agent_signature_label_in_agent_id" in codes
+
+
+def test_response_capture_accepts_s22_agent_signature(tmp_path: Path) -> None:
+    response = tmp_path / "response.json"
+    response.write_text(json.dumps({
+        "success": True,
+        "agent_signature": {
+            "uuid": "00000000-0000-0000-0000-000000000001",
+            "agent_id": "Claude_Opus_4_8_20260613",
+            "structured_agent_id": "Claude_Opus_4_8_20260613",
+            "display_name": "claude-opus48-dogfood",
+            "label_source": "claimed",
+            "identity_context": {
+                "schema": "s22.identity_response.v1",
+                "identity_is": "uuid",
+                "label_is": "social_or_cosmetic",
+                "agent_id_is": "public_structured_handle",
+                "harness_is": "context_not_identity_proof",
+                "registry": {
+                    "uuid": "00000000-0000-0000-0000-000000000001",
+                    "is_identity_key": True,
+                },
+                "public_handle": {
+                    "agent_id": "Claude_Opus_4_8_20260613",
+                    "is_identity_key": False,
+                },
+                "label": {
+                    "display_name": "claude-opus48-dogfood",
+                    "is_identity_key": False,
+                },
+            },
+        },
+    }), encoding="utf-8")
+
+    result = _run(tmp_path, tmp_path / "missing.log", "--response", str(response))
+
+    assert result.returncode == 0
+    payload = _payload(result)
+    assert payload["errors"] == 0
+    assert payload["responses"] == [str(response)]
