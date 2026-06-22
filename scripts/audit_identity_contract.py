@@ -8,6 +8,7 @@ surfaces that thin clients can actually corrupt:
 * slot-scoped session caches under .unitares/
 * the optional legacy flat session.json
 * hook diagnostic lines in checkins.log
+* optional captured MCP response JSON files passed via --response
 
 Exit codes:
   0 = no errors, and no warnings unless --fail-on-warning is set
@@ -39,6 +40,7 @@ WEAK_SOURCES = (
 )
 FALLBACK_STATUSES = {"floor_sent", "floor_fail", "fail", "error"}
 SLOT_RE = re.compile(r"session-(?P<slot>[A-Za-z0-9_-]{1,64})\.json$")
+IDENTITY_RESPONSE_SCHEMA = "s22.identity_response.v1"
 
 
 @dataclass(frozen=True)
@@ -69,6 +71,13 @@ def _read_json(path: Path) -> tuple[dict[str, Any] | None, str | None]:
     if not isinstance(data, dict):
         return None, "JSON root is not an object"
     return data, None
+
+
+def _read_json_any(path: Path) -> tuple[Any | None, str | None]:
+    try:
+        return json.loads(path.read_text(encoding="utf-8")), None
+    except Exception as exc:
+        return None, str(exc)
 
 
 def _session_paths(workspace: Path) -> list[Path]:
@@ -276,6 +285,183 @@ def audit_checkin_log(
     return findings
 
 
+def _nonempty_text(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    return text or None
+
+
+def _iter_json_objects(value: Any):
+    """Yield all dicts inside a decoded response, including JSON strings."""
+    if isinstance(value, dict):
+        yield value
+        for child in value.values():
+            yield from _iter_json_objects(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _iter_json_objects(child)
+    elif isinstance(value, str):
+        text = value.strip()
+        if not (text.startswith("{") or text.startswith("[")):
+            return
+        try:
+            decoded = json.loads(text)
+        except Exception:
+            return
+        yield from _iter_json_objects(decoded)
+
+
+def _response_paths(paths: list[str]) -> list[Path]:
+    resolved: list[Path] = []
+    for raw in paths:
+        path = Path(raw).expanduser()
+        if path.is_dir():
+            resolved.extend(sorted(p for p in path.rglob("*.json") if p.is_file()))
+        else:
+            resolved.append(path)
+    return resolved
+
+
+def _audit_identity_context(
+    *,
+    payload: dict[str, Any],
+    context: dict[str, Any],
+    path_ref: str,
+) -> list[Finding]:
+    findings: list[Finding] = []
+    schema = context.get("schema")
+    if schema != IDENTITY_RESPONSE_SCHEMA:
+        findings.append(Finding(
+            "error",
+            "identity_context_wrong_schema",
+            path_ref,
+            f"identity_context.schema is {schema!r}, expected {IDENTITY_RESPONSE_SCHEMA}",
+        ))
+        return findings
+
+    registry_uuid = None
+    registry = context.get("registry")
+    if isinstance(registry, dict):
+        registry_uuid = _nonempty_text(registry.get("uuid"))
+    payload_uuid = _nonempty_text(payload.get("uuid"))
+    if payload_uuid and registry_uuid and payload_uuid != registry_uuid:
+        findings.append(Finding(
+            "error",
+            "identity_context_uuid_mismatch",
+            path_ref,
+            "payload uuid does not match identity_context.registry.uuid",
+        ))
+
+    public_handle = None
+    public = context.get("public_handle")
+    if isinstance(public, dict):
+        public_handle = _nonempty_text(public.get("agent_id"))
+    payload_agent_id = _nonempty_text(payload.get("agent_id"))
+    if payload_agent_id and public_handle and payload_agent_id != public_handle:
+        findings.append(Finding(
+            "error",
+            "identity_context_agent_id_mismatch",
+            path_ref,
+            "payload agent_id does not match identity_context.public_handle.agent_id",
+        ))
+
+    label_display = None
+    label = context.get("label")
+    if isinstance(label, dict):
+        label_display = _nonempty_text(label.get("display_name"))
+    payload_display = _nonempty_text(payload.get("display_name"))
+    if payload_display and label_display and payload_display != label_display:
+        findings.append(Finding(
+            "error",
+            "identity_context_display_name_mismatch",
+            path_ref,
+            "payload display_name does not match identity_context.label.display_name",
+        ))
+
+    if context.get("agent_id_is") != "public_structured_handle":
+        findings.append(Finding(
+            "error",
+            "identity_context_agent_id_role",
+            path_ref,
+            "identity_context.agent_id_is must be public_structured_handle",
+        ))
+
+    return findings
+
+
+def _audit_agent_signature(signature: dict[str, Any], path_ref: str) -> list[Finding]:
+    findings: list[Finding] = []
+    uuid = _nonempty_text(signature.get("uuid"))
+    agent_id = _nonempty_text(signature.get("agent_id"))
+    structured_agent_id = _nonempty_text(signature.get("structured_agent_id"))
+    display_name = _nonempty_text(signature.get("display_name"))
+    label_source = _nonempty_text(signature.get("label_source"))
+
+    if agent_id and structured_agent_id and agent_id != structured_agent_id:
+        findings.append(Finding(
+            "error",
+            "agent_signature_competing_public_handles",
+            path_ref,
+            "agent_signature.agent_id and structured_agent_id differ; one public handle contract is broken",
+        ))
+
+    if agent_id and display_name and agent_id == display_name and label_source == "claimed":
+        findings.append(Finding(
+            "error",
+            "agent_signature_label_in_agent_id",
+            path_ref,
+            "claimed display label appears in agent_signature.agent_id",
+        ))
+
+    context = signature.get("identity_context")
+    if uuid and agent_id and not isinstance(context, dict):
+        findings.append(Finding(
+            "error",
+            "agent_signature_missing_identity_context",
+            path_ref,
+            "bound agent_signature is missing s22.identity_response.v1 identity_context",
+        ))
+    elif isinstance(context, dict):
+        findings.extend(_audit_identity_context(
+            payload=signature,
+            context=context,
+            path_ref=path_ref,
+        ))
+
+    return findings
+
+
+def audit_response_captures(paths: list[str]) -> list[Finding]:
+    findings: list[Finding] = []
+    for path in _response_paths(paths):
+        data, error = _read_json_any(path)
+        if error:
+            findings.append(Finding(
+                "error",
+                "response_capture_invalid_json",
+                str(path),
+                f"response capture is unreadable JSON: {error}",
+            ))
+            continue
+
+        assert data is not None
+        for index, obj in enumerate(_iter_json_objects(data), start=1):
+            path_ref = f"{path}#object{index}"
+            signature = obj.get("agent_signature")
+            if isinstance(signature, dict):
+                findings.extend(_audit_agent_signature(signature, path_ref))
+            context = obj.get("identity_context")
+            if isinstance(context, dict):
+                findings.extend(_audit_identity_context(
+                    payload=obj,
+                    context=context,
+                    path_ref=path_ref,
+                ))
+
+    return findings
+
+
 def _default_log_path() -> Path:
     raw = os.environ.get("UNITARES_CHECKIN_LOG", "~/.unitares/checkins.log")
     return Path(raw).expanduser()
@@ -302,6 +488,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--log", default=None, help="check-in log path; default: UNITARES_CHECKIN_LOG or ~/.unitares/checkins.log")
     parser.add_argument("--log-tail", type=int, default=None, help="inspect only the last N check-in log lines")
     parser.add_argument("--since", default=None, help="inspect log lines at or after ISO timestamp or shorthand duration such as 24h, 30m, 7d")
+    parser.add_argument("--response", action="append", default=[], help="captured MCP response JSON file or directory to audit; may be repeated")
     parser.add_argument("--json", action="store_true", help="emit JSON instead of text")
     parser.add_argument("--fail-on-warning", action="store_true", help="exit 1 when warnings are present")
     args = parser.parse_args(argv)
@@ -318,7 +505,7 @@ def main(argv: list[str] | None = None) -> int:
         log_path,
         log_tail=args.log_tail,
         since=since,
-    )
+    ) + audit_response_captures(args.response)
     errors = [f for f in findings if f.severity == "error"]
     warnings = [f for f in findings if f.severity == "warning"]
 
@@ -328,6 +515,7 @@ def main(argv: list[str] | None = None) -> int:
             "log": str(log_path),
             "log_tail": args.log_tail,
             "since": since.isoformat() if since else None,
+            "responses": [str(path) for path in _response_paths(args.response)],
             "errors": len(errors),
             "warnings": len(warnings),
             "findings": [f.as_dict() for f in findings],
