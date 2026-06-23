@@ -40,5 +40,31 @@ jobs:
       - name: Check skill freshness metadata
         run: ./scripts/check-skill-freshness.sh
 
+      - name: Check skills parity with canonical fingerprint
+        # The synced skills/SKILLS_MANIFEST.sha256 is unitares' canonical
+        # fingerprint (per-file sha256 + aggregate). Recompute it from the
+        # mirrored skills/ tree and fail if they disagree — i.e. the mirror
+        # drifted from canonical, or the manifest wasn't re-synced.
+        run: |
+          python3 - <<'PY'
+          import hashlib, pathlib, sys
+          skills = pathlib.Path("skills")
+          manifest = skills / "SKILLS_MANIFEST.sha256"
+          if not manifest.exists():
+              sys.exit("SKILLS_MANIFEST.sha256 missing — re-run sync-plugin-skills.sh from unitares")
+          files = sorted(
+              (p for p in skills.rglob("*") if p.is_file() and p.name != manifest.name),
+              key=lambda p: p.relative_to(skills).as_posix(),
+          )
+          lines = [f"{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.relative_to(skills).as_posix()}" for p in files]
+          actual = hashlib.sha256("\n".join(lines).encode()).hexdigest()
+          want = next((l.split("aggregate:")[1].strip()
+                       for l in manifest.read_text().splitlines() if "aggregate:" in l), None)
+          if actual != want:
+              sys.exit(f"skills drift: mirror aggregate {actual} != canonical {want}\n"
+                       "re-run scripts/dev/sync-plugin-skills.sh from unitares, then commit the mirror")
+          print(f"skills parity OK ({len(files)} files, aggregate {actual[:12]})")
+          PY
+
       - name: Run tests
         run: python -m pytest
