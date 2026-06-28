@@ -68,3 +68,70 @@ jobs:
 
       - name: Run tests
         run: python -m pytest
+
+  scope:
+    name: Scope guard
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Determine diff base
+        id: base
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "ref=origin/${{ github.base_ref }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref=HEAD~1" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Operator-local paths and Claude session-attribution links
+      # (claude.ai/code/session / Claude-Session:) must not enter the public
+      # history — in committed files, the PR body, or commit messages. The
+      # session trailer is appended by the Claude Code harness by default and
+      # is the commit-level analogue of Co-Authored-By, which this repo omits.
+      - name: Lint changed files
+        run: |
+          base="${{ steps.base.outputs.ref }}"
+          files=$(git diff --name-only --diff-filter=ACMR "${base}...HEAD" 2>/dev/null \
+                  || git diff --name-only --diff-filter=ACMR "$base")
+          rc=0
+          for f in $files; do
+            case "$f" in .github/workflows/ci.yml) continue;; esac
+            [ -f "$f" ] || continue
+            if grep -nIE '/Users/cirwel|claude\.ai/code/session|Claude-Session:' "$f" >/dev/null 2>&1; then
+              echo "::error file=$f::operator-local path or Claude session-attribution link in committed content"
+              rc=1
+            fi
+          done
+          if [ "$rc" = 0 ]; then echo "Files: clean"; fi
+          exit $rc
+
+      - name: Lint PR body
+        if: github.event_name == 'pull_request'
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          # Meta-PRs that name these patterns opt out with the HTML comment
+          # <!-- scope-guard: allow-register --> in the body.
+          if printf '%s' "$PR_BODY" | grep -q 'scope-guard: allow-register'; then
+            echo "PR body: allow-register marker present — skipping."; exit 0
+          fi
+          if printf '%s' "$PR_BODY" | grep -qiE '/Users/cirwel|claude\.ai/code/session|Claude-Session:'; then
+            echo "::error::PR body carries an operator-local path or a Claude session-attribution link. Remove it."
+            exit 1
+          fi
+          echo "PR body: clean"
+
+      - name: Lint PR commit messages
+        if: github.event_name == 'pull_request'
+        run: |
+          base="${{ steps.base.outputs.ref }}"
+          if git log "${base}..HEAD" --format='%H %s%n%b' | grep -qiE 'claude\.ai/code/session|Claude-Session:'; then
+            echo "::error::A PR commit message carries a Claude session link. Strip the Claude-Session trailer."
+            git log "${base}..HEAD" --format='%H %s%n%b' | grep -niE 'claude\.ai/code/session|Claude-Session:'
+            exit 1
+          fi
+          echo "Commit messages: clean"
