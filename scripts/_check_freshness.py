@@ -32,29 +32,38 @@ def parse_frontmatter(content: str) -> dict:
     if not isinstance(fm, dict):
         return {}
 
+    # Accept both layouts: nested `metadata.unitares.*` (current) and flat
+    # top-level keys (the in-progress frontmatter refactor). Without the flat
+    # fallback the parser would silently return {} on refactored skills and the
+    # gate would stop checking them.
     meta = fm.get("metadata", {}) or {}
-    last_verified = meta.get("unitares.last_verified")
-    freshness_days = meta.get("unitares.freshness_days")
+    last_verified = meta.get("unitares.last_verified") or fm.get("last_verified")
+    freshness_days = meta.get("unitares.freshness_days") or fm.get("freshness_days")
 
     if not last_verified or not freshness_days:
         return {}
 
+    # source_files may live in the flat frontmatter (refactor) instead of the
+    # .freshness.yaml sidecar; surface it so the STALE drift check still works.
+    fm_sources = fm.get("source_files") or []
+
     return {
         "last_verified": str(last_verified),
         "freshness_days": int(freshness_days),
+        "source_files": [str(f) for f in fm_sources],
     }
 
 
-def load_source_files(skill_dir: Path) -> list[str]:
-    """Load source_files list from .freshness.yaml sidecar."""
+def load_source_files(skill_dir: Path, frontmatter_sources: list[str]) -> list[str]:
+    """source_files from the .freshness.yaml sidecar, else from frontmatter."""
     sidecar = skill_dir / ".freshness.yaml"
-    if not sidecar.exists():
-        return []
-    data = yaml.safe_load(sidecar.read_text())
-    if not isinstance(data, dict):
-        return []
-    files = data.get("source_files", [])
-    return [str(f) for f in files] if files else []
+    if sidecar.exists():
+        data = yaml.safe_load(sidecar.read_text())
+        if isinstance(data, dict):
+            files = data.get("source_files", [])
+            if files:
+                return [str(f) for f in files]
+    return list(frontmatter_sources)
 
 
 def check_skills(plugin_root: str, projects_root: str) -> int:
@@ -84,7 +93,7 @@ def check_skills(plugin_root: str, projects_root: str) -> int:
         verified_date_start = datetime.strptime(meta["last_verified"], "%Y-%m-%d").replace(tzinfo=timezone.utc)
         age_days = (datetime.now(timezone.utc) - verified_date_start).days
 
-        source_files = load_source_files(skill_dir)
+        source_files = load_source_files(skill_dir, meta.get("source_files", []))
         source_modified = False
         modified_file = ""
         for src in source_files:
