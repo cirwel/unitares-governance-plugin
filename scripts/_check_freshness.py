@@ -8,6 +8,13 @@ from pathlib import Path
 
 import yaml
 
+# Calendar-age floor (days). A skill's per-skill `freshness_days` is honored, but
+# the effective AGING threshold is never below this floor — so stable reference
+# skills don't flip the whole gate red every couple of weeks on calendar time
+# alone (the source-drift STALE check below still fires immediately on real
+# source changes). Override with SKILL_FRESHNESS_FLOOR_DAYS.
+FRESHNESS_FLOOR_DAYS = int(os.environ.get("SKILL_FRESHNESS_FLOOR_DAYS", "30"))
+
 RED = "\033[0;31m"
 YELLOW = "\033[0;33m"
 GREEN = "\033[0;32m"
@@ -73,7 +80,7 @@ def check_skills(plugin_root: str, projects_root: str) -> int:
         verified_date = datetime.strptime(meta["last_verified"], "%Y-%m-%d").replace(
             hour=23, minute=59, second=59, tzinfo=timezone.utc
         )
-        max_days = meta["freshness_days"]
+        max_days = max(meta["freshness_days"], FRESHNESS_FLOOR_DAYS)
         verified_date_start = datetime.strptime(meta["last_verified"], "%Y-%m-%d").replace(tzinfo=timezone.utc)
         age_days = (datetime.now(timezone.utc) - verified_date_start).days
 
