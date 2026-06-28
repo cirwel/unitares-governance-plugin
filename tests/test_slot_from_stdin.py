@@ -56,7 +56,7 @@ def test_truncates_to_64_chars():
 
 
 def test_codex_transcript_path_fallback_hashes_to_safe_slot():
-    transcript = "/Users/cirwel/.codex/sessions/2026/06/18/rollout-long-common-prefix.jsonl"
+    transcript = "/home/user/.codex/sessions/2026/06/18/rollout-long-common-prefix.jsonl"
     expected = "codex-transcript_path-" + hashlib.sha256(transcript.encode()).hexdigest()[:16]
     assert slot_from_payload(json.dumps({"transcript_path": transcript})) == expected
 

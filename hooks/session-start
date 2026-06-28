@@ -154,7 +154,7 @@ fi
 # The "owned by the process-instance that previously ran in THIS directory"
 # assumption breaks when the workspace is shared across concurrent claude
 # processes — notably the discord-dispatch case, where threads defaulting
-# to cwd=HOME all shared /Users/cirwel/.unitares/session.json and silently
+# to cwd=HOME all shared ~/.unitares/session.json and silently
 # funneled onto whichever agent last wrote the cache. That's the flaw
 # this hook is tightening against; the dispatch-side fix (per-thread
 # scratch dirs) is complementary, not redundant.
