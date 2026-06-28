@@ -4,164 +4,103 @@ description: >
   Use when an agent is interacting with UNITARES governance for the first time, needs to
   onboard, check in, or recover from a pause/reject verdict. Covers the full agent lifecycle
   from session start through check-ins to recovery.
-license: Apache-2.0
-compatibility: Requires UNITARES governance MCP server (gov.cirwel.org or local http://127.0.0.1:8767/mcp/)
-metadata:
-  unitares.last_verified: "2026-06-18"
-  unitares.freshness_days: "14"
+last_verified: "2026-06-27"
+freshness_days: 14
+source_files:
+  - unitares/src/mcp_handlers/core.py
+  - unitares/src/mcp_handlers/identity/handlers.py
+  - unitares/src/mcp_handlers/admin/handlers.py
+  - unitares/src/mcp_handlers/tool_stability.py
+  - unitares/src/mcp_handlers/middleware/envelope_step.py
 ---
 
 # Agent Lifecycle
 
-## Friendly Workflow Names
+**Last Updated:** 2026-06-27
 
-Current UNITARES servers expose task-verb aliases for the core agent workflow.
-Prefer them when you want the most agent-readable response shape; use the
-canonical names when you need legacy/raw compatibility.
+## Primary Workflow Names
 
-| Job | Friendly alias | Canonical tool |
-| --- | --- | --- |
+The core lifecycle should use primary task-verb tools. Each is implemented by a raw tool with the same parameters and identity rules, and returns a **normalized envelope**: the operationally useful fields first (`next_action`, `state_summary`, `risk_summary`, `memory_suggestions`, `recovery_hint`), with the full raw payload preserved under `raw_governance`.
+
+| Task | Primary workflow tool | Raw implementation tool |
+|------|---------------|----------------|
 | Start working | `start_session(force_new=true, ...)` | `onboard` |
-| Check in for the turn baseline and meaningful work | `sync_state(response_text=..., complexity=...)` | `process_agent_update` |
+| Check in after meaningful work | `sync_state(response_text=..., complexity=...)` | `process_agent_update` |
 | Check your working state | `check_working_state()` | `get_governance_metrics` |
 | Avoid duplicate work | `search_shared_memory(query=...)` | `knowledge(action="search")` |
 | Record what actually happened | `record_result(...)` | `outcome_event` |
 | Ask for a structured review | `request_review(issue_description=...)` | `dialectic(action="request")` |
 
-The aliases accept the same parameters and inherit the same identity rules as
-their canonical tools. Alias responses put `next_action`, `state_summary`,
-`risk_summary`, `memory_suggestions`, and `recovery_hint` first when present,
-with the full canonical payload preserved under `raw_governance`.
-
-## Simple Identity Contract
-
-Strict identity is a write gate: reads can be loose, but check-ins, KG writes,
-and operator actions need an accountable caller. For normal agent work, use this
-contract and ignore the deeper ontology unless debugging:
-
-1. New driver process: `start_session(force_new=true)`, then save the returned
-   `uuid` and `client_session_id`.
-2. Same running process: pass `client_session_id` on later `sync_state()` and
-   KG write calls. Adapters should do this automatically.
-3. Continuing prior work in a fresh process: mint fresh and declare the handoff
-   with `start_session(force_new=true, parent_agent_id="<prior-uuid>",
-   spawn_reason="new_session")`.
-4. Short dispatched subagent: usually do not onboard. If it needs its own
-   identity, declare `spawn_reason="subagent"`, set `parent_agent_id` to the
-   driver, and land one real `sync_state()` before exit.
-5. Persistent/substrate agent: use the substrate-earned pattern; ordinary
-   interactive sessions should not imitate it.
-
-Do not pass `continuity_token` during normal check-ins, do not use `name=` as
-identity, and do not declare `parent_agent_id` just because another session
-shares the workspace.
+Use the primary workflow tools by default. Use raw implementation names only for older servers, compatibility code, or when you explicitly need the unwrapped handler response.
 
 ## Starting a Session
 
-**Onboard at the start of the session, before other work — then check in as you
-go.** Until you onboard, your MCP transport is unbound and your work is invisible
-to governance: no identity, no trajectory, and the turn/edit/end check-in hooks
-have nothing to attach to, so they stay silent the entire session. A session
-that never onboards is the main source of *uninitialized, 0-update* agents. The
-lifecycle is: `start_session()` first, then land a real `sync_state()` once per
-assistant turn and after each meaningful unit of work so the identity carries
-regular signal.
+Choose creation, lineage, or proof-owned resume explicitly:
 
-Per the simple contract, a fresh process-instance is a fresh agent. To continue
-prior work across processes, **declare lineage** — do not resume via token:
+~~~text
+start_session(force_new=true)                                        # any fresh session — the default; co-location is not lineage
+start_session(force_new=true, parent_agent_id="<dispatcher-uuid>",
+              spawn_reason="subagent")                               # dispatched subagent (usually set automatically by the dispatcher)
+start_session(force_new=true, parent_agent_id="<prior-uuid>",
+              spawn_reason="new_session")                            # handoff from a finished prior session
+identity(agent_uuid="<uuid>", continuity_token="<token>", resume=true) # same live owner / proof-owned rebind
+~~~
 
-```
-start_session(force_new=true)                               # new work, no lineage
-start_session(force_new=true, parent_agent_id="<prior-uuid>", # continuing prior work
-              spawn_reason="new_session")
-```
+Declaring a currently-live agent as parent is rejected (`lineage_coincidental_rejected`): a live agent is a concurrent sibling, not a predecessor. `subagent` and `compaction` are exempt — their parent is legitimately live. A genuine handoff to an exited predecessor stays provisional until R1 confirms it.
 
-`name=` is cosmetic — passing `name="Same-Agent"` does not re-bind to an existing agent.
+Use raw `onboard(...)` instead when targeting older servers or when you
+need the unwrapped raw response.
 
-### Optional: seed a trajectory anchor at onboard
+Returns:
+- **agent_uuid / UUID**: The server identity anchor for this process instance
+- **client_session_id**: In-session transport continuity metadata
+- **continuity_token**: Short-lived ownership proof for PATH 0 anti-hijack, not indefinite cross-process continuity
+- **session diagnostics**: `session_resolution_source`, `identity_assurance`, and deprecation warnings when relevant
 
-> This is a minor nicety, **not** a fix for showing up as "uninitialized." An
-> agent reads as uninitialized / 0 updates until it lands a **real** check-in;
-> a genesis seed does not change that (see below). The real lever is the
-> lazy-onboard + real-`sync_state()` lifecycle above.
+### Creation, lineage, and resume (updated 2026-04-25)
 
-Once you *have* decided to onboard, you may pass an `initial_state` genesis seed
-so that your first real `sync_state()` immediately produces a trajectory *delta*
-instead of a lone point:
+`name=` is a cosmetic label, not a resume key. Passing the same name on a later session does not prove identity.
 
-```
-start_session(force_new=true, initial_state={
-  "response_text": "Genesis: <one line on what this session is for>",
-  "complexity": 0.1,
-  "confidence": 0.5,
-})
-```
+Default rules:
 
-`initial_state` writes a synthetic `source='bootstrap'` state row immediately
-after identity creation. Bootstrap rows seed **trajectory genesis only** — they
-are excluded from calibration, outcome correlation, trust-tier counts, and
-**real-check-in counts**. So the seed does **not** clear an "uninitialized / 0
-real updates" status — only a genuine `sync_state()` does. Its sole benefit is
-the trajectory baseline. (In the Claude adapter, `onboard_helper.py` leaves this
-off by default; enable with `--bootstrap` or `UNITARES_ONBOARD_BOOTSTRAP=1`.)
+1. Any fresh session: call `start_session(force_new=true)` with no parent. Co-location in a workspace is not lineage.
+2. Declare lineage only for a real causal event — a dispatched subagent (`parent_agent_id="<dispatcher-uuid>", spawn_reason="subagent"`, usually set automatically by the dispatcher) or a handoff from a finished prior session (`parent_agent_id="<prior-uuid>", spawn_reason="new_session"`). Declaring a currently-live agent as parent is rejected.
+3. Same live process or explicit ownership rebind: call `identity(agent_uuid="<uuid>", continuity_token="<token>", resume=true)`.
+4. Ordinary check-ins: rely on the active session binding or `client_session_id`; reserve `continuity_token` for explicit proof-owned rebinds.
 
-### Subagents and dispatched work
+Avoid these patterns:
 
-Every `onboard`/`start_session` mints a **new** agent record. A dispatched
-subagent that onboards but never checks in is the dominant source of
-*uninitialized, 0-update* ghosts — the plugin's turn/edit/end check-ins route
-to the **driver's** identity, not the subagent's, so the subagent's record gets
-zero updates by construction.
+- Bare `identity(agent_uuid=X, resume=true)`: UUID alone is an unsigned claim. It currently logs/emits hijack-suspected telemetry and is strict-mode rejected when `UNITARES_IDENTITY_STRICT=strict`.
+- `onboard(continuity_token=...)` as cross-process resume: S1-a accepts this only during the deprecation window and returns a warning. Declare lineage with `parent_agent_id` instead.
+- Bare `onboard()`: older code may still pin-resume by weak session/IP:UA evidence. Use `force_new=true` when creating a new process identity.
 
-So, for short-lived dispatched/Task subagents:
-
-- **Prefer not to onboard at all.** Brief, attributable work can run under the
-  driver's existing session — no separate identity, no ghost.
-- **If a subagent genuinely needs its own identity** (long-running, separately
-  governed work), then it must (a) declare `spawn_reason="subagent"` and
-  `parent_agent_id=<driver uuid>`, **and** (b) land at least one real
-  `sync_state()` before it exits (optionally seeding `initial_state` as above
-  to anchor it). An identity that
-  cannot meet (c) should not be minted.
-
-You get back a **UUID** (the server record for this process) and a
-**client_session_id** (the accountable write binding for this running process).
-The response may also include `continuity_token` and diagnostic fields; normal
-callers should not pass the token forward.
-
-The rare same-live-process rebind case, S13 fresh-instance gate detail, and why
-"save the token and pass it everywhere" is an anti-pattern are in
-`references/resume-semantics.md`. Read that only when designing a client that
-handles tokens or debugging identity binding.
+`continuity_token` is now intentionally narrow: 1-hour TTL, rolling, and retained as possession proof for anti-hijack gates. It does not establish process-instance continuity by itself.
 
 ## Check-ins
 
-Call `sync_state()` (`process_agent_update(...)` canonically) once per assistant
-turn as a behavioral baseline, and after meaningful work:
+Call `sync_state()` after meaningful work:
 
-```
+~~~text
 sync_state(
   response_text: "Brief summary of what you did",
-  complexity: 0.0-1.0,   # task difficulty estimate
-  confidence: 0.0-1.0,   # how confident you are (be honest)
-  ethical_drift: [0.0, 0.0, 0.0]  # optional: primary_drift, coherence_loss, complexity_contribution
+  complexity: 0.0-1.0,   # Task difficulty estimate
+  confidence: 0.0-1.0    # How confident you are (be honest)
 )
-```
+~~~
 
-Ordinary check-ins use the active session binding or `client_session_id`; do
-**not** pass `continuity_token` to `process_agent_update`. Tokens are reserved
-for rare same-live-process ownership rebinds.
+Use raw `process_agent_update(...)` when you need the raw handler payload;
+primary workflow responses preserve it under `raw_governance`.
 
-If you include `ethical_drift`, current runtimes return `input_glossary.ethical_drift` naming the three positional components. Use that response metadata instead of guessing what each slot means.
+### When to Check In
 
-When to check in:
-- Once per assistant turn as the baseline signal
 - After completing a meaningful unit of work
 - Before and after high-complexity tasks
 - When you feel uncertain or notice drift
-- **Not** after every single tool call or edit — use judgment
+- **Not** after every single tool call — use judgment between these bounds
 
-Returns a verdict plus current EISV metrics. The response also includes an `identity_assurance` block (`tier`, `score`, `session_source`, `trajectory_confidence`, `reason`) — read it after check-in to confirm strong continuity, especially if calling with `require_strong_identity=true`.
+### What You Get Back
+
+A verdict plus current EISV metrics. Read the verdict and act on it.
 
 ## Reading Verdicts
 
@@ -169,34 +108,62 @@ Returns a verdict plus current EISV metrics. The response also includes an `iden
 |---------|-----------|
 | **proceed** | Continue normally |
 | **guide** + guidance text | Read the guidance, adjust your approach, keep going |
-| **pause** | Stop your current task. Reflect on what is flagged. See `references/recovery.md` |
-| **reject** | Significant concern. See `references/recovery.md` for recovery options |
-| **margin: tight** | Near a basin edge. Be more careful with next steps |
+| **pause** | Stop your current task. Reflect on what is flagged. Consider requesting a dialectic review |
+| **reject** | Significant concern. Requires dialectic review or human intervention |
+| **margin: tight** | You are near a basin edge. Be more careful with next steps |
 
 A `guide` verdict is an early warning. Ignoring it makes `pause` more likely.
 
-## Essential Tools
+## Identity
 
-Use in every session:
+- UUID is an identity anchor, not proof that the current process owns that identity
+- Session binding can happen via transport session, `client_session_id`, or short-lived continuity token
+- Use `identity()` when continuity seems unclear
+- Inspect:
+  - `identity_status`
+  - `bound_identity`
+  - `session_resolution_source`
+  - `continuity_token_supported`
+  - `identity_assurance`
+  - `deprecations`
 
-- `start_session(force_new=true, parent_agent_id=...)` / `onboard(...)` — register a fresh process identity, optionally declaring lineage. Never call bare `onboard()`.
-- `sync_state()` / `process_agent_update()` — check in with work summary, complexity, confidence
-- `check_working_state()` / `get_governance_metrics()` — read current EISV state; read-only, and for an unbound caller it returns an `unbound` diagnostic plus `next_action` instead of creating a ghost identity
-- `identity()` — confirm who the runtime thinks you are within this process or set a display name
-- `health_check()` — operator-facing server health when behavior seems odd
-- `search_shared_memory(query=...)` / `knowledge(action="search")` — find existing knowledge before creating new entries
-- `knowledge(action="note")` — quick contribution to the knowledge graph; `leave_note()` is legacy compatibility only
+Strong ownership proof is better than implicit continuity. If the runtime falls back to weak signals such as fingerprinting, mint a fresh process identity and declare lineage.
 
-Advanced or rare:
+## Recovery
 
-- `bind_session()` — explicit bridge for a known `agent_uuid + client_session_id`,
-  usually REST hook to MCP session
-- same-live-process token rebinds — see `references/resume-semantics.md` before
-  using them
+When you are paused, stuck, or need intervention:
 
-## Going Deeper
+| Situation | Tool | Notes |
+|-----------|------|-------|
+| Stuck or paused, want automatic recovery | `self_recovery()` | Attempts to restore healthy state |
+| Disagree with verdict, want structured review | `request_dialectic_review()` | Starts thesis/antithesis/synthesis process |
+| Manual override needed | `operator_resume_agent()` | Requires human/operator action |
 
-- `references/recovery.md` — what to do after a `pause` or `reject` verdict
-- `references/resume-semantics.md` — PATH semantics, S13 gate detail, canonical hijack pattern, and why the "save the token, pass it everywhere" pattern is now an anti-pattern
-- `governance-fundamentals` skill — what the EISV numbers mean
-- `dialectic-reasoning` skill — how to participate in a structured review when paused
+Recovery is not a shortcut — `self_recovery()` examines your EISV state and determines if resumption is safe. If your metrics are genuinely degraded, it will not force a resume.
+
+## MCP Tools Reference
+
+### Essential (use in every session)
+
+- `start_session(force_new=true, parent_agent_id=...)` — Create a fresh process identity, optionally declaring lineage
+- `sync_state()` — Check in with work summary, complexity, confidence
+- `check_working_state()` — Read your current EISV state
+- `identity()` — Confirm who the runtime thinks you are and how continuity was resolved; include `continuity_token` for proof-owned UUID rebinds
+- `health_check()` — Check operator-facing server health when behavior seems odd
+- `search_shared_memory(query=...)` — Find existing knowledge before creating new entries
+- `knowledge(action="note", ...)` — Quick contribution to the knowledge graph
+
+### Common (use when needed)
+
+- `knowledge()` — Full knowledge graph CRUD (store, update, details, cleanup)
+- `agent()` — Agent lifecycle (list, archive, get details)
+- `calibration()` — Check or update calibration data
+- `request_dialectic_review()` — Start a dialectic session
+- `export()` — Export session history
+
+### Specialized
+
+- `call_model()` — Delegate to a secondary LLM for analysis
+- `detect_stuck_agents()` — Find unresponsive agents
+- `self_recovery()` — Resume from stuck or paused state
+- `submit_thesis()` / `submit_antithesis()` / `submit_synthesis()` — Dialectic participation

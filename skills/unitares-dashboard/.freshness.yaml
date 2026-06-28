@@ -1,7 +1,0 @@
-source_files:
-  - unitares/dashboard/index.html
-  - unitares/dashboard/eisv-charts.js
-  - unitares/dashboard/utils.js
-  - unitares/dashboard/colors.js
-  - unitares/dashboard/styles.css
-  - unitares/src/http_api.py
