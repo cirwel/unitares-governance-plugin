@@ -193,10 +193,58 @@ def _http_json(
     return payload if isinstance(payload, dict) else {"ok": False, "error": "schema_invalid"}
 
 
+def _canonicalize_worktree_path(p: Path) -> Path:
+    """Map a path inside a git worktree to the equivalent path in the repo's
+    main/shared checkout, so the SAME logical file across different worktrees
+    collapses to ONE ``file://`` surface.
+
+    Why this matters: the lease-plane ``file:`` scheme canonicalizes surfaces by
+    realpath (server-side), so two worktrees of the same repo produce two
+    DISTINCT surfaces for the same logical file. Concurrent agents editing that
+    file from different worktrees — the dominant multi-agent pattern here — then
+    acquire independent leases and never see each other's claim. (That is the
+    exact dual-writer collision the file lease is meant to prevent.) Mapping
+    every worktree path to its git-common-dir parent (the main checkout root)
+    collapses them to one surface, so the second agent's acquire conflicts.
+
+    Fail-open: any git error returns ``p`` unchanged. A coordination nicety must
+    never break an edit, so we degrade to the prior per-worktree behavior rather
+    than raising.
+    """
+    import subprocess
+
+    start = str(p if p.is_dir() else p.parent)
+    try:
+        out = subprocess.run(
+            ["git", "-C", start, "rev-parse", "--show-toplevel", "--git-common-dir"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        if out.returncode != 0:
+            return p
+        lines = out.stdout.splitlines()
+        if len(lines) < 2:
+            return p
+        wt_top = Path(lines[0].strip()).resolve()
+        common_dir = Path(lines[1].strip())
+        if not common_dir.is_absolute():
+            common_dir = (Path(start) / common_dir)
+        main_root = common_dir.resolve().parent
+        rel = p.resolve().relative_to(wt_top)
+        return main_root / rel
+    except Exception:
+        return p
+
+
 def _surface_id(path: str, workspace: Path) -> str:
     p = Path(path).expanduser()
     if not p.is_absolute():
         p = workspace / p
+    # Collapse worktrees of the same repo to a single surface so concurrent
+    # agents in different worktrees see each other's lease (see
+    # _canonicalize_worktree_path). Fail-open to the raw absolute path.
+    p = _canonicalize_worktree_path(p)
     return f"file://{p}"
 
 
