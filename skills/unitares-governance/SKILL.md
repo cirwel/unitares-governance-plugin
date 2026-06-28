@@ -4,11 +4,16 @@ description: >
   Compatibility umbrella skill for the UNITARES governance framework. Use this
   as the entrypoint when you need the overall model and route into the split
   governance skills.
-license: Apache-2.0
-compatibility: Requires UNITARES governance MCP server (gov.cirwel.org or local http://127.0.0.1:8767/mcp/)
-metadata:
-  unitares.last_verified: "2026-06-11"
-  unitares.freshness_days: "14"
+last_verified: "2026-06-28"
+freshness_days: 14
+source_files:
+  - unitares/src/mcp_handlers/core.py
+  - unitares/src/mcp_handlers/identity/handlers.py
+  - unitares/skills/governance-lifecycle/SKILL.md
+  - unitares/skills/governance-fundamentals/SKILL.md
+  - unitares/skills/knowledge-graph/SKILL.md
+  - unitares/skills/dialectic-reasoning/SKILL.md
+  - unitares/skills/discord-bridge/SKILL.md
 ---
 
 # UNITARES Governance
@@ -23,62 +28,42 @@ UNITARES evaluates agent state with the **EISV** model:
 - `E`: effective energy / execution drive
 - `I`: integrity / coherence of alignment
 - `S`: entropy / disorder / instability
-- `V`: void pressure / collapse tendency
+- `V`: valence (signed E-I imbalance)
 
 Agents typically start with `start_session(force_new=true)` and continue with
-`sync_state()` as their main check-in loop. These are friendly aliases over
-the canonical `onboard(...)` and `process_agent_update(...)` tools. On servers
-with the agent-experience envelope enabled, alias responses put `next_action`,
-`state_summary`, `risk_summary`, `memory_suggestions`, and `recovery_hint`
-first when present while preserving the full canonical payload under
-`raw_governance`. Older compatibility surfaces may return the canonical payload
-directly.
+`sync_state()` as their main check-in loop. These are the primary workflow
+tools; raw implementation tools such as `onboard(...)` and
+`process_agent_update(...)` remain available for compatibility. The full raw
+payload remains available under `raw_governance`.
 
 ## Session Continuity
 
-Use `start_session(force_new=true)` to register a fresh process identity. If
-the process is continuing prior work, declare that with
+Use `start_session(force_new=true)` to register a fresh process identity. If the
+process is continuing prior work, declare that with
 `parent_agent_id=<prior uuid>` and `spawn_reason="new_session"`.
-Use `onboard(...)` instead when targeting older servers or when a raw canonical
-response shape is required.
+Use raw `onboard(...)` instead for older servers or raw response shape.
 
-For continuing prior work in a fresh process, the v2 posture is lineage
-declaration via `parent_agent_id` (above), not UUID rebind.
-`identity(agent_uuid=..., continuity_token=..., resume=true)` is real
-(PATH 0) and works as an ownership-proven rebind to a still-live UUID,
-but it is the explicit-rebind case, not the default. The
-`continuity_token` is short-lived (1h, rolling) anti-hijack proof, not
-indefinite cross-process continuity.
+Use `identity(agent_uuid=..., continuity_token=..., resume=true)` only when
+rebinding the same live owner to an existing UUID. The `continuity_token` is
+short-lived ownership proof for anti-hijack gates, not indefinite
+cross-process continuity. A bare `onboard()` or bare
+`identity(agent_uuid=..., resume=true)` can rely on weak evidence or an
+unsigned UUID claim; do not teach those as normal flow.
 
-S13/S1-c precision: the server's fresh-instance gate auto-promotes
-`force_new=true` and emits `[FRESH_INSTANCE]` only for **truly arg-less**
-`onboard()` calls. Proof-shaped arguments — including `onboard(name=...)`
-— suppress that gate and can fall through to weak session/IP:UA pin
-behavior. Token-only `onboard`, `identity`, and `bind_session` are now
-retired and return `status=continuity_token_resume_rejected`. Pass
-`force_new=true` explicitly whenever you mean to mint fresh. Bare
-`identity(agent_uuid=<uuid>)` without a matching token remains the
-canonical hijack pattern and is strict-mode rejected.
+In-process tool calls thread the response's `client_session_id` through
+subsequent invocations to maintain transport continuity within a single
+process. `client_session_id` is in-session continuity only — weak across
+processes, not identity proof on its own.
 
-Use `sync_state()` after meaningful work to record progress,
-complexity, and confidence, then read the returned governance verdict.
-Use `process_agent_update(...)` as the canonical/raw equivalent.
-The response includes an `identity_assurance` block (`tier`, `score`,
-`session_source`, `reason`) — check it after check-in to confirm strong
-continuity, especially when calling with `require_strong_identity=true`.
-
-`get_governance_metrics()` is read-only. If no identity is bound, current
-servers return an `unbound` diagnostic with a `next_action` hint instead of
-minting a fresh identity as a side effect.
+Use `sync_state()` after meaningful work to record progress, complexity, and
+confidence, then read the returned governance verdict. Use raw
+`process_agent_update()` when you need the raw handler response.
 
 ## Knowledge Layer
 
 The governance system is coupled to the **knowledge graph**. Agents should
 search existing knowledge before duplicating work, and contribute discoveries,
-questions, and answers as they learn. Prefer the unified
-`knowledge(action="search" | "note" | "store" | "synthesize" | ...)` surface;
-legacy one-tool-per-operation aliases are compatibility paths. `synthesize`
-is an explicit lifecycle action for topic rollups, not a write-time hook.
+questions, and answers as they learn.
 
 ## Split Skills
 

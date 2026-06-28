@@ -2,104 +2,131 @@
 name: governance-fundamentals
 description: >
   Use when an agent needs to understand UNITARES governance concepts — EISV state vectors,
-  basins, verdicts, coherence, calibration. Reference material for interpreting governance
-  metrics and understanding the thermodynamic model.
-license: Apache-2.0
-compatibility: Requires UNITARES governance MCP server (gov.cirwel.org or local http://127.0.0.1:8767/mcp/)
-metadata:
-  unitares.last_verified: "2026-06-11"
-  unitares.freshness_days: "14"
+  basins, policy actions, coherence, calibration. Reference material for interpreting
+  governance metrics as proprioceptive state estimation, not outcome judgment.
+last_verified: "2026-06-28"
+freshness_days: 14
+source_files:
+  - unitares/config/governance_config.py
+  - unitares/src/auto_ground_truth.py
+  - unitares/src/governance_monitor.py
+  - unitares/src/behavioral_state.py
+  - unitares/src/behavioral_assessment.py
+  - unitares/src/monitor_decision.py
+  - unitares/src/mcp_handlers/core.py
 ---
 
 # Governance Fundamentals
 
-UNITARES gives AI agents digital proprioception — awareness of their own state, their relationship to the system, and whether they are drifting. Agent work is tracked through a thermodynamic model (energy, entropy, coherence) and a shared knowledge graph across all agents.
+## What UNITARES Is
+
+UNITARES provides digital proprioception for AI agents — awareness of your own state, your relationship to the system, and whether you are drifting. The live path is behavioral state estimation: observable work signals become EISV readings, smoothed over time and compared with the agent's own trajectory once a baseline exists. The thermodynamic / ODE model remains useful as a research lens and telemetry; do not present it as cold-start authority or live verdict authority.
 
 ## EISV State Vector
 
-Four dimensions, updated through check-ins:
+Every agent has four dimensions, updated through check-ins:
 
-| Dim | Range | Meaning |
-|-----|-------|---------|
+| Dimension | Range | Meaning |
+|-----------|-------|---------|
 | **E** (Energy) | [0, 1] | Productive capacity |
-| **I** (Information Integrity) | [0, 1] | Signal fidelity |
-| **S** (Entropy) | [0, 1] | Semantic uncertainty (lower is better) |
-| **V** (Void) | [-1, 1] | Accumulated E-I imbalance |
+| **I** (Information Integrity) | [0, 1] | Claims matching results / calibration |
+| **S** (Entropy) | [0, 1] | Drift / instability from normal (lower is usually steadier) |
+| **V** (Valence) | [-1, 1] | EMA-smoothed E-I imbalance |
 
-The dimensions couple — E pulls toward I, S responds to complexity, V accumulates imbalance, **coherence** falls out of all four. Coherence is *structural health* (how well E/I/S/V hold together as a vector), **not a quality score for your work** — this is what makes the "do not game coherence" rule below meaningful. Full range is [0, 1]; the typical governed range is ~0.45–0.55, but coherence can travel anywhere in [0, 1] under stress — use `get_governance_metrics()` for current values. For the coupling math, see `references/eisv-deep.md`.
+### How the Live Path Reads Them
 
-### Point-of-use glossary fields
+- **E (Energy)** blends observable progress signals such as decision success, coherence, complexity calibration, and sometimes external task evidence.
+- **I (Integrity)** tracks whether claims/confidence match observed results and whether coherence is holding.
+- **S (Entropy / drift)** rises with drift norm, regime instability, and complexity divergence.
+- **V (Valence)** is derived from the E-I imbalance. Positive means running hot (motion outruns integrity); negative means running careful (integrity outruns progress).
 
-Current runtimes annotate raw governance values in the response payload. Prefer these runtime fields over memorized constants when explaining a result:
+The headline math is proprioceptive residuals. In the live behavioral path,
+warmup uses fixed universal thresholds; after warmup, residual-like state comes
+from self-relative z-score deviation against the agent's own Welford baseline,
+with absolute safety floors and basin-health gates always in force.
 
-- **`primary_eisv_source_meta`** — explains whether the primary EISV came from `behavioral` data or `ode_fallback`, including the behavioral-confidence threshold.
-- **`state_glossary`** — explains interpreted `mode`, `basin`, and `trajectory`; basin entries include current threshold semantics.
-- **`input_glossary.ethical_drift`** — names the positional `ethical_drift` vector components: `primary_drift`, `coherence_loss`, `complexity_contribution`.
-- **`trajectory_identity.trust_tier`** and **`trajectory_identity.signature_glossary`** — annotate trust tier and known terms inside trajectory signatures.
+Roadmap target semantics for richer cold-start grounding are:
 
-### Two V channels (and what each one drives)
+```text
+measurement_t = EISV_t
+reference_t   = blend(agent_baseline_t, class_anchor; w(grounding))
+residual_t    = measurement_t - reference_t
+```
 
-`get_governance_metrics(lite=false)` exposes V in three places — `ode_eisv.V`, `behavioral_eisv.V`, and `primary_eisv.V` — and they can diverge significantly. Do not assume a single V.
+Do not present the class-anchor blend as deployed unless live code exposes it.
+Deviation is information first, not a guilty verdict. Policy can map persistent or
+high-margin residuals to `guide`, `pause`, or `reject`, but EISV itself is
+measurement/diagnosis, not prosecution.
 
-- **`ode_eisv.V`** — thermodynamic integrator, heavily damped, typically ~[−0.1, 0.1]. **Coherence is computed from this V.** That is why coherence often sits near 0.5 (tanh(0)=0 midpoint) regardless of what behavioral V is doing.
-- **`behavioral_eisv.V`** — observation-first EMA of actual agent behavior. Can swing to ±0.4. **Verdicts** use this channel once `behavioral_eisv.confidence ≥ 0.3`; before that, verdicts fall back to ODE.
-- **`primary_eisv`** — whichever channel is currently authoritative for verdicts. Check `primary_eisv_source` to see which.
-
-If you see flat coherence next to a swinging V, you are almost certainly comparing across channels. To move coherence you must move *ODE* V via sustained E-I imbalance, not via short-term behavioral swings. The `state_semantics` block in the metrics response is the runtime-authoritative version of this.
-
-## Verdicts — What to Do
-
-Governance issues a verdict after each check-in. This is the operational signal:
-
-| Verdict | Meaning | Action |
-|---------|---------|--------|
-| **proceed** | State is healthy | Continue working |
-| **guide** | Something is slightly off | Read the guidance text, adjust approach |
-| **pause** | Needs attention | Stop current work, reflect, consider dialectic review |
-| **reject** | Significant concern | Requires dialectic review or human input |
-
-A `margin: tight` flag means you are near a basin edge. Be more careful with next steps.
-
-Current runtime risk is phi/thermodynamic driven (`RISK_PHI_WEIGHT=1.0`, traditional keyword/complexity risk zeroed). Resident classes have class-aware void thresholds, and engaged ephemeral agents now have a measured class-conditional manifold radius and healthy operating point. Do not infer verdict cause from generic constants alone; read the returned reason, margin, basin, and `state_semantics` fields.
-
-If a verdict reason says `warmup-structural-suppressed`, the runtime observed a cold-start structural pause during the first process-local warmup cycles but let the agent proceed because the behavioral baseline was established and safe. Audit/history still preserve the original structural pause; the suppression marker is the reconciling signal.
+Prefer live tool output over static range lore if the current runtime reports a narrower or more precise bound.
 
 ## Basins
 
-Your state sits in a basin — a region of EISV space:
+Your state sits in a basin — a region of the EISV space:
 
-- **High basin**: Healthy. E and I high, S and V low. Normal operating range.
+- **High basin**: Healthy. E and I are high, S and V are low. Normal operating range.
 - **Low basin**: Degraded. May need recovery or intervention.
-- **Boundary**: Transitioning. Verdicts may carry `margin: tight`.
+- **Boundary**: Transitioning between basins. Extra attention from governance. Verdicts may carry `margin: tight`.
 
-Use `get_governance_metrics()` for the current basin/mode labels — do not assume they are constant across runtime versions.
-When present, `state_glossary.basin.thresholds` is the response-local explanation of the basin thresholds used by that runtime.
+Use `get_governance_metrics()` as the source of truth for the current basin/mode labels rather than assuming they are constant across runtime versions.
+
+## Verdicts
+
+Governance issues a decision after each check-in. The response's `verdict` field wraps the decision **action**, which is binary — `proceed` or `pause` — qualified by a `sub_action`:
+
+| Action | Sub-action | Meaning | What to do |
+|--------|-----------|---------|------------|
+| **proceed** | `approve` | State is healthy | Continue working normally |
+| **proceed** | `guide` | Something is slightly off | Read the guidance text, adjust approach |
+| **pause** | `reject` | Risk threshold reached | Stop current work, reflect; dialectic review or human input |
+| **pause** | `void_pause`, `coherence_pause`, `basin_pause`, `risk_pause`, `cirs_block` | A specific subsystem tripped | Read the `reason`/`guidance` fields; consider dialectic review |
+
+Separately, `metrics.verdict` may carry an internal UNITARES verdict such as `safe` / `caution` / `high-risk`. Read it as interpreted state/context, not as moral judgment. In current default posture, behavioral assessment drives live policy actions: fixed thresholds during warmup, Welford z-score residuals after warmup, with floors and gates always in force. Φ/ODE scoring is telemetry and research lens, not the control loop.
+
+### Margin
+
+`margin` describes how much headroom you have before the nearest state-space edge. It is a small enum, not a number:
+
+| `margin` | Meaning | What to do |
+|----------|---------|------------|
+| `settling` | Warmup — fewer than 3 check-ins, so there is not enough history to judge headroom yet | Keep checking in; a real margin appears after 3+ check-ins |
+| `comfortable` | Clear of every edge by a healthy distance | Proceed normally |
+| `tight` | Within the edge threshold of the nearest boundary (or in the boundary basin) | Be more careful with next steps; avoid increasing complexity |
+| `warning` | An edge has just been crossed (less than 0.1 past the threshold) | Stop increasing complexity; reflect before the next step |
+| `critical` | An edge is crossed deeply (0.1 or more past the threshold) | Halt the current approach; recover or escalate |
+
+The actionable levels are `tight`, `warning`, and `critical` — each carries a companion `nearest_edge` field naming which boundary you are closest to (`risk`, `coherence`, or `void`). On `comfortable` and `settling`, `nearest_edge` is `null` (there is no edge to warn about). Prefer the live `margin`/`nearest_edge` values over assuming a fixed enum across runtime versions — `get_governance_metrics()` is the source of truth.
+
+The plain-English `mirror` array in your check-in response already summarizes anything actionable (including a tight/warning/critical margin) — read that first. In `mirror` mode `margin`/`nearest_edge` are surfaced **only** when actionable; a `comfortable`/`settling` margin is steady-state and stays out of the response (the mirror's "No actionable signals — steady state" line covers it).
+
+## Coherence
+
+Coherence measures how well your state vector holds together. It is calculated from EISV/monitor signals — not from the content of your work. Think of it as structural health, not semantic quality.
+
+- Full range is [0, 1]
+- Critical threshold is available via `get_governance_metrics()` in the `thresholds` field — do not hardcode it
+- Do not chase a number — check in honestly and let it track naturally
+- Coherence reflects balance, not performance
 
 ## Calibration
 
-The system tracks whether your stated confidence matches outcomes. Over time this builds a calibration curve.
+The system tracks whether your stated confidence matches evidence. Over time this builds a calibration curve.
 
-- Ground truth comes from objective signals: test pass/fail, command exit codes, lint results, file operations. These feed calibration automatically via `auto_ground_truth.py` and the `outcome_event` hook. Human validation is not required for deterministic outcomes.
-- Overconfidence is tracked and penalizes Information Integrity through entropy coupling.
+- Grounding comes from objective signals: test pass/fail, command exit codes, lint results, file operations. These feed calibration automatically via `auto_ground_truth.py` and the `outcome_event` hook. Human validation is not required for deterministic evidence.
+- Overconfidence is tracked and can lower Integrity / raise uncertainty through the check-in pipeline
 
-## Diagnostics — When the Numbers Look Wrong
+## Diagnostics
 
-Do not guess first. Use:
+When the numbers look surprising, do not guess first. Use:
 
-- `identity()` — verify who the runtime thinks you are
-- `health_check()` — verify the server and knowledge graph are healthy
-- `get_governance_metrics()` — current live thresholds and interpreted state; this is read-only and returns an `unbound` payload with a `next_action` hint rather than minting identity for an unbound caller
+- `identity()` to verify who the runtime thinks you are
+- `health_check()` to verify the server and knowledge graph are healthy
+- `get_governance_metrics()` for the current live thresholds and interpreted state
 
 ## What NOT to Do
 
 - **Do not game coherence** by reporting low complexity / high confidence on everything
 - **Do not ignore guide verdicts** — they are early warnings before pause/reject
-- **Do not create duplicate discoveries** — search the knowledge graph first
+- **Do not create duplicate discoveries** — always search the knowledge graph first
 - **Do not check in after every trivial action** — it is noise, not signal
-- **Do not leave high-severity findings open forever** — resolve or archive them
-
-## Going Deeper
-
-- `references/eisv-deep.md` — coupling math, coherence definition C(V, Theta), calibration internals
-- `governance-lifecycle` skill — onboard, check-in, recovery flow
-- `dialectic-reasoning` skill — what happens when a verdict pauses you
+- **Do not leave high-severity findings as open forever** — resolve or archive them
