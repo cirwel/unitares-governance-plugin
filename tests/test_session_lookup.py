@@ -36,7 +36,7 @@ def test_extract_slot_reads_session_id():
 
 
 def test_extract_slot_uses_codex_transcript_fallback():
-    transcript = "/Users/cirwel/.codex/sessions/2026/06/18/rollout.jsonl"
+    transcript = "/home/user/.codex/sessions/2026/06/18/rollout.jsonl"
     expected = "codex-transcript_path-" + hashlib.sha256(transcript.encode()).hexdigest()[:16]
     assert _extract_slot(json.dumps({"transcript_path": transcript})) == expected
 
@@ -94,7 +94,7 @@ def test_load_session_for_hook_empty_stdin_returns_empty(tmp_path):
 
 def test_load_session_for_hook_reads_codex_fallback_slot(tmp_path):
     (tmp_path / ".unitares").mkdir()
-    transcript = "/Users/cirwel/.codex/sessions/2026/06/18/rollout.jsonl"
+    transcript = "/home/user/.codex/sessions/2026/06/18/rollout.jsonl"
     slot = "codex-transcript_path-" + hashlib.sha256(transcript.encode()).hexdigest()[:16]
     path = tmp_path / ".unitares" / _slot_filename(slot)
     payload = {
@@ -159,7 +159,7 @@ def test_slotted_home_fallback_when_workspace_misses(tmp_path, monkeypatch):
     $HOME/.unitares/session-<slot>.json (which X==$HOME wrote) and find it.
 
     Reproduces the ~/.unitares/hook-skips.log evidence: 51 misses from
-    /Users/cirwel/projects/trajectory-identity-paper despite the active
+    /home/user/projects/trajectory-identity-paper despite the active
     session having a slot file in $HOME (session was started from $HOME).
     """
     fake_home = tmp_path / "home"

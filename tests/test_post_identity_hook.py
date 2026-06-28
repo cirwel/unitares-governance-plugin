@@ -135,7 +135,7 @@ class TestPostIdentityRecordsResponse:
         assert _read_session_cache(tmp_path, "slot-alias")["uuid"] == "u-alias-1"
 
     def test_codex_transcript_path_writes_hashed_slot_cache(self, tmp_path):
-        transcript = "/Users/cirwel/.codex/sessions/2026/06/18/rollout.jsonl"
+        transcript = "/home/user/.codex/sessions/2026/06/18/rollout.jsonl"
         slot = "codex-transcript_path-" + hashlib.sha256(transcript.encode()).hexdigest()[:16]
         hook_input = {
             "transcript_path": transcript,
