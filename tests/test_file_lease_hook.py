@@ -282,3 +282,50 @@ def test_hooks_json_wires_pretooluse_edit_guard():
     pre_hooks = config["hooks"]["PreToolUse"]
     assert pre_hooks[0]["matcher"] == "Edit|Write|MultiEdit"
     assert "pre-edit" in pre_hooks[0]["hooks"][0]["command"]
+
+
+# ---------------------------------------------------------------------------
+# _surface_id: worktrees of one repo must collapse to ONE surface so concurrent
+# agents in different worktrees see each other's file lease.
+# ---------------------------------------------------------------------------
+
+import shutil
+import subprocess
+
+
+def _git(*args, cwd):
+    subprocess.run(["git", *args], cwd=str(cwd), check=True,
+                   capture_output=True, text=True)
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git not available")
+def test_surface_id_collapses_worktrees_to_one_surface(tmp_path):
+    main = tmp_path / "repo"
+    main.mkdir()
+    _git("init", "-q", cwd=main)
+    _git("config", "user.email", "t@t", cwd=main)
+    _git("config", "user.name", "t", cwd=main)
+    (main / "src").mkdir()
+    (main / "src" / "f.py").write_text("x\n")
+    _git("add", "-A", cwd=main)
+    _git("commit", "-qm", "init", cwd=main)
+
+    wt = tmp_path / "wt"
+    _git("worktree", "add", "-q", str(wt), "HEAD", cwd=main)
+    (wt / "src" / "f.py").write_text("x\n")
+
+    s_main = file_lease_hook._surface_id("src/f.py", main)
+    s_wt = file_lease_hook._surface_id("src/f.py", wt)
+
+    # Same logical file in two worktrees -> identical surface (the collision fix)
+    assert s_main == s_wt
+    # And it canonicalizes onto the main checkout, not the worktree dir
+    assert str(main.resolve()) in s_main
+    assert "/wt/" not in s_wt
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git not available")
+def test_surface_id_fail_open_outside_git(tmp_path):
+    # Not a git repo -> degrade to the raw absolute path (never break an edit).
+    s = file_lease_hook._surface_id("a/b.py", tmp_path)
+    assert s == f"file://{tmp_path / 'a' / 'b.py'}"
