@@ -137,8 +137,32 @@ def _scope_name_by_slot(agent_name: str, slot: str | None) -> str:
 
 # --- IO primitives (separable for tests) -----------------------------------
 
+def _failure_response(
+    *,
+    error: str,
+    reason: str,
+    hint: str = "",
+    detail: str = "",
+    status_code: int | None = None,
+) -> dict[str, Any]:
+    """Return a parsed-response-shaped failure for helper diagnostics."""
+    response: dict[str, Any] = {
+        "success": False,
+        "error": error,
+        "recovery": {
+            "reason": reason,
+            "hint": hint,
+        },
+    }
+    if detail:
+        response["detail"] = detail
+    if status_code is not None:
+        response["status_code"] = status_code
+    return response
+
+
 def _post_json(url: str, payload: dict, timeout: float, token: str | None) -> dict:
-    """POST JSON to ``url`` and return the parsed response, or ``{}`` on error."""
+    """POST JSON to ``url`` and return the parsed response or a structured failure."""
     body = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(url, data=body, method="POST")
     req.add_header("Content-Type", "application/json")
@@ -147,12 +171,29 @@ def _post_json(url: str, payload: dict, timeout: float, token: str | None) -> di
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw = resp.read().decode("utf-8")
-    except (urllib.error.URLError, TimeoutError, ConnectionError):
-        return {}
+    except urllib.error.HTTPError as exc:
+        return _failure_response(
+            error=f"onboard HTTP request failed: {exc}",
+            reason="http_error",
+            hint="check UNITARES server health and authentication",
+            status_code=exc.code,
+        )
+    except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
+        return _failure_response(
+            error="onboard transport request failed",
+            reason="transport_error",
+            hint="check that the UNITARES server is reachable; sandboxed clients may need network permission",
+            detail=str(exc),
+        )
     try:
         return json.loads(raw)
-    except json.JSONDecodeError:
-        return {}
+    except json.JSONDecodeError as exc:
+        return _failure_response(
+            error="onboard returned invalid JSON",
+            reason="invalid_json_response",
+            hint="check the UNITARES server endpoint and logs",
+            detail=str(exc),
+        )
 
 
 def _read_cache(workspace: Path, slot: str | None = None) -> dict:
