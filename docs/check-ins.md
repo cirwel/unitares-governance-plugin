@@ -3,10 +3,12 @@
 The Claude adapter emits canonical `process_agent_update` calls at three trigger points.
 `session-start` is deliberately read-only: it checks server reachability,
 fetches the governance fundamentals excerpt, and prompts the agent to call
-`start_session(force_new=true)` / `onboard(force_new=true)` itself. If the
-agent does not do that before the turn ends, `post-stop` lazily onboards a
-slot-scoped identity before emitting `turn_stop`; if that fails, it records
-an identity-free floor observation instead.
+`start_session(force_new=true)` / `onboard(force_new=true)` itself only when no
+identity is cached for this fresh process. If the agent does not do that before
+the turn ends, `post-stop` lazily onboards a slot-scoped identity before
+emitting `turn_stop`; if that fails, it records an identity-free floor
+observation instead. Once a process is bound, later turns continue via
+`client_session_id` and `sync_state()` rather than fresh onboarding.
 
 | Trigger | Hook script | Frequency | `metadata.event` |
 |---|---|---|---|

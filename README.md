@@ -56,21 +56,30 @@ That path is now the preferred default. Claude hook automation remains supported
 
 ## Core Workflow
 
-The intended workflow is:
+The intended workflow is per **fresh process**, not per user message. Do not
+call `start_session(force_new=true)` just because a new turn starts; that mints
+another process identity. Once a process is bound, continue it with
+`client_session_id`-backed `sync_state()` / `check_working_state()` calls.
 
-1. `start_session(force_new=true)` as your first step in the session, to mint a fresh process identity (`onboard(...)` is the canonical equivalent) — until you onboard, your work this session is invisible to governance, which is the main source of uninitialized, 0-update agents
-2. if continuing prior work, pass `parent_agent_id=<prior uuid>` and `spawn_reason="new_session"`
+1. `start_session(force_new=true)` once at process start, to mint a fresh process identity (`onboard(...)` is the canonical equivalent) — until you onboard, this process has no governance identity
+2. if this fresh process is a real handoff from finished prior work, pass `parent_agent_id=<prior uuid>` and `spawn_reason="new_session"`
 3. call `sync_state()` once per assistant turn as a behavioral baseline, and after meaningful work (`process_agent_update(...)` is the canonical equivalent) — an identity that never checks in produces no governance signal
-4. call `get_governance_metrics()` for read-only state
-5. use `identity(agent_uuid=..., continuity_token=..., resume=true)` only for same-owner proof-owned rebinds
+4. call `check_working_state()` for read-only state
+5. use `identity(agent_uuid=..., continuity_token=..., resume=true)` only for same-live-owner proof-owned rebinds
 6. call `identity()` and `health_check()` when diagnosis is needed
+
+`continuity_token` is not a normal check-in argument. Use the returned
+`client_session_id` for ordinary same-process continuity; adapters should inject
+it automatically when hooks are available.
 
 On servers with the agent-experience envelope enabled, friendly alias responses
 lift `next_action`, `state_summary`, `risk_summary`, `memory_suggestions`, and
 `recovery_hint` when present while preserving the canonical payload under
 `raw_governance`. Older compatibility surfaces may return the canonical payload
 directly. Use `memory_suggestions` as retrieval cues, and prefer
-`recovery_hint` before inventing a recovery path.
+`recovery_hint` before inventing a recovery path. If `low_confidence` or
+`confidence_note` appears with memory suggestions, treat those suggestions as
+exploratory leads until you open the details or re-run a better search.
 
 The principle is simple: prefer regular behavioral baselines over raw activity noise. One real check-in per assistant turn is useful; per-tool or per-edit check-ins are usually not.
 
