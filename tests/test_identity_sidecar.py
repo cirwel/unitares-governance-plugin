@@ -49,6 +49,20 @@ class FakeGovernanceHandler(BaseHTTPRequestHandler):
                             "identity_assurance": {"tier": "strong"},
                         })}]
                     }
+                elif name in {"onboard", "start_session"}:
+                    result = {
+                        "content": [{"type": "text", "text": json.dumps({
+                            "success": True,
+                            "uuid": "11111111-2222-4333-8444-555555555555",
+                            "agent_id": "Sidecar_Test",
+                            "client_session_id": "agent-sidecar-111",
+                            "continuity_token": "v1.transientpayloadpayloadpayload.signaturesignaturesignature",
+                            "raw_governance": {
+                                "continuity_token": "v1.transientpayloadpayloadpayload.signaturesignaturesignature",
+                                "client_session_id": "agent-sidecar-111",
+                            },
+                        })}]
+                    }
                 else:
                     result = {
                         "content": [{"type": "text", "text": json.dumps({
@@ -79,6 +93,10 @@ class FakeGovernanceHandler(BaseHTTPRequestHandler):
                 "client_session_id": "agent-sidecar-111",
                 "continuity_token": "v1.transient",
                 "continuity_token_supported": True,
+                "raw_governance": {
+                    "continuity_token": "v1.transientpayloadpayloadpayload.signaturesignaturesignature",
+                    "client_session_id": "agent-sidecar-111",
+                },
                 "session_resolution_source": "force_new",
                 "display_name": "sidecar-test",
             }
@@ -155,6 +173,15 @@ def _http_get_json(url: str, *, headers: dict[str, str] | None = None) -> tuple[
         return int(resp.status), json.loads(resp.read().decode("utf-8"))
 
 
+def _json_text(payload: object) -> str:
+    return json.dumps(payload, sort_keys=True)
+
+
+def _mcp_text_payload(payload: dict) -> dict:
+    text = payload["result"]["content"][0]["text"]
+    return json.loads(text)
+
+
 def test_tool_proxy_lazy_onboards_and_injects_client_session_id(tmp_path: Path, fake_server: str) -> None:
     sidecar = _sidecar(tmp_path, fake_server)
 
@@ -165,6 +192,9 @@ def test_tool_proxy_lazy_onboards_and_injects_client_session_id(tmp_path: Path, 
 
     assert status == 200
     assert payload["result"]["success"] is True
+    assert "client_session_id" not in _json_text(payload)
+    assert "continuity_token" not in _json_text(payload)
+    assert "raw_governance" not in _json_text(payload)
     assert [call["name"] for call in FakeGovernanceHandler.calls] == ["onboard", "knowledge"]
     knowledge_args = FakeGovernanceHandler.calls[1]["arguments"]
     assert knowledge_args["client_session_id"] == "agent-sidecar-111"
@@ -183,6 +213,8 @@ def test_turn_checkin_lazy_onboards_then_sends_real_checkin(tmp_path: Path, fake
 
     assert status == 200
     assert payload["success"] is True
+    assert payload["session_bound"] is True
+    assert "client_session_id" not in payload
     assert [call["name"] for call in FakeGovernanceHandler.calls] == ["onboard", "process_agent_update"]
     checkin_args = FakeGovernanceHandler.calls[1]["arguments"]
     assert checkin_args["client_session_id"] == "agent-sidecar-111"
@@ -194,9 +226,13 @@ def test_turn_checkin_lazy_onboards_then_sends_real_checkin(tmp_path: Path, fake
 def test_bare_onboard_through_proxy_gets_force_new_and_updates_cache(tmp_path: Path, fake_server: str) -> None:
     sidecar = _sidecar(tmp_path, fake_server)
 
-    status, _payload = sidecar.tool_call({"name": "onboard", "arguments": {}}, headers={})
+    status, payload = sidecar.tool_call({"name": "onboard", "arguments": {}}, headers={})
 
     assert status == 200
+    assert payload["result"]["success"] is True
+    assert "client_session_id" not in _json_text(payload)
+    assert "continuity_token" not in _json_text(payload)
+    assert "raw_governance" not in _json_text(payload)
     sent = FakeGovernanceHandler.calls[0]["arguments"]
     assert sent["force_new"] is True
     assert sent["name"] == "sidecar-agent"
@@ -282,9 +318,37 @@ def test_mcp_tools_call_lazy_onboards_and_injects(tmp_path: Path, fake_server: s
     ]
     mcp_call = FakeGovernanceHandler.calls[1]
     assert mcp_call["params"]["arguments"]["client_session_id"] == "agent-sidecar-111"
+    visible = _mcp_text_payload(payload)
+    assert visible["echo"]["action"] == "search"
+    assert "client_session_id" not in visible["echo"]
+    assert "agent-sidecar-111" not in _json_text(payload)
     cache = json.loads((tmp_path / ".unitares" / "session-slot-a.json").read_text())
     assert cache["client_session_id"] == "agent-sidecar-111"
     assert "continuity_token" not in cache
+
+
+def test_mcp_start_session_response_hides_proof_material(tmp_path: Path, fake_server: str) -> None:
+    sidecar = _sidecar(tmp_path, fake_server)
+
+    status, payload = sidecar.mcp_proxy(
+        {
+            "jsonrpc": "2.0",
+            "id": 70,
+            "method": "tools/call",
+            "params": {"name": "start_session", "arguments": {}},
+        },
+        headers={},
+        path="/mcp/",
+    )
+
+    assert status == 200
+    visible = _mcp_text_payload(payload)
+    assert visible["success"] is True
+    assert visible["uuid"] == "11111111-2222-4333-8444-555555555555"
+    assert "client_session_id" not in visible
+    assert "continuity_token" not in visible
+    assert "raw_governance" not in visible
+    assert "agent-sidecar-111" not in _json_text(payload)
 
 
 def test_mcp_non_tool_call_passes_through_without_onboard(tmp_path: Path, fake_server: str) -> None:
@@ -381,6 +445,29 @@ def test_http_mcp_route_lazy_onboards_and_injects_client_session_id(tmp_path: Pa
     ]
     mcp_args = FakeGovernanceHandler.calls[1]["params"]["arguments"]
     assert mcp_args["client_session_id"] == "agent-sidecar-111"
+    visible = _mcp_text_payload(payload)
+    assert visible["echo"]["action"] == "search"
+    assert "client_session_id" not in visible["echo"]
     cache = json.loads((tmp_path / ".unitares" / "session-codex-http.json").read_text())
     assert cache["client_session_id"] == "agent-sidecar-111"
     assert "continuity_token" not in cache
+
+
+def test_http_session_start_hides_onboard_proof_material(tmp_path: Path, fake_server: str) -> None:
+    sidecar = _sidecar(tmp_path, fake_server)
+    srv, thread, base_url = _serve_sidecar(sidecar)
+    try:
+        status, payload = _http_post_json(
+            f"{base_url}/session/start",
+            {"agent_name": "sidecar-agent", "slot": "codex-start"},
+        )
+    finally:
+        _stop_server(srv, thread)
+
+    assert status == 200
+    assert isinstance(payload, dict)
+    assert payload["success"] is True
+    assert payload["result"]["status"] == "ok"
+    assert "client_session_id" not in _json_text(payload)
+    assert "continuity_token" not in _json_text(payload)
+    assert "raw_governance" not in _json_text(payload)

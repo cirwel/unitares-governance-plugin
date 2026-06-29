@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
-from _redact import redact_secrets
+from _redact import redact_secrets, sanitize_model_visible_payload
 
 
 def test_redacts_anthropic_api_key():
@@ -49,3 +50,58 @@ def test_handles_none_input():
 
 def test_handles_empty_string():
     assert redact_secrets("") == ""
+
+
+def test_redacts_unitares_continuity_token_text():
+    token = (
+        "v1.eyJhaWQiOiJkNDAyZjQ4MC1jOGM1LTRkOWYtODA2Zi01ZGJhOTZlYjZhOTIifQ."
+        "rN9Otpp62gEV9mtljSsFLIl1zi3NZ0rj3giFhy0ddBw"
+    )
+    out = redact_secrets(f"continuity_token={token}")
+    assert token not in out
+    assert "[REDACTED:unitares_continuity_token]" in out
+
+
+def test_redacts_unitares_client_session_text():
+    out = redact_secrets("Save client_session_id agent-d402f480-c8c")
+    assert "agent-d402f480-c8c" not in out
+    assert "[REDACTED:unitares_client_session]" in out
+
+
+def test_sanitizes_model_visible_payload_recursively():
+    payload = {
+        "success": True,
+        "client_session_id": "agent-d402f480-c8c",
+        "continuity_token": "v1.payloadpayloadpayloadpayload.sigsignaturesignaturesignature",
+        "raw_governance": {"debug": "hidden"},
+        "continuity_token_supported": True,
+        "nested": {
+            "client-session-id": "agent-d402f480-c8c",
+            "message": "bound to agent-d402f480-c8c",
+        },
+    }
+
+    out = sanitize_model_visible_payload(payload)
+
+    assert "client_session_id" not in out
+    assert "continuity_token" not in out
+    assert "continuity_token_supported" not in out
+    assert "raw_governance" not in out
+    assert "client-session-id" not in out["nested"]
+    assert "agent-d402f480-c8c" not in out["nested"]["message"]
+
+
+def test_sanitizes_embedded_json_text_payload():
+    text = json.dumps({
+        "success": True,
+        "client_session_id": "agent-d402f480-c8c",
+        "raw_governance": {"continuity_token": "v1.payloadpayloadpayloadpayload.sigsignaturesignaturesignature"},
+        "next_action": "call sync_state with agent-d402f480-c8c",
+    })
+
+    out = sanitize_model_visible_payload({"content": [{"type": "text", "text": text}]})
+    parsed = json.loads(out["content"][0]["text"])
+
+    assert "client_session_id" not in parsed
+    assert "raw_governance" not in parsed
+    assert "agent-d402f480-c8c" not in parsed["next_action"]
