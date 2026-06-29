@@ -4,7 +4,11 @@ Use this path if you are working from Codex or ChatGPT and want the cleanest UNI
 
 ## Goal
 
-Connect to a running UNITARES governance server, preserve continuity cleanly, and check in once per assistant turn as a behavioral baseline. Add milestone check-ins for substantial work; avoid per-tool or per-edit noise.
+Connect to a running UNITARES governance server, preserve continuity cleanly,
+and check in once per assistant turn as a behavioral baseline. A new user
+message is not a new process identity: call `start_session(force_new=true)` once
+per fresh process, then continue with `client_session_id`-backed check-ins. Add
+milestone check-ins for substantial work; avoid per-tool or per-edit noise.
 
 ## Recommended Default
 
@@ -57,13 +61,14 @@ agent-authored state.
 
 If you are not using commands directly, the equivalent raw tool flow is:
 
-1. First run or fresh process: `start_session(force_new=true)` (`onboard(...)` is the canonical equivalent)
-2. Fresh process continuing prior work: `start_session(force_new=true, parent_agent_id=<saved uuid>, spawn_reason="new_session")`
-3. `sync_state()` once per assistant turn, and after meaningful work (`process_agent_update(...)` is the canonical equivalent)
-4. Same live owner / proof-owned rebind only: `identity(agent_uuid=..., continuity_token=..., resume=true)`
-5. `check_working_state()` for read-only state checks (`get_governance_metrics(...)` is the canonical equivalent)
-6. `identity()` if continuity looks wrong
-7. `health_check()` if the system itself may be part of the problem
+1. First run of a fresh process: `start_session(force_new=true)` (`onboard(...)` is the canonical equivalent)
+2. Fresh process continuing finished prior work: `start_session(force_new=true, parent_agent_id=<saved uuid>, spawn_reason="new_session")`
+3. Same still-running process: do **not** call `start_session` again; use `sync_state(..., client_session_id=<current session id>)`
+4. `sync_state()` once per assistant turn, and after meaningful work (`process_agent_update(...)` is the canonical equivalent)
+5. Same live owner / proof-owned rebind only: `identity(agent_uuid=..., continuity_token=..., resume=true)`
+6. `check_working_state()` for read-only state checks (`get_governance_metrics(...)` is the canonical equivalent)
+7. `identity()` if continuity looks wrong
+8. `health_check()` if the system itself may be part of the problem
 
 On servers with the agent-experience envelope enabled, friendly aliases lift
 `next_action`, `state_summary`, `risk_summary`, `memory_suggestions`, and
@@ -74,6 +79,9 @@ paused state. Older compatibility surfaces may return the canonical payload
 directly; in that case read the same fields where they already appear. If a
 server does not know these aliases yet, use the canonical tool names shown in
 parentheses.
+When `search_shared_memory()` returns `low_confidence` or a `confidence_note`,
+do not treat the surfaced rows as matches; open details or rephrase with better
+terms before relying on them.
 
 ## Local Continuity Cache
 
@@ -111,7 +119,9 @@ Typical session:
 - add a check-in after a milestone, completed step, or decision point
 - diagnose only when needed
 
-Do not treat every file edit or tool call as a governance event. Turn-level baseline check-ins are useful; raw file churn is not.
+Do not treat every file edit, tool call, or user message as a governance start.
+Turn-level baseline check-ins are useful; raw file churn and repeated fresh
+identity mints are not.
 
 ## What to Watch
 
