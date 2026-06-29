@@ -70,6 +70,27 @@ Use `X-UNITARES-Slot` or top-level `{"slot": "..."}` when one sidecar serves
 multiple clients. Without an explicit slot, the sidecar uses a workspace-derived
 default slot.
 
+### Repo Boundary
+
+The sidecar belongs in this repo while it remains a generic client facade. It is
+integration code: local cache management, lifecycle convenience, redaction, and
+REST/MCP proxying. The UNITARES server repo remains the source of truth for
+identity semantics, governance policy, storage, and tool schemas.
+
+Do not create a separate sidecar repo just to support local models. Local and
+non-frontier model runners should route through the sidecar when they cannot
+load a richer plugin, because the sidecar keeps process identity out of prompt
+context and normalizes the model-visible response. A separate repo becomes
+worth considering only if the sidecar grows independent packaging, nontrivial
+runtime dependencies, or host-specific lifecycle bindings comparable to
+`unitares-host-adapter`.
+
+Raw direct MCP/REST remains available for advanced clients and operator
+debugging. If a client uses raw direct calls in normal operation, its runner must
+own the same responsibilities the sidecar owns here: private session retention,
+identity injection on write calls, no proof material in prompts/logs, and
+check-ins after meaningful work.
+
 For clients that accept a URL MCP server, point them at
 `http://127.0.0.1:8768/mcp/` only when they use JSON request/response MCP. The
 generated `GET /client-config` response includes the URL, `X-UNITARES-Slot`

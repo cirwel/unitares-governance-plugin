@@ -32,11 +32,29 @@ This repo should not duplicate server business logic or become the source of tru
 
 - Codex/ChatGPT: plugin packaging plus shared skills and explicit command guidance
 - Claude: hooks, session helpers, command docs, and optional file-lease/check-in conveniences
-- Sidecar: local proxy for clients without native lifecycle hooks
+- Sidecar: local proxy/facade for clients without native lifecycle hooks, including local and non-frontier model runners
 
 Hermes Agent is intentionally not listed here as the native path. For Hermes, use `unitares-host-adapter` and install a thin Hermes user plugin that imports `unitares_host_adapter.bindings.hermes`. Direct Hermes MCP config only exposes tools; it does not provide automatic lifecycle check-ins by itself.
 
 The shared value in this repo is the workflow guidance and client integration surface, not a second copy of the governance model.
+
+## Sidecar Placement
+
+The sidecar lives in this repo at `scripts/identity_sidecar.py` because it is a
+generic client facade over the UNITARES server. It does not own governance
+policy, storage, EISV scoring, or identity semantics; those stay in
+`cirwel/unitares`.
+
+It does not need a separate repo while it remains a thin local bridge for
+clients that cannot load lifecycle hooks. Split it out only if it becomes an
+independently versioned host adapter with its own release cycle, packaging, or
+runtime dependencies. For now, keeping it beside the Codex/Claude plugin docs
+keeps the integration contract and conformance tests in one place.
+
+For local models and smaller hosted models, prefer the sidecar over raw MCP
+direct unless the runner already manages UNITARES lifecycle state. The model
+should call task-level governance tools; the runner or sidecar should retain
+and inject process identity outside the prompt.
 
 ## Start Here
 
@@ -156,7 +174,7 @@ policy — the server stays the source of truth and the client stays thin.
 
 - **Claude** — session-start, pre-edit, post-edit, and session-end hooks, plus BEAM file leases.
 - **Codex/ChatGPT** — minimal and explicit; shared skills, manual command flows, slot-scoped continuity cache.
-- **Sidecar** — a dependency-free local proxy for clients without lifecycle hooks.
+- **Sidecar** — a dependency-free local proxy/facade for clients without lifecycle hooks; recommended for local/non-frontier model runners that should not manage identity proof material in prompt context.
 - **Hermes Agent** — native lifecycle binding lives in `unitares-host-adapter`; this repo is only relevant to Hermes if you deliberately route through the generic sidecar instead.
 
 Full details, endpoints, and configuration are in [docs/adapters.md](./docs/adapters.md).
