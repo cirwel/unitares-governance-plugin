@@ -45,6 +45,28 @@ injects that session id into attribution-relevant governance calls, and provides
 `/turn/checkin`, `/turn/stop`, and `/audit`. It is not a full streamable-MCP/SSE
 transport proxy yet.
 
+### Local and Non-Frontier Models
+
+For local model runners, small hosted models, or any client that does not have a
+trusted plugin/hook lifecycle, prefer the sidecar over raw direct MCP. Raw
+MCP/REST is still the canonical server contract, but the runner should keep
+UNITARES identity state out of the model prompt.
+
+Recommended shape:
+
+```text
+local model
+  -> runner/tool router
+    -> sidecar REST or sidecar JSON-RPC MCP
+      -> UNITARES server MCP/REST
+```
+
+Expose task-level operations to the model, such as `governance_checkin`,
+`governance_state`, and `governance_review`. Let the sidecar or runner retain
+the slot cache and inject process identity. Use raw direct MCP only when the
+runner already has equivalent lifecycle handling or when an operator is
+debugging the underlying protocol.
+
 ## Recommended Flow
 
 1. Run `/governance-start`

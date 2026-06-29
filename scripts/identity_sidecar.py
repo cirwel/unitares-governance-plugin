@@ -38,6 +38,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from audit_identity_contract import audit_checkin_log, audit_session_caches, parse_since  # noqa: E402
 from checkin import _plugin_version, submit_checkin  # noqa: E402
 from governance_call_inject import INJECT_SUFFIXES, PROOF_FIELDS  # noqa: E402
+from _redact import sanitize_model_visible_payload  # noqa: E402
 from onboard_helper import (  # noqa: E402
     DEFAULT_SERVER_URL,
     _read_cache,
@@ -63,7 +64,8 @@ def _workspace_hash(workspace: Path) -> str:
 
 
 def _json_response(handler: BaseHTTPRequestHandler, status: int, payload: Any) -> None:
-    body = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    visible = sanitize_model_visible_payload(payload)
+    body = (json.dumps(visible, indent=2, sort_keys=True) + "\n").encode("utf-8")
     handler.send_response(status)
     handler.send_header("Content-Type", "application/json")
     handler.send_header("Content-Length", str(len(body)))
@@ -274,7 +276,7 @@ class IdentitySidecar:
         slot: str,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         arguments = dict(arguments)
-        lifecycle: dict[str, Any] = {"slot": slot, "injected_client_session_id": False}
+        lifecycle: dict[str, Any] = {"slot": slot, "session_proof_injected": False}
 
         if name in START_TOOL_NAMES:
             arguments.setdefault("force_new", True)
@@ -286,7 +288,7 @@ class IdentitySidecar:
             sid = ensured.get("client_session_id")
             if isinstance(sid, str) and sid.strip():
                 arguments["client_session_id"] = sid.strip()
-                lifecycle["injected_client_session_id"] = True
+                lifecycle["session_proof_injected"] = True
         return arguments, lifecycle
 
     def process_tool_response(self, *, name: str, slot: str, raw: Any) -> None:
@@ -323,18 +325,18 @@ class IdentitySidecar:
             self.auth_token,
         )
         if error:
-            return 502, {
+            return 502, sanitize_model_visible_payload({
                 "success": False,
                 "error": error,
                 "sidecar": lifecycle | {"upstream_latency_ms": latency_ms},
-            }
+            })
 
         self.process_tool_response(name=name, slot=slot, raw=raw)
 
         raw.setdefault("sidecar", {})
         if isinstance(raw["sidecar"], dict):
             raw["sidecar"].update(lifecycle | {"upstream_latency_ms": latency_ms})
-        return 200, raw
+        return 200, sanitize_model_visible_payload(raw)
 
     def mcp_proxy(self, body: Any, headers: Any, path: str) -> tuple[int, Any]:
         """Proxy a minimal JSON-RPC MCP request, intercepting tools/call.
@@ -384,11 +386,11 @@ class IdentitySidecar:
         )
         if error:
             first_id = requests[0].get("id") if requests and isinstance(requests[0], dict) else None
-            return 502, {
+            return 502, sanitize_model_visible_payload({
                 "jsonrpc": "2.0",
                 "id": first_id,
                 "error": {"code": -32000, "message": error},
-            }
+            })
 
         responses = upstream if isinstance(upstream, list) else [upstream]
         for response in responses:
@@ -401,18 +403,18 @@ class IdentitySidecar:
                 continue
             name, _lifecycle = meta
             self.process_tool_response(name=name, slot=slot, raw=response)
-        return status, upstream
+        return status, sanitize_model_visible_payload(upstream)
 
     def turn_checkin(self, body: dict[str, Any], headers: Any) -> tuple[int, dict[str, Any]]:
         slot = self.slot_from(body, headers)
         ensured = self.ensure_session(slot)
         sid = ensured.get("client_session_id")
         if not isinstance(sid, str) or not sid.strip():
-            return 502, {
+            return 502, sanitize_model_visible_payload({
                 "success": False,
                 "error": "sidecar could not establish client_session_id",
                 "onboard": ensured,
-            }
+            })
         session = self.read_session(slot)
         event = str(body.get("event") or "turn_stop")
         status = submit_checkin(
@@ -429,13 +431,14 @@ class IdentitySidecar:
         )
         if status == "sent":
             self.stamp_session(slot)
-        return 200 if status in {"sent", "skip_kill_switch"} else 502, {
+        return 200 if status in {"sent", "skip_kill_switch"} else 502, sanitize_model_visible_payload({
             "success": status in {"sent", "skip_kill_switch"},
             "status": status,
             "slot": slot,
+            "session_bound": True,
             "client_session_id": sid.strip(),
             "uuid": session.get("uuid", ""),
-        }
+        })
 
     def audit(self, *, log_tail: int | None = None, since: str | None = None) -> dict[str, Any]:
         since_dt = parse_since(since)
