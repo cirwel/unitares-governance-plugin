@@ -60,6 +60,7 @@ if ! python3 - <<'PY'
 import json
 import re
 import sys
+import tomllib
 from pathlib import Path
 
 root = Path(".")
@@ -67,6 +68,9 @@ versions = {}
 
 for rel in (".claude-plugin/plugin.json", ".codex-plugin/plugin.json"):
     versions[rel] = json.loads((root / rel).read_text(encoding="utf-8"))["version"]
+
+pyproject = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+versions["pyproject.toml"] = pyproject["project"]["version"]
 
 market = json.loads((root / ".claude-plugin/marketplace.json").read_text(encoding="utf-8"))
 market_entry = next(p for p in market["plugins"] if p["name"] == "unitares-governance")
