@@ -30,6 +30,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from onboard_helper import (  # noqa: E402
     BOOTSTRAP_RESPONSE_TEXT,
     _default_bootstrap_state,
+    _post_json,
     _scope_name_by_slot,
     run_onboard,
 )
@@ -102,6 +103,26 @@ def _onboard_ok_response(uuid: str, display_name: str) -> dict:
             "display_name": display_name,
         }
     }
+
+
+def test_transport_error_returns_structured_failure(monkeypatch: Any) -> None:
+    def deny_network(*args: Any, **kwargs: Any) -> Any:
+        raise urllib.error.URLError(PermissionError(1, "Operation not permitted"))
+
+    monkeypatch.setattr(urllib.request, "urlopen", deny_network)
+
+    result = _post_json(
+        "http://unit-test/v1/tools/call",
+        {"name": "onboard", "arguments": {"force_new": True}},
+        timeout=1,
+        token=None,
+    )
+
+    assert result["success"] is False
+    assert result["error"] == "onboard transport request failed"
+    assert result["recovery"]["reason"] == "transport_error"
+    assert "sandboxed clients may need network permission" in result["recovery"]["hint"]
+    assert "Operation not permitted" in result["detail"]
 
 
 def test_unslotted_onboard_sends_bare_name_and_force_new(tmp_path: Path) -> None:
