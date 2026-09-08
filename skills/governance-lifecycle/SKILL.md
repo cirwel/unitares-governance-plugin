@@ -4,7 +4,7 @@ description: >
   Use when an agent is interacting with UNITARES governance for the first time, needs to
   onboard, check in, or recover from a pause/reject verdict. Covers the full agent lifecycle
   from session start through check-ins to recovery.
-last_verified: "2026-08-21"
+last_verified: "2026-09-08"
 freshness_days: 14
 source_files:
   - unitares/src/mcp_handlers/core.py
@@ -21,11 +21,29 @@ source_files:
   - unitares/src/mcp_handlers/dialectic/handlers.py
   - unitares/src/mcp_handlers/lifecycle/self_recovery.py
   - unitares/src/mcp_handlers/lifecycle/recovery_policy.py
+  # Added 2026-09-07: the MCP Tools Reference now says which of its names a
+  # tool mode advertises. The default surface and the listing/dispatch split
+  # live in these two files; the reference drifts silently when they move.
+  - unitares/src/tool_modes.py
+  - unitares/src/tool_mode_listing.py
+source_digests:
+  unitares/src/mcp_handlers/core.py: "5a6e81697f537ac2"
+  unitares/src/mcp_handlers/identity/handlers.py: "c840edc5049524ed"
+  unitares/src/mcp_handlers/admin/handlers.py: "d7dec13e6a422b43"
+  unitares/src/mcp_handlers/tool_stability.py: "b81fb422cdec412c"
+  unitares/src/mcp_handlers/middleware/envelope_step.py: "bcac7a83172032db"
+  unitares/src/mcp_handlers/updates/phases.py: "62168987a1a7fb79"
+  unitares/src/mcp_handlers/updates/enrichments.py: "f91c10502c48275b"
+  unitares/src/mcp_handlers/dialectic/handlers.py: "96ffbcfbbea5ff34"
+  unitares/src/mcp_handlers/lifecycle/self_recovery.py: "3fd24e37c57566a3"
+  unitares/src/mcp_handlers/lifecycle/recovery_policy.py: "3d108c675fb24421"
+  unitares/src/tool_modes.py: "e3a54d97b9e05afa"
+  unitares/src/tool_mode_listing.py: "a99a9e7f6e4a95c4"
 ---
 
 # Agent Lifecycle
 
-**Last Updated:** 2026-08-17
+**Last Updated:** 2026-09-07
 
 ## Primary Workflow Names
 
@@ -203,6 +221,20 @@ not force a resume.
 
 ## MCP Tools Reference
 
+Which of these names your client *lists* depends on the server's
+`GOVERNANCE_TOOL_MODE`. The default, `standard`, advertises eleven names: the
+checkpoint loop (`start_session`, `identity`, `sync_state`, `record_result`,
+`check_working_state`) plus `search_shared_memory`, `store_finding`,
+`update_finding`, `request_review`, `consult`, and `self_recovery`. `minimal`
+advertises the
+checkpoint loop alone. `lite` (29 tools) advertises every name in this
+reference plus `list_tools` / `describe_tool`; `full` advertises everything
+registered. A mode filters only `tools/list`: every registered tool dispatches
+by name in every mode, on `/mcp/`, REST `/v1/tools/call`, and stdio alike. So a
+harness that offers only listed tools shows eleven under the default, and the
+rest are one server-side flag away (`GOVERNANCE_TOOL_MODE=lite`), not gone.
+`start_session(verbose=true)` reports the running mode under `tool_mode`.
+
 ### Essential (use in every session)
 
 - `start_session(force_new=true, parent_agent_id=...)` — Create a fresh process identity once, optionally declaring lineage
@@ -214,6 +246,7 @@ not force a resume.
 - `store_finding(...)` — Store a durable discovery, root cause, or correction
 - `update_finding(discovery_id=..., ...)` — Revise or close an existing finding
 - `knowledge(action="note", ...)` — Quick contribution to the knowledge graph
+- `self_recovery(action="check"|"quick"|"review")` — Get moving again after a pause. The pause and auth-refusal responses name this tool by hand, and it is advertised by default so a schema-driven client can actually call it.
 
 ### Common (use when needed)
 
@@ -221,7 +254,6 @@ not force a resume.
 - `agent()` — Agent lifecycle router (list, get, update, archive, resume, delete)
 - `calibration()` — Check or update calibration data
 - `dialectic()` — Structured review router (`get`, `list`, `quick`, `request`, `thesis`, `antithesis`, `synthesis`, `reassign`)
-- `self_recovery()` — Recovery router (`check`, `quick`, `review`)
 - `export()` — Export session history
 
 ### Specialized
@@ -229,4 +261,4 @@ not force a resume.
 - `call_model()` — Delegate to a configured secondary model for analysis
 - `observe()` — Read governance observations and fleet diagnostics
 - `config()` — Read or change runtime thresholds; writes are privileged
-- `list_tools()` / `describe_tool()` — Inspect the deployed surface instead of guessing an old tool name
+- `list_tools()` / `describe_tool()` — Inspect the deployed surface instead of guessing an old tool name. Advertised on `lite` and `full`, not on the default `standard` or on `minimal`, where the MCP client's own `tools/list` is the discovery surface; both still answer when called by name

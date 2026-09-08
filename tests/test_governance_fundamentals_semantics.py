@@ -24,7 +24,23 @@ def test_coherence_sources_and_roles_are_explicit() -> None:
     # tripwire. Any edit to the skill fails here until someone re-reads the
     # coherence contract below and re-stamps on purpose. Bumped 2026-08-21 for
     # the v2.19.0 margin-semantics correction, which did not touch coherence.
-    assert 'last_verified: "2026-08-21"' in frontmatter
+    #
+    # Bumped 2026-09-08 by the canonical skills sync (unitares#2106 era mirror
+    # refresh). This one DID touch coherence, so it was re-read rather than
+    # re-stamped: the unmeasurable-edge paragraph now states that the coherence
+    # edge is gated on PROVENANCE rather than on history -- it is judged only
+    # when `coherence_role` is `behavioral_update_consistency`
+    # (GovernanceConfig.COHERENCE_INTERPRETABLE_ROLE) with a matching history
+    # window and >=10 samples, so under the deployed `legacy_tanh_v` /
+    # `ode_control_feedback` producer it stays unmeasurable however much
+    # history accumulates. A `grounded` -> `eis_structural_measurement` row
+    # joins the producer table, and `nearest_edge` gains `oscillation` for a
+    # CIRS `cirs_block` pause. Every substantive assertion in this file passed
+    # unchanged against the new text, including the four producer roles below
+    # and the three sibling tests that forbid the health/balance framing and
+    # require the hidden E/I and confidence dependencies to stay disclosed --
+    # the additions widen the disclosure, they do not soften it.
+    assert 'last_verified: "2026-09-08"' in frontmatter
     assert "unitares/src/behavioral_sensor.py" in frontmatter
     assert "unitares/src/coherence_provenance.py" in frontmatter
     assert "`legacy_tanh_v`" in body
