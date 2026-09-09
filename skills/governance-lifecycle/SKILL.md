@@ -4,7 +4,7 @@ description: >
   Use when an agent is interacting with UNITARES governance for the first time, needs to
   onboard, check in, or recover from a pause/reject verdict. Covers the full agent lifecycle
   from session start through check-ins to recovery.
-last_verified: "2026-09-08"
+last_verified: "2026-09-09"
 freshness_days: 14
 source_files:
   - unitares/src/mcp_handlers/core.py
@@ -17,6 +17,8 @@ source_files:
   # `confidence` guidance survived several freshness cycles — the field it was
   # wrong about lives in phases.py, which nobody was checking.
   - unitares/src/mcp_handlers/updates/phases.py
+  - unitares/src/governance_monitor.py
+  - unitares/src/monitor_calibration.py
   - unitares/src/mcp_handlers/updates/enrichments.py
   - unitares/src/mcp_handlers/dialectic/handlers.py
   - unitares/src/mcp_handlers/lifecycle/self_recovery.py
@@ -26,24 +28,31 @@ source_files:
   # live in these two files; the reference drifts silently when they move.
   - unitares/src/tool_modes.py
   - unitares/src/tool_mode_listing.py
+  # Added 2026-09-08: the reference now says the advertised parameter
+  # descriptions are abridged and names describe_tool as where the full text
+  # lives. The trim rule is here; if it changes, that claim drifts silently.
+  - unitares/src/schema_brief.py
 source_digests:
-  unitares/src/mcp_handlers/core.py: "5a6e81697f537ac2"
-  unitares/src/mcp_handlers/identity/handlers.py: "c840edc5049524ed"
+  unitares/src/mcp_handlers/core.py: "d7d09d260fedd7ec"
+  unitares/src/mcp_handlers/identity/handlers.py: "6a8eb54058609b20"
   unitares/src/mcp_handlers/admin/handlers.py: "d7dec13e6a422b43"
   unitares/src/mcp_handlers/tool_stability.py: "b81fb422cdec412c"
-  unitares/src/mcp_handlers/middleware/envelope_step.py: "bcac7a83172032db"
-  unitares/src/mcp_handlers/updates/phases.py: "62168987a1a7fb79"
+  unitares/src/mcp_handlers/middleware/envelope_step.py: "0327e6202ed5cbb4"
+  unitares/src/mcp_handlers/updates/phases.py: "0c28700d12434e77"
+  unitares/src/governance_monitor.py: "cecc4bde0de1c02b"
+  unitares/src/monitor_calibration.py: "c99375f368dd98aa"
   unitares/src/mcp_handlers/updates/enrichments.py: "f91c10502c48275b"
-  unitares/src/mcp_handlers/dialectic/handlers.py: "96ffbcfbbea5ff34"
-  unitares/src/mcp_handlers/lifecycle/self_recovery.py: "3fd24e37c57566a3"
+  unitares/src/mcp_handlers/dialectic/handlers.py: "b6f921fb24a523ce"
+  unitares/src/mcp_handlers/lifecycle/self_recovery.py: "9bfffd3b09f6cc0f"
   unitares/src/mcp_handlers/lifecycle/recovery_policy.py: "3d108c675fb24421"
-  unitares/src/tool_modes.py: "e3a54d97b9e05afa"
-  unitares/src/tool_mode_listing.py: "a99a9e7f6e4a95c4"
+  unitares/src/tool_modes.py: "aa75ef30ee2c2383"
+  unitares/src/tool_mode_listing.py: "e14ecf4249c3007b"
+  unitares/src/schema_brief.py: "6463bc8ed3919816"
 ---
 
 # Agent Lifecycle
 
-**Last Updated:** 2026-09-07
+**Last Updated:** 2026-09-08
 
 ## Primary Workflow Names
 
@@ -133,16 +142,34 @@ primary workflow responses preserve it under `raw_governance`.
 
 ### What You Get Back
 
-The friendly tools return a normalized envelope. Read `next_action` first, then
+The friendly tools return a normalized envelope. Read `action_summary` when
+present for the action, verdict, and evidence maturity, then `next_action`,
 `state_summary`, `risk_summary`, `memory_suggestions`, and `recovery_hint` when
 present. `check_working_state()` and `search_shared_memory()` omit the repeated
 canonical payload by default; use `lite=false` or `response_mode="full"`,
 respectively, when you need it under `raw_governance`.
 
+One response is deliberately **not** that envelope. When a call is refused for
+identity, you get the typed refusal contract instead: `status`
+(`identity_required` or `lineage_declaration_required`), `hint`, `next_step`,
+`safe_options`, `do_not`, and `rollout_flag`. There is no `next_action` —
+read `next_step` and `safe_options`. It carries `success: true`, because it is
+a structured refusal rather than a transport error, so branching on
+`success is False` will miss it; branch on `status` or `rollout_flag`. Nothing
+was written. Follow `next_step` rather than retrying the same call.
+
+Cold-start action summaries carry a provisional headline. A `proceed` action
+before the behavioral baseline forms is permission to continue under the current
+policy, not a validated all-clear. The default state read preserves the verdict.
+
 If you supplied a genuine `confidence`, the response may mint a concrete
 `prediction_id`. Preserve that identifier and pass it to
 `record_result(..., prediction_id="...")` when the outcome lands; otherwise the
-outcome may grade an unrelated fallback prediction. When
+outcome may grade an unrelated fallback prediction. The `record_result`
+`state_summary` says which happened: `prediction_binding` and
+`prediction_source` name the prediction the outcome actually graded, and
+`calibration_excluded` is true when the confidence was scraped rather than
+bound, meaning the row does not train calibration. When
 `UNITARES_REVIEW_NUDGE` is enabled, a warmed session can also receive a
 once-per-session `review_suggested` nudge for low confidence, high complexity,
 or a guide verdict. It is optional guidance, not a forced review.
@@ -219,21 +246,25 @@ ownership, and (for review recovery) reflection/persistence evidence. Legacy
 recovery. If the authoritative inputs are genuinely degraded, self-recovery will
 not force a resume.
 
+The read-only check separates `recovery_needed` from `eligible`. An active
+identity reports `recovery_needed=false` and `recovery_status=not_needed`, even
+before its first check-in; it does not need a recovery reflection. Inspect
+`risk_authority` to distinguish an unmeasured first state from lost risk evidence.
+
 ## MCP Tools Reference
 
-Which of these names your client *lists* depends on the server's
-`GOVERNANCE_TOOL_MODE`. The default, `standard`, advertises eleven names: the
-checkpoint loop (`start_session`, `identity`, `sync_state`, `record_result`,
-`check_working_state`) plus `search_shared_memory`, `store_finding`,
-`update_finding`, `request_review`, `consult`, and `self_recovery`. `minimal`
-advertises the
-checkpoint loop alone. `lite` (29 tools) advertises every name in this
-reference plus `list_tools` / `describe_tool`; `full` advertises everything
-registered. A mode filters only `tools/list`: every registered tool dispatches
-by name in every mode, on `/mcp/`, REST `/v1/tools/call`, and stdio alike. So a
-harness that offers only listed tools shows eleven under the default, and the
-rest are one server-side flag away (`GOVERNANCE_TOOL_MODE=lite`), not gone.
-`start_session(verbose=true)` reports the running mode under `tool_mode`.
+Interface contract 1.6.0 and later exposes one complete catalog on MCP, REST,
+and stdio, including installed plugin tools. No tool mode is needed; legacy
+`GOVERNANCE_TOOL_MODE` settings are ignored. `list_tools(lite=true)` reports
+the live interface version and surface hash. Here `lite` only controls response
+detail. Use categories to browse and `describe_tool(tool_name=..., action=...)`
+to inspect the parameters of one router action. Prefer primary workflow names;
+raw implementations remain discoverable and callable for compatibility.
+Authorization and identity gates still apply to each action.
+
+Older servers may advertise a restricted profile. Inspect the client's actual
+tool catalog and server instructions; do not assume a name is callable merely
+because this skill mentions it. Upgrade the server for the complete catalog.
 
 ### Essential (use in every session)
 
@@ -253,7 +284,7 @@ rest are one server-side flag away (`GOVERNANCE_TOOL_MODE=lite`), not gone.
 - `knowledge()` — Full knowledge graph CRUD, search, synthesis, and audit router
 - `agent()` — Agent lifecycle router (list, get, update, archive, resume, delete)
 - `calibration()` — Check or update calibration data
-- `dialectic()` — Structured review router (`get`, `list`, `quick`, `request`, `thesis`, `antithesis`, `synthesis`, `reassign`)
+- `dialectic()` — Structured review router (`get`, `list`, `quick`, `request`, `thesis`, `antithesis`, `synthesis`, `reassign`). Advertised on the default `standard` since 2026-09-08: `request_review` pins `action="request"`, so without the router you could open a review and reach none of the actions that finish one
 - `export()` — Export session history
 
 ### Specialized
@@ -261,4 +292,4 @@ rest are one server-side flag away (`GOVERNANCE_TOOL_MODE=lite`), not gone.
 - `call_model()` — Delegate to a configured secondary model for analysis
 - `observe()` — Read governance observations and fleet diagnostics
 - `config()` — Read or change runtime thresholds; writes are privileged
-- `list_tools()` / `describe_tool()` — Inspect the deployed surface instead of guessing an old tool name. Advertised on `lite` and `full`, not on the default `standard` or on `minimal`, where the MCP client's own `tools/list` is the discovery surface; both still answer when called by name
+- `list_tools()` / `describe_tool()` — Inspect the deployed catalog and full action parameters instead of guessing tool names. Available in the complete catalog; older servers may require their own discovery-profile configuration.

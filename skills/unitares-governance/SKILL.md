@@ -4,7 +4,7 @@ description: >
   Compatibility umbrella skill for the UNITARES governance framework. Use this
   as the entrypoint when you need the overall model and route into the split
   governance skills.
-last_verified: "2026-09-08"
+last_verified: "2026-09-09"
 freshness_days: 35
 source_files:
   - unitares/src/mcp_handlers/core.py
@@ -20,6 +20,9 @@ source_files:
   - unitares/src/identity/lineage_semantics.py
   - unitares/src/coherence_provenance.py
   - unitares/src/mcp_handlers/lifecycle/recovery_policy.py
+  # Added 2026-09-08: this skill now states that advertised parameter
+  # descriptions are abridged and that describe_tool returns the full text.
+  - unitares/src/schema_brief.py
   - unitares/skills/governance-lifecycle/SKILL.md
   - unitares/skills/governance-fundamentals/SKILL.md
   - unitares/skills/knowledge-graph/SKILL.md
@@ -27,23 +30,24 @@ source_files:
   - unitares/skills/discord-bridge/SKILL.md
   - unitares/skills/unitares-dashboard/SKILL.md
 source_digests:
-  unitares/src/mcp_handlers/core.py: "5a6e81697f537ac2"
-  unitares/src/mcp_handlers/identity/handlers.py: "c840edc5049524ed"
+  unitares/src/mcp_handlers/core.py: "d7d09d260fedd7ec"
+  unitares/src/mcp_handlers/identity/handlers.py: "6a8eb54058609b20"
   unitares/src/mcp_handlers/tool_stability.py: "b81fb422cdec412c"
-  unitares/src/mcp_handlers/middleware/envelope_step.py: "bcac7a83172032db"
+  unitares/src/mcp_handlers/middleware/envelope_step.py: "0327e6202ed5cbb4"
   unitares/src/monitor_metrics.py: "ea5e54b19fa1d903"
-  unitares/src/tool_modes.py: "e3a54d97b9e05afa"
+  unitares/src/tool_modes.py: "aa75ef30ee2c2383"
   unitares/src/mcp_handlers/identity/session.py: "e24a8588ad4b8f47"
-  unitares/src/mcp_handlers/schemas/identity.py: "aee8c8ad9cb30c7c"
+  unitares/src/mcp_handlers/schemas/identity.py: "6a02e1c69d225e98"
   unitares/src/identity/lineage_semantics.py: "a6613f2493f6b97c"
   unitares/src/coherence_provenance.py: "f41f8d84e58fa321"
   unitares/src/mcp_handlers/lifecycle/recovery_policy.py: "3d108c675fb24421"
-  unitares/skills/governance-lifecycle/SKILL.md: "d8b344b82ea5bae9"
-  unitares/skills/governance-fundamentals/SKILL.md: "0c90338a4c6185b1"
-  unitares/skills/knowledge-graph/SKILL.md: "b64442aed6c88813"
-  unitares/skills/dialectic-reasoning/SKILL.md: "f8c3b5e1b8e9aef6"
+  unitares/src/schema_brief.py: "6463bc8ed3919816"
+  unitares/skills/governance-lifecycle/SKILL.md: "e22c8d1f67a81dec"
+  unitares/skills/governance-fundamentals/SKILL.md: "20b81e7a89af1eb0"
+  unitares/skills/knowledge-graph/SKILL.md: "8e521b485806415c"
+  unitares/skills/dialectic-reasoning/SKILL.md: "379b42161aedd37e"
   unitares/skills/discord-bridge/SKILL.md: "3ca60ac744a6223e"
-  unitares/skills/unitares-dashboard/SKILL.md: "6dcf8d96223bf965"
+  unitares/skills/unitares-dashboard/SKILL.md: "2a100c2a96107e97"
 ---
 
 # UNITARES Governance
@@ -72,14 +76,13 @@ main check-in loop. A new user message is not a reason to call
 `start_session(force_new=true)` again; that mints another process identity.
 These are the primary workflow tools; raw implementation tools such as
 `onboard(...)` and
-`process_agent_update(...)` remain available for compatibility. On a stock
-server the default `GOVERNANCE_TOOL_MODE=standard` lists eleven names: the
-five checkpoint tools (`start_session`, `identity`, `sync_state`,
-`record_result`, `check_working_state`) plus `search_shared_memory`,
-`store_finding`, `update_finding`, `request_review`, `consult`, and
-`self_recovery`. Every other name in this
-skill still dispatches by name, and `GOVERNANCE_TOOL_MODE=lite` advertises the
-rest (see governance-lifecycle, *MCP Tools Reference*). The full raw
+`process_agent_update(...)` remain available for compatibility. Interface contract
+1.6.0 and later exposes one complete catalog, including routers, diagnostics,
+and installed plugins. No tool mode is needed; old `GOVERNANCE_TOOL_MODE`
+settings are ignored. Use `list_tools` for the live contract and
+`describe_tool` for action parameters. Older servers may still advertise a
+restricted profile; inspect their actual catalog (see governance-lifecycle,
+*MCP Tools Reference*). The full raw
 payload remains available under `raw_governance`; the read aliases
 `check_working_state` and `search_shared_memory` default compact and require
 their documented full-mode option to include it.
@@ -110,12 +113,18 @@ identity proof on its own. Do not pass `continuity_token` on every call; reserve
 it for explicit same-live-owner `identity(..., resume=true)` rebinds.
 
 Use `sync_state()` after meaningful work to record progress and complexity, then
-read `next_action`, `recovery_hint`, and, when you asked for them with
+read `action_summary` for the decision and its evidence maturity, `next_action`,
+`recovery_hint`, and, when you asked for them with
 `include_memory_suggestions=true`, `memory_suggestions`. Pass
 `confidence` only when it is a real forecast; if the response returns a
 `prediction_id`, thread that exact ID into `record_result(...)` when the outcome
 lands. Use raw `process_agent_update()` when you need the unwrapped handler
 response.
+
+If the call is refused for identity, the response is the typed refusal rather
+than the envelope: no `next_action`, but `status`, `hint`, `next_step`,
+`safe_options` and `do_not`. It carries `success: true`, so detect it by
+`status` or `rollout_flag`, not by `success is False`. Nothing was written.
 
 ## Knowledge Layer
 
