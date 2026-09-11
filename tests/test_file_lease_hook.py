@@ -745,6 +745,99 @@ def test_claude_sync_release_allows_next_tool_holder(tmp_path, monkeypatch):
     assert len(set(acquire_holders)) == 2
 
 
+def _edit_lock_sidecars(workspace: Path) -> list[str]:
+    return sorted(
+        p.name
+        for p in (workspace / ".unitares").glob("file-leases-*-edit-*.lock")
+    )
+
+
+def test_release_edit_removes_its_lock_sidecar(tmp_path, monkeypatch):
+    """Per-edit flock sidecars must not outlive the edit they serialized.
+
+    Before this test existed every Claude edit left one zero-byte
+    ``file-leases-<slot>-edit-<id>.lock`` behind forever.
+    """
+    monkeypatch.setenv("LEASE_PLANE_BEARER_TOKEN", "lease-token")
+    monkeypatch.setenv("UNITARES_SECRETS_ENV", "/dev/null")
+
+    def fake_http(method, path, *, token, body=None, timeout_s=None):
+        if path.endswith("/release"):
+            return {"ok": True}
+        return {
+            "ok": True,
+            "lease": {
+                "lease_id": "lease-1",
+                "surface_id": body["surface_id"],
+                "expires_at": "2099-01-01T00:00:00Z",
+            },
+            "idempotent": False,
+        }
+
+    monkeypatch.setattr(file_lease_hook, "_http_json", fake_http)
+    assert file_lease_hook.main(
+        ["pre-edit", "--workspace", str(tmp_path), "--host", "claude"],
+        stdin_text=_payload(tool_use_id="toolu_1"),
+    ) == 0
+    assert len(_edit_lock_sidecars(tmp_path)) == 1
+
+    assert file_lease_hook.main(
+        ["release-edit", "--workspace", str(tmp_path), "--host", "claude"],
+        stdin_text=_payload(tool_use_id="toolu_1"),
+    ) == 0
+
+    assert file_lease_hook._state_paths(tmp_path, "slot-1") == []
+    assert _edit_lock_sidecars(tmp_path) == []
+
+
+def test_release_session_removes_per_edit_lock_sidecars(tmp_path, monkeypatch):
+    monkeypatch.setenv("LEASE_PLANE_BEARER_TOKEN", "lease-token")
+    monkeypatch.setenv("UNITARES_SECRETS_ENV", "/dev/null")
+
+    def fake_http(method, path, *, token, body=None, timeout_s=None):
+        if path.endswith("/release"):
+            return {"ok": True}
+        surface = body["surface_id"]
+        return {
+            "ok": True,
+            "lease": {
+                "lease_id": f"lease-{Path(surface).name}",
+                "surface_id": surface,
+                "expires_at": "2099-01-01T00:00:00Z",
+            },
+            "idempotent": False,
+        }
+
+    monkeypatch.setattr(file_lease_hook, "_http_json", fake_http)
+    args = ["pre-edit", "--workspace", str(tmp_path), "--host", "codex"]
+    assert file_lease_hook.main(
+        args, stdin_text=_codex_payload(tool_use_id="call_a", paths=("a.py",))
+    ) == 0
+    assert file_lease_hook.main(
+        args, stdin_text=_codex_payload(tool_use_id="call_b", paths=("b.py",))
+    ) == 0
+    assert len(_edit_lock_sidecars(tmp_path)) == 2
+
+    assert file_lease_hook.main(
+        ["release-session", "--workspace", str(tmp_path)],
+        stdin_text=json.dumps({"session_id": "codex-slot"}),
+    ) == 0
+
+    assert file_lease_hook._state_paths(tmp_path, "codex-slot") == []
+    assert _edit_lock_sidecars(tmp_path) == []
+
+
+def test_session_wide_lock_sidecar_is_left_in_place(tmp_path):
+    """The reusable session-slot sidecar keeps its documented contract."""
+    state_path = tmp_path / ".unitares" / "file-leases-slot-1.json"
+    state_path.parent.mkdir()
+    state_path.with_suffix(".lock").touch()
+
+    file_lease_hook._remove_edit_lock_sidecar(state_path)
+
+    assert state_path.with_suffix(".lock").exists()
+
+
 def test_session_end_discovers_and_releases_per_tool_state(tmp_path, monkeypatch):
     monkeypatch.setenv("LEASE_PLANE_BEARER_TOKEN", "lease-token")
     monkeypatch.setenv("UNITARES_SECRETS_ENV", "/dev/null")

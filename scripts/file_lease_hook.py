@@ -609,6 +609,30 @@ def _persist_or_remove_state(
     else:
         _state_path(workspace, slot, tool_use_id).unlink(missing_ok=True)
         _legacy_state_path(workspace, slot, tool_use_id).unlink(missing_ok=True)
+        if tool_use_id:
+            _remove_edit_lock_sidecar(_state_path(workspace, slot, tool_use_id))
+            _remove_edit_lock_sidecar(_legacy_state_path(workspace, slot, tool_use_id))
+
+
+def _remove_edit_lock_sidecar(state_path: Path) -> None:
+    """Drop the flock sidecar of a per-edit state file once that file is gone.
+
+    ``session_cache_lock`` serializes writers through ``<state>.lock`` and
+    deliberately leaves that sidecar in place, because a session-wide slot path
+    is reused by every later writer. A per-edit path is different: it is keyed
+    by a ``tool_use_id`` the host never reuses, so after its state JSON is
+    unlinked nothing will ever lock that path again and the sidecar is pure
+    litter. Left in place, every edit leaked one zero-byte ``.lock`` into
+    ``.unitares`` forever (3,833 of them in one home directory by 2026-09-10).
+
+    Only per-edit names are touched; the session-wide sidecar is never removed.
+    Callers hold the sidecar's lock when they call this. A waiter that then
+    acquires the unlinked inode re-reads the state file and treats a missing
+    file as nothing to release, so removing the sidecar under the lock is safe.
+    """
+    if "-edit-" not in state_path.name:
+        return
+    state_path.with_suffix(".lock").unlink(missing_ok=True)
 
 
 def _rollback_batch_leases(
@@ -944,6 +968,7 @@ def _release_state_file(
                 _write_json(state_path, state)
             else:
                 state_path.unlink(missing_ok=True)
+                _remove_edit_lock_sidecar(state_path)
             return deadline_reached
     except TimeoutError:
         _debug(f"release lock deadline reached; TTL cleanup remains: {state_path}")
