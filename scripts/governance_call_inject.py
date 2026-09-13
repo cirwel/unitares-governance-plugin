@@ -102,6 +102,7 @@ INJECT_SUFFIXES = frozenset({
     "get_governance_metrics", "check_working_state",
     "outcome_event", "record_result",
     "knowledge", "search_shared_memory", "leave_note",
+    "store_finding", "update_finding",
     "dialectic", "request_review",
     "observe", "calibration", "export", "config",
     "agent", "self_recovery", "archive_orphan_agents",
@@ -111,7 +112,9 @@ INJECT_SUFFIXES = frozenset({
 # Codex can only apply updatedInput by also allowing the tool call. Keep that
 # implicit approval narrowly scoped to lifecycle/check-in and read-only
 # diagnostics. Administrative and multi-action tools must carry identity
-# explicitly so their normal permission flow remains intact.
+# explicitly so their normal permission flow remains intact. Shared-memory
+# writes (knowledge, leave_note, store_finding, update_finding) stay out for
+# the same reason: rewriting them would pre-approve a durable write.
 CODEX_REWRITE_SUFFIXES = frozenset({
     "process_agent_update", "sync_state",
     "get_governance_metrics", "check_working_state",

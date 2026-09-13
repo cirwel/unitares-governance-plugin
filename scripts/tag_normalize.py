@@ -31,7 +31,10 @@ from typing import Any
 # Suffixes of governance MCP tools whose schemas carry a `tags` list.
 # Restricting to these keeps the formatter off unrelated governance calls
 # that share the pre-governance hook.
-TAG_BEARING_SUFFIXES = frozenset({"knowledge", "search_shared_memory", "leave_note"})
+TAG_BEARING_SUFFIXES = frozenset({
+    "knowledge", "search_shared_memory", "leave_note",
+    "store_finding", "update_finding",
+})
 
 # Pure spelling-variant canonicalization, applied AFTER formatting. Keys are
 # already in normalized (lowercased, hyphenated) form. Keep this small and
