@@ -96,18 +96,6 @@ if [[ ! -t 0 ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Optional workspace-local watcher fan-out
-# ---------------------------------------------------------------------------
-WATCHER_HOOK="${UNITARES_WATCHER_HOOK:-}"
-if [[ "${HOOK_HOST}" == "claude" \
-      && "${UNITARES_WATCHER_ENABLED:-0}" == "1" \
-      && -n "${WATCHER_HOOK}" \
-      && -x "${WATCHER_HOOK}" \
-      && -n "${HOOK_INPUT}" ]]; then
-  printf '%s' "${HOOK_INPUT}" | "${WATCHER_HOOK}" >/dev/null 2>&1 &
-fi
-
-# ---------------------------------------------------------------------------
 # Require the local cache helper before recording an edit milestone
 # ---------------------------------------------------------------------------
 if [[ -z "${SESSION_CACHE_HELPER}" ]]; then
@@ -143,6 +131,25 @@ if ! FILE_PATHS_JSON=$(printf '%s' "${HOOK_INPUT}" | python3 "${EDIT_EVENT_HELPE
   --host "${HOOK_HOST}" --output paths 2>/dev/null); then
   _breadcrumb "invalid_${HOOK_HOST}_edit_payload"
   exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Optional watcher fan-out
+#
+# Normalize first, then give the trusted watcher hook one canonical, scalar
+# Edit envelope per path. This keeps Claude and Codex payload differences out
+# of the watcher and lets a multi-file Codex apply_patch scan every file.
+# ---------------------------------------------------------------------------
+WATCHER_HOOK="${UNITARES_WATCHER_HOOK:-}"
+WATCHER_FANOUT="${PLUGIN_ROOT}/scripts/watcher_fanout.py"
+if [[ "${UNITARES_WATCHER_ENABLED:-0}" == "1" \
+      && -n "${WATCHER_HOOK}" \
+      && -x "${WATCHER_HOOK}" \
+      && -f "${WATCHER_FANOUT}" ]]; then
+  python3 "${WATCHER_FANOUT}" \
+    --hook "${WATCHER_HOOK}" \
+    --paths-json "${FILE_PATHS_JSON}" \
+    --host "${HOOK_HOST}" >/dev/null 2>&1 || true
 fi
 
 # ---------------------------------------------------------------------------

@@ -83,9 +83,11 @@ When Codex lifecycle hooks are configured and trusted, Codex also has a light
 native hook path: `SessionStart` shows the governance nudge, `PostToolUse`
 records completed-tool receipts and identity/check-in cache updates for matching
 governance calls, `PreToolUse` injects the cached `client_session_id` into later
-governance calls, and `Stop` emits one turn-level substrate interpretation. This
-does **not** turn every edit or tool call into a check-in or prove continuous
-agent runtime.
+governance calls, `UserPromptSubmit` can surface audience-scoped Watcher deltas,
+and `Stop` emits one turn-level substrate interpretation. Watcher remains opt-in
+through `UNITARES_WATCHER_ENABLED=1` plus explicit trusted agent/hook paths.
+This does **not** turn every edit or tool call into a check-in or prove
+continuous agent runtime.
 
 ### Modes
 

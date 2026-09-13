@@ -35,6 +35,26 @@
             "commandWindows": "\"%PLUGIN_ROOT%\\hooks\\run-hook.cmd\" session-start --host codex",
             "timeout": 15,
             "additionalContextLimit": 12000
+          },
+          {
+            "type": "command",
+            "command": "_unitares_runner=\"${PLUGIN_ROOT}/hooks/run-hook.cmd\"; if [ ! -f \"$_unitares_runner\" ]; then for _unitares_candidate in \"${PLUGIN_ROOT%/*}\"/*/hooks/run-hook.cmd; do [ -f \"$_unitares_candidate\" ] && _unitares_runner=\"$_unitares_candidate\"; done; fi; \"$_unitares_runner\" watcher-context --event session-start --host codex",
+            "commandWindows": "\"%PLUGIN_ROOT%\\hooks\\run-hook.cmd\" watcher-context --event session-start --host codex",
+            "timeout": 12,
+            "additionalContextLimit": 12000
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "_unitares_runner=\"${PLUGIN_ROOT}/hooks/run-hook.cmd\"; if [ ! -f \"$_unitares_runner\" ]; then for _unitares_candidate in \"${PLUGIN_ROOT%/*}\"/*/hooks/run-hook.cmd; do [ -f \"$_unitares_candidate\" ] && _unitares_runner=\"$_unitares_candidate\"; done; fi; \"$_unitares_runner\" watcher-context --event user-prompt-submit --host codex",
+            "commandWindows": "\"%PLUGIN_ROOT%\\hooks\\run-hook.cmd\" watcher-context --event user-prompt-submit --host codex",
+            "timeout": 12,
+            "additionalContextLimit": 12000
           }
         ]
       }
