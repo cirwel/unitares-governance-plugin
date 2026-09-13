@@ -106,8 +106,8 @@ def test_codex_post_edit_is_local_only_and_records_all_patch_paths(tmp_path: Pat
         json.loads(line) for line in watcher_events.read_text().splitlines()
     ]
     assert [payload["tool_input"]["file_path"] for payload in watcher_payloads] == [
-        "src/a.py",
-        "src/b.py",
+        str(tmp_path / "src/a.py"),
+        str(tmp_path / "src/b.py"),
     ]
     assert all(payload["source_host"] == "codex" for payload in watcher_payloads)
 

@@ -9,6 +9,8 @@ from scripts.watcher_fanout import fan_out
 def test_fan_out_normalizes_each_path_for_the_watcher(tmp_path: Path) -> None:
     marker = tmp_path / "events.jsonl"
     hook = tmp_path / "watcher-hook"
+    workspace = tmp_path / "worktree"
+    workspace.mkdir()
     hook.write_text(
         "#!/usr/bin/env python3\n"
         "import os, pathlib, sys\n"
@@ -22,7 +24,15 @@ def test_fan_out_normalizes_each_path_for_the_watcher(tmp_path: Path) -> None:
     previous = os.environ.get("WATCHER_MARKER")
     os.environ["WATCHER_MARKER"] = str(marker)
     try:
-        assert fan_out(hook, ["/repo/a.py", "/repo/b.ts"], host="codex") == 2
+        assert (
+            fan_out(
+                hook,
+                ["/repo/a.py", "src/b.ts", "../shared/c.py"],
+                host="codex",
+                workspace=workspace,
+            )
+            == 3
+        )
     finally:
         if previous is None:
             os.environ.pop("WATCHER_MARKER", None)
@@ -32,7 +42,8 @@ def test_fan_out_normalizes_each_path_for_the_watcher(tmp_path: Path) -> None:
     events = [json.loads(line) for line in marker.read_text().splitlines()]
     assert [event["tool_input"]["file_path"] for event in events] == [
         "/repo/a.py",
-        "/repo/b.ts",
+        str(workspace / "src/b.ts"),
+        str(tmp_path / "shared/c.py"),
     ]
     assert all(event["tool_name"] == "Edit" for event in events)
     assert all(event["source_host"] == "codex" for event in events)
