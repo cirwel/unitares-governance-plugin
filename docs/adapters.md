@@ -148,9 +148,17 @@ The current Claude adapter includes session-start, pre-edit, post-edit, and sess
 
 The pre-edit hook acquires a BEAM file lease before Edit/Write/MultiEdit. Missing lease-plane configuration fails open by default, while real `held_by_other` contention blocks the edit with a visible explanation. Successful and failed edit events release their tool-scoped lease; completed-batch, Stop, SessionEnd, and TTL cleanup cover denials or interruptions that do not expose a matching post-tool event.
 
-Workspace watcher fan-out is disabled by default. Enabling it requires both
-`UNITARES_WATCHER_ENABLED=1` and an explicitly configured executable
-`UNITARES_WATCHER_HOOK`; the plugin never auto-runs a repository-local watcher.
+Workspace Watcher integration is disabled by default. Enabling it requires
+`UNITARES_WATCHER_ENABLED=1`, an explicit `UNITARES_WATCHER_AGENT` path for
+lifecycle surfacing, and an explicit executable `UNITARES_WATCHER_HOOK` for
+edit scanning. The plugin never discovers or auto-runs a repository-local
+watcher. SessionStart reads the complete unresolved backlog without mutation;
+UserPromptSubmit records a delivery receipt under a stable `host:worktree`
+audience, so Claude and Codex cannot consume each other's notification.
+The configured Watcher must support `--audience`; land/deploy the companion
+UNITARES Watcher receipt change before enabling these hooks. Remove any legacy
+host-global Watcher surface/chime hooks when enabling the plugin path, or the
+same host can receive one migration-time duplicate.
 
 The `session-start` hook remains read-only: it tells the agent to call `start_session(force_new=true)` before substantive work. If the agent has not onboarded by the end of the turn, `post-stop` uses `scripts/onboard_helper.py` to lazily mint a fresh, slot-scoped identity and then emits the normal `turn_stop` summary under that identity. Set `UNITARES_AUTO_ONBOARD=off` or legacy `UNITARES_DISABLE_AUTO_ONBOARD=1` to fall back to identity-free floor observations for un-onboarded sessions.
 
@@ -166,6 +174,9 @@ Codex and ChatGPT support should stay minimal and explicit:
 - use `scripts/session_cache.py` as the shared cache helper across adapters
 - acquire per-file leases for the canonical `apply_patch` payload without treating an edit as a governance check-in
 - keep synchronous PostToolUse work local and bounded; use Stop for the turn-level substrate check-in
+- when Watcher is explicitly enabled, normalize multi-file `apply_patch` into
+  one scalar Edit envelope per path and deliver findings under a stable
+  `codex:worktree` audience
 
 On Windows, command hooks require Git Bash and Python 3.12+ exposed inside Git
 Bash as `python3`. Required lease mode emits a deny envelope when Bash itself is

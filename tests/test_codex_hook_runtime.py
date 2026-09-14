@@ -4,6 +4,7 @@ import json
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 from scripts import file_lease_hook
@@ -60,11 +61,26 @@ def test_codex_post_edit_is_local_only_and_records_all_patch_paths(tmp_path: Pat
 *** End Patch"""
         },
     }
+    watcher_events = tmp_path / "watcher-events.jsonl"
+    watcher_hook = tmp_path / "watcher-hook"
+    watcher_hook.write_text(
+        "#!/usr/bin/env python3\n"
+        "import os, pathlib, sys\n"
+        "pathlib.Path(os.environ['WATCHER_EVENTS']).open('ab').write(sys.stdin.buffer.read() + b'\\n')\n",
+        encoding="utf-8",
+    )
+    watcher_hook.chmod(0o755)
     try:
         result = subprocess.run(
             [str(PLUGIN_ROOT / "hooks" / "post-edit"), "--host", "codex"],
             cwd=str(tmp_path),
-            env={**_env(tmp_path, server.server_address[1]), "UNITARES_AUTO_CHECKIN_ENABLED": "1"},
+            env={
+                **_env(tmp_path, server.server_address[1]),
+                "UNITARES_AUTO_CHECKIN_ENABLED": "1",
+                "UNITARES_WATCHER_ENABLED": "1",
+                "UNITARES_WATCHER_HOOK": str(watcher_hook),
+                "WATCHER_EVENTS": str(watcher_events),
+            },
             input=json.dumps(payload),
             text=True,
             capture_output=True,
@@ -80,6 +96,20 @@ def test_codex_post_edit_is_local_only_and_records_all_patch_paths(tmp_path: Pat
     assert milestone["edit_count"] == 1
     assert milestone["files_touched"] == ["src/a.py", "src/b.py"]
     assert not [call for call in RecordingHandler.calls if call.get("name") == "process_agent_update"]
+    deadline = time.time() + 3
+    while time.time() < deadline:
+        if watcher_events.exists() and len(watcher_events.read_text().splitlines()) >= 2:
+            break
+        time.sleep(0.02)
+    assert watcher_events.exists(), "detached watcher fan-out did not run"
+    watcher_payloads = [
+        json.loads(line) for line in watcher_events.read_text().splitlines()
+    ]
+    assert [payload["tool_input"]["file_path"] for payload in watcher_payloads] == [
+        str(tmp_path / "src/a.py"),
+        str(tmp_path / "src/b.py"),
+    ]
+    assert all(payload["source_host"] == "codex" for payload in watcher_payloads)
 
 
 def test_codex_release_handler_does_not_depend_on_session_cache(tmp_path: Path):
