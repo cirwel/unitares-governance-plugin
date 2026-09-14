@@ -22,7 +22,9 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
-# Codex has no UserPromptSubmit event; this hook is Claude-only.
+# This helper is the Claude task-aware KG recall path. Codex now supports
+# UserPromptSubmit, but its default pull-based KG posture stays unchanged;
+# optional Watcher delivery is handled by the separate watcher-context hook.
 [[ "${HOOK_HOST}" == "claude" ]] || exit 0
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

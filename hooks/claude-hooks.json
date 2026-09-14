@@ -41,6 +41,12 @@
             "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" session-start --host claude",
             "async": false
+          },
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" watcher-context --event session-start --host claude",
+            "async": false,
+            "timeout": 12
           }
         ]
       }
@@ -173,6 +179,12 @@
             "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" user-prompt-submit --host claude",
             "async": false
+          },
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" watcher-context --event user-prompt-submit --host claude",
+            "async": false,
+            "timeout": 12
           }
         ]
       }

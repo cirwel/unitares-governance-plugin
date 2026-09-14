@@ -248,7 +248,9 @@ including `0` and `off` kill switches:
 | `UNITARES_MILESTONE_LOCK_TIMEOUT_S` | `2.0` | Maximum wait for the cross-process milestone lock (clamped to four seconds) |
 | `UNITARES_SESSION_CACHE_LOCK_TIMEOUT_S` | `2.0` | Maximum wait for a slot-scoped session-cache transaction (clamped to four seconds) |
 | `UNITARES_AUTO_CHECKIN_CLAIM_TTL_S` | `30` | Crash-recovery expiry for Claude's single in-flight edit check-in claim (clamped to 30-120 seconds) |
-| `UNITARES_WATCHER_ENABLED` | `0` | Opt in to the explicitly configured `UNITARES_WATCHER_HOOK`; workspace-local executables are never auto-run |
+| `UNITARES_WATCHER_ENABLED` | `0` | Opt in to Watcher edit scanning and lifecycle surfacing; workspace-local executables are never auto-run |
+| `UNITARES_WATCHER_AGENT` | unset | Explicit trusted path to Watcher's `agent.py`, used for SessionStart backlog and audience-scoped prompt chimes |
+| `UNITARES_WATCHER_HOOK` | unset | Explicit trusted executable receiving one normalized single-file Edit event per changed path |
 | `UNITARES_CODEX_LIVENESS` | `on` | Record local, slot-scoped completed-tool receipts; these are not check-ins or agent runtime |
 | `UNITARES_CODEX_RUNTIME_OBSERVATIONS` | `on` | Emit bounded completed-tool rollups to the legacy runtime-named audit sink |
 | `UNITARES_CODEX_HOST_HEARTBEATS` | `off` | Opt in to hook-parent PID heartbeats; a shared host PID never proves per-agent runtime |
@@ -261,8 +263,8 @@ including `0` and `off` kill switches:
 Adapters are a convenience layer over the governance server, not the canonical
 policy — the server stays the source of truth and the client stays thin.
 
-- **Claude** — host-native lifecycle hooks, asynchronous edit check-ins, batch-completion cleanup, and BEAM file leases.
-- **Codex/ChatGPT** — synchronous lifecycle hooks, multi-file apply_patch leases, Stop cleanup, local edit milestones, slot-scoped continuity cache, and separately labeled completed-tool audit evidence.
+- **Claude** — host-native lifecycle hooks, asynchronous edit check-ins, batch-completion cleanup, BEAM file leases, and optional audience-scoped Watcher delivery.
+- **Codex/ChatGPT** — synchronous lifecycle hooks, multi-file apply_patch leases, Stop cleanup, local edit milestones, slot-scoped continuity cache, optional audience-scoped Watcher delivery, and separately labeled completed-tool audit evidence.
 - **Sidecar** — a dependency-free local proxy/facade for clients without lifecycle hooks; recommended for local/non-frontier model runners that should not manage identity proof material in prompt context.
 - **Hermes Agent** — native lifecycle binding lives in `unitares-host-adapter`; this repo is only relevant to Hermes if you deliberately route through the generic sidecar instead.
 

@@ -71,6 +71,8 @@ def test_defaults_preserve_explicit_operator_environment():
         "UNITARES_CODEX_RUNTIME_IDLE_EXIT_S": "7200",
         "UNITARES_FILE_LEASES_ENABLED": "0",
         "UNITARES_FILE_LEASES_REQUIRED": "1",
+        "UNITARES_WATCHER_AGENT": "/trusted/watcher/agent.py",
+        "UNITARES_WATCHER_HOOK": "/trusted/watcher/hook",
         "LEASE_PLANE_BASE_URL": "https://leases.example.test",
     }
     env.pop("UNITARES_FILE_LEASE_TTL_S", None)
@@ -92,6 +94,8 @@ source "$1"
     os.environ["UNITARES_FILE_LEASE_TTL_S"],
     os.environ["UNITARES_AUTO_CHECKIN_CLAIM_TTL_S"],
     os.environ["UNITARES_WATCHER_ENABLED"],
+    os.environ["UNITARES_WATCHER_AGENT"],
+    os.environ["UNITARES_WATCHER_HOOK"],
     os.environ["LEASE_PLANE_BASE_URL"],
 ]))'
 """
@@ -118,6 +122,8 @@ source "$1"
         "30",
         "30",
         "0",
+        "/trusted/watcher/agent.py",
+        "/trusted/watcher/hook",
         "https://leases.example.test",
     ]
 
@@ -156,7 +162,14 @@ source "$1"
 def test_codex_hooks_are_synchronous_and_cover_continuity_path():
     config = _load("hooks/codex-hooks.json")
 
-    assert {"PreToolUse", "PostToolUse", "SessionStart", "SessionEnd", "Stop"} <= set(
+    assert {
+        "PreToolUse",
+        "PostToolUse",
+        "SessionStart",
+        "SessionEnd",
+        "UserPromptSubmit",
+        "Stop",
+    } <= set(
         config["hooks"]
     )
     handlers = list(_handlers(config))
@@ -176,6 +189,12 @@ def test_codex_hooks_are_synchronous_and_cover_continuity_path():
     )
     assert any(
         _invokes(handler, "session-start", host="codex") for _, _, handler in handlers
+    )
+    assert any(
+        event == "UserPromptSubmit"
+        and " watcher-context --event user-prompt-submit --host codex"
+        in handler["command"]
+        for event, _, handler in handlers
     )
     assert not any(
         event == "SessionStart" and _invokes(handler, "runtime-start", host="codex")

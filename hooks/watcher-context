@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# Surface UNITARES Watcher findings into a host lifecycle event.
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PLUGIN_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+EVENT=""
+HOOK_HOST=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --event)
+      [[ $# -ge 2 ]] || exit 0
+      EVENT="$2"
+      shift 2
+      ;;
+    --host)
+      [[ $# -ge 2 ]] || exit 0
+      HOOK_HOST="$2"
+      shift 2
+      ;;
+    *)
+      exit 0
+      ;;
+  esac
+done
+
+[[ "${EVENT}" == "session-start" || "${EVENT}" == "user-prompt-submit" ]] || exit 0
+[[ "${HOOK_HOST}" == "claude" || "${HOOK_HOST}" == "codex" ]] || exit 0
+
+DEFAULTS="${PLUGIN_ROOT}/config/defaults.env"
+if [[ -f "${DEFAULTS}" ]]; then
+  # shellcheck source=/dev/null
+  source "${DEFAULTS}" 2>/dev/null || true
+fi
+
+[[ "${UNITARES_WATCHER_ENABLED:-0}" == "1" ]] || exit 0
+WATCHER_AGENT="${UNITARES_WATCHER_AGENT:-}"
+[[ -n "${WATCHER_AGENT}" && -f "${WATCHER_AGENT}" ]] || exit 0
+
+if [[ "${EVENT}" == "session-start" ]]; then
+  exec python3 "${WATCHER_AGENT}" --print-unresolved
+fi
+
+SCOPE_ROOT="$(git -C "${PWD}" rev-parse --show-toplevel 2>/dev/null || pwd -P)"
+AUDIENCE="$(python3 - "${HOOK_HOST}" "${SCOPE_ROOT}" <<'PY' 2>/dev/null || true
+import hashlib
+import os
+import sys
+
+host = sys.argv[1]
+root = os.path.realpath(sys.argv[2])
+digest = hashlib.sha256(os.fsencode(root)).hexdigest()[:20]
+print(f"{host}:{digest}")
+PY
+)"
+[[ -n "${AUDIENCE}" ]] || exit 0
+
+exec python3 "${WATCHER_AGENT}" --surface-pending --audience "${AUDIENCE}"
