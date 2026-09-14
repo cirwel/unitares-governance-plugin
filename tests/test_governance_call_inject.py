@@ -9,13 +9,26 @@ scripts/governance_call_inject.py for the full contract.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
+import sys
 from pathlib import Path
+
+import pytest
 
 PLUGIN_ROOT = Path(__file__).parent.parent
 HOOK = PLUGIN_ROOT / "hooks" / "pre-governance-call"
 SLOT = "test-session-abc"
 SID = "agent-cafe1234-aaa"
+
+sys.path.insert(0, str(PLUGIN_ROOT / "scripts"))
+
+from governance_call_inject import (  # noqa: E402
+    ANCHORED_MINT_SUFFIXES,
+    CODEX_REWRITE_SUFFIXES,
+    INJECT_SUFFIXES,
+)
+from tag_normalize import TAG_BEARING_SUFFIXES  # noqa: E402
 
 
 def _write_cache(workspace: Path, slot: str = SLOT, sid: str = SID) -> None:
@@ -196,6 +209,23 @@ class TestTagNormalization:
         ), tmp_path)
         assert result.stdout.strip() == ""
 
+    @pytest.mark.parametrize("tool", ["store_finding", "update_finding"])
+    def test_shared_memory_write_aliases_normalize_tags_and_inject(self, tmp_path, tool):
+        # store_finding / update_finding are the workflow names for
+        # knowledge(action="store"/"update"); they get the same tag
+        # formatting and identity injection as the router they alias.
+        _write_cache(tmp_path)
+        result = _run(_hook_input(
+            f"mcp__unitares-governance__{tool}",
+            {"summary": "found it", "tags": ["PostgreSQL", "DB_Pool", "postgres"]},
+        ), tmp_path, host="claude")
+        payload = json.loads(result.stdout.strip())["hookSpecificOutput"]
+        assert "permissionDecision" not in payload
+        updated = payload["updatedInput"]
+        assert updated["tags"] == ["postgres", "db-pool"]
+        assert updated["client_session_id"] == SID
+        assert updated["summary"] == "found it"
+
     def test_tags_untouched_on_non_tag_bearing_tool(self, tmp_path):
         # process_agent_update is not tag-bearing; a stray tags field is
         # passed through unchanged (only identity is injected).
@@ -280,6 +310,25 @@ class TestExclusions:
             tmp_path,
             host="codex",
         )
+        assert result.stdout.strip() == ""
+
+    @pytest.mark.parametrize(
+        "tool", ["knowledge", "leave_note", "store_finding", "update_finding"]
+    )
+    def test_codex_does_not_rewrite_shared_memory_writes(self, tmp_path, tool):
+        # A Codex rewrite must carry permissionDecision=allow, so rewriting a
+        # durable shared-memory write would pre-approve it. These calls keep
+        # the normal permission flow and must carry identity explicitly.
+        _write_cache(tmp_path)
+        result = _run(
+            _hook_input(
+                f"mcp__unitares-governance__{tool}",
+                {"summary": "found it", "tags": ["Postgres"]},
+            ),
+            tmp_path,
+            host="codex",
+        )
+        assert result.returncode == 0
         assert result.stdout.strip() == ""
 
     def test_never_injects_into_onboard(self, tmp_path):
@@ -410,3 +459,99 @@ class TestFailOpen:
         result = _run(_hook_input(
             "mcp__unitares-governance__process_agent_update", {}), tmp_path)
         assert result.stdout.strip() == ""
+
+
+# The plugin's lifecycle skill publishes the workflow-name table agents are
+# taught to call. Deriving coverage from it (rather than from a second list
+# kept in this file) means a workflow alias added to that table without
+# injector and matcher coverage fails here instead of silently falling back
+# to the displaceable onboard pin.
+LIFECYCLE_SKILL = PLUGIN_ROOT / "skills" / "governance-lifecycle" / "SKILL.md"
+_TOOL_CELL = re.compile(r"`([a-z][a-z0-9_]*)")
+
+
+def _workflow_table_rows() -> list[tuple[str, str]]:
+    """(workflow tool, raw implementation tool) pairs from the skill table."""
+    text = LIFECYCLE_SKILL.read_text(encoding="utf-8")
+    section = text.split("## Primary Workflow Names", 1)
+    assert len(section) == 2, "Primary Workflow Names section missing from lifecycle skill"
+    body = section[1].split("\n## ", 1)[0]
+    rows = []
+    for line in body.splitlines():
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if len(cells) != 3:
+            continue
+        workflow = _TOOL_CELL.match(cells[1])
+        raw = _TOOL_CELL.match(cells[2])
+        if workflow and raw:
+            rows.append((workflow.group(1), raw.group(1)))
+    return rows
+
+
+def _pre_governance_matchers(relative: str, host: str) -> list[str]:
+    config = json.loads((PLUGIN_ROOT / relative).read_text(encoding="utf-8"))
+    return [
+        group["matcher"]
+        for group in config["hooks"]["PreToolUse"]
+        for handler in group["hooks"]
+        if handler["command"].endswith(f" pre-governance-call --host {host}")
+    ]
+
+
+class TestWorkflowAliasCoverage:
+
+    def test_skill_table_parses(self):
+        rows = _workflow_table_rows()
+        # Guard against a table-format change turning the checks below vacuous.
+        assert len(rows) >= 6, rows
+        assert ("sync_state", "process_agent_update") in rows
+
+    def test_every_taught_workflow_tool_is_injectable(self):
+        covered = INJECT_SUFFIXES | ANCHORED_MINT_SUFFIXES
+        missing = sorted(
+            name
+            for row in _workflow_table_rows()
+            for name in row
+            if name not in covered
+        )
+        assert missing == [], (
+            "workflow tools taught by the lifecycle skill but absent from "
+            f"INJECT_SUFFIXES/ANCHORED_MINT_SUFFIXES: {missing}"
+        )
+
+    def test_aliases_of_tag_bearing_tools_are_tag_bearing(self):
+        missing = sorted(
+            workflow
+            for workflow, raw in _workflow_table_rows()
+            if raw in TAG_BEARING_SUFFIXES and workflow not in TAG_BEARING_SUFFIXES
+        )
+        assert missing == [], (
+            f"aliases of a tag-bearing tool missing from TAG_BEARING_SUFFIXES: {missing}"
+        )
+
+    def test_tag_bearing_tools_reach_the_normalizer(self):
+        # main() returns before tag normalization for any suffix outside
+        # INJECT_SUFFIXES, so a tag-bearing name there would be dead config.
+        assert TAG_BEARING_SUFFIXES <= INJECT_SUFFIXES
+
+    def test_codex_rewrite_scope_is_a_subset_of_injection(self):
+        assert CODEX_REWRITE_SUFFIXES <= INJECT_SUFFIXES
+
+    @pytest.mark.parametrize(
+        "relative,host",
+        [("hooks/claude-hooks.json", "claude"), ("hooks/codex-hooks.json", "codex")],
+    )
+    def test_hook_matchers_route_every_injectable_tool(self, relative, host):
+        # The injector only runs for tools the host's PreToolUse matcher sends
+        # to it; a suffix the matcher omits is never rewritten.
+        matchers = _pre_governance_matchers(relative, host)
+        assert matchers, f"{relative} has no pre-governance-call PreToolUse hook"
+        unrouted = sorted(
+            tool
+            for tool in INJECT_SUFFIXES | ANCHORED_MINT_SUFFIXES
+            if not any(
+                re.fullmatch(matcher, f"mcp__unitares-governance__{tool}")
+                for matcher in matchers
+            )
+        )
+        assert unrouted == [], f"{relative} matcher does not route: {unrouted}"
