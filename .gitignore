@@ -14,3 +14,6 @@ __pycache__/
 
 # superpowers plugin planning artifacts
 docs/superpowers/
+
+# claude plugin eval run output (reports, traces, JSON)
+evals/results/
