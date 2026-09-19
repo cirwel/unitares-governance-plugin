@@ -23,11 +23,20 @@ env:
   EVAL_UNITARES_OFFLINE: "1"
 ```
 
-`hooks/run-hook.cmd` maps that flag to a closed port for the governance
-server, lease plane and sidecar, and disables auto-onboard. **Every new case
-must carry it.** The plugin's MCP server is not started either: under the
-default `--mocks record` a server with no mock under `evals/mocks/` stays off.
-The cases therefore ask the model to write the call out rather than make it.
+`hooks/run-hook.cmd` maps that flag, on both its Unix and Windows branches,
+to the plugin's kill switches (`UNITARES_CHECKINS=off`, auto-onboard off,
+`UNITARES_FILE_LEASES_ENABLED=0`) plus a closed port for every endpoint
+(governance server, lease plane under both variable names, sidecar).
+`tests/test_run_hook_eval_offline.py` checks the values the Python helpers
+actually resolve after `config/defaults.env` is sourced, that every case
+carries the flag, and that every Claude hook goes through the dispatcher.
+The plugin's MCP server is not started either: under the default
+`--mocks record` a server with no mock under `evals/mocks/` stays off. The
+cases therefore ask the model to write the call out rather than make it.
+
+The gate has a cost: session-start takes its offline branch, so the
+hook-delivered guidance (the workspace lineage hint, KG recall) never reaches
+the model. These cases test the skills, not the hook context.
 
 ## Cases
 
@@ -40,5 +49,10 @@ The cases therefore ask the model to write the call out rather than make it.
 | `verdict-cold-start-reading` | a provisional `proceed` is not read as a quality verdict |
 
 `checkin-confidence-optional` and `verdict-cold-start-reading` also pass at or
-near 1.0 without the plugin, so they guard against regressions but do not
-show the skills helping.
+near 1.0 without the plugin. The model's own prior carries them, so as written
+they would not catch a skill regression either; both need rewriting (the
+prompts give away the answer).
+
+The scores in PR #140 were recorded against the skills mirror before #141
+re-synced it, and some prompts and graders were edited after their last run.
+Re-run on current master with `--runs 5` or more before quoting a delta.
