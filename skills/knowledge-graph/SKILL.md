@@ -3,7 +3,7 @@ name: knowledge-graph
 description: >
   Use when an agent needs to search the shared knowledge graph, contribute a discovery,
   or update existing entries. Covers search, tagging, discovery types, and status lifecycle.
-last_verified: "2026-09-09"
+last_verified: "2026-09-14"
 freshness_days: 21
 source_files:
   - unitares/src/mcp_handlers/knowledge/handlers.py
@@ -19,12 +19,12 @@ source_files:
   - unitares/src/storage/knowledge_graph_postgres.py
   - unitares/src/db/mixins/knowledge_graph.py
 source_digests:
-  unitares/src/mcp_handlers/knowledge/handlers.py: "824d8fdc9903fe7a"
+  unitares/src/mcp_handlers/knowledge/handlers.py: "1ab1637f68d63e1b"
   unitares/src/mcp_handlers/knowledge/synthesis.py: "f33e76c5d5364ce9"
-  unitares/src/mcp_handlers/schemas/knowledge.py: "d3a3a6b031026ba7"
-  unitares/src/alias_schema.py: "6cf38a6e81f09728"
-  unitares/src/mcp_handlers/consolidated.py: "99210293967885fb"
-  unitares/src/mcp_handlers/tool_stability.py: "b81fb422cdec412c"
+  unitares/src/mcp_handlers/schemas/knowledge.py: "66f607237f3a3daf"
+  unitares/src/alias_schema.py: "b3cf7437056198f8"
+  unitares/src/mcp_handlers/consolidated.py: "a30cdc7a8387f0e8"
+  unitares/src/mcp_handlers/tool_stability.py: "9049a8db3938541a"
   unitares/src/mcp_handlers/support/param_normalization.py: "6e16db988efa1d45"
   unitares/src/knowledge_graph.py: "0f53dddc433c13aa"
   unitares/src/knowledge_graph_lifecycle.py: "3d943c8664beedd6"
@@ -59,7 +59,10 @@ router's inline-detail behaviour. Use either it or the unified router;
 duplicate entries fragment knowledge and make search less effective.
 
 You may omit `query` entirely when filtering by `tags`, `discovery_type`,
-`severity`, `status`, or `agent_id`. Search also supports `include_provenance`;
+`severity`, `status`, or `agent_id_filter` (author UUID). The explicit
+`agent_id_filter` takes precedence; `agent_id` remains a fallback for existing
+callers. A blank explicit filter is rejected, and surrounding whitespace is
+trimmed. Search also supports `include_provenance`;
 request `response_mode="full"` when you need the full result fields. The search
 alias omits controls for other actions, such as closure evidence and synthesis;
 use `update_finding` or the corresponding `knowledge` action for those tasks.
@@ -196,8 +199,10 @@ The graph accumulates knowledge well but does not close loops automatically. Thi
 - **When a finding is outdated, archive it** with a note about what superseded it.
 - **Periodically audit stale open entries** with `knowledge(action="audit")`
   (read-only), and run `knowledge(action="cleanup")` (dry-run by default) to
-  apply the lifecycle archival passes. Cleanup has no domain or tag scope and
-  never touches open entries; staleness scoring is `audit`'s job.
+  apply the lifecycle archival passes. Cleanup has no domain or tag scope, and
+  it does not score staleness — that is `audit`'s job. It does write to open
+  rows: the tag-canonicalization pass rewrites their tags, and the ephemeral
+  pass archives `ephemeral`-tagged open rows older than 7 days.
 
 Unresolved entries create noise. Closed loops create trust in the graph.
 Open-entry staleness warnings use the latest write (`updated_at` when present),

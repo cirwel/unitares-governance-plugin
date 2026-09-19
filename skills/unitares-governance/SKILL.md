@@ -4,13 +4,16 @@ description: >
   Compatibility umbrella skill for the UNITARES governance framework. Use this
   as the entrypoint when you need the overall model and route into the split
   governance skills.
-last_verified: "2026-09-09"
+last_verified: "2026-09-18"
 freshness_days: 35
 source_files:
   - unitares/src/mcp_handlers/core.py
   - unitares/src/mcp_handlers/identity/handlers.py
   - unitares/src/mcp_handlers/tool_stability.py
   - unitares/src/mcp_handlers/middleware/envelope_step.py
+  # Added 2026-09-14: strict identity refusal and its no-handler-execution
+  # guarantee live here; resolver failure can still perform bookkeeping.
+  - unitares/src/mcp_handlers/middleware/identity_step.py
   - unitares/src/monitor_metrics.py
   # Added 2026-09-07 on re-verification: the claims about the default surface,
   # the token TTL, lineage reasons, and coherence provenance live here.
@@ -30,24 +33,25 @@ source_files:
   - unitares/skills/discord-bridge/SKILL.md
   - unitares/skills/unitares-dashboard/SKILL.md
 source_digests:
-  unitares/src/mcp_handlers/core.py: "d7d09d260fedd7ec"
-  unitares/src/mcp_handlers/identity/handlers.py: "6a8eb54058609b20"
-  unitares/src/mcp_handlers/tool_stability.py: "b81fb422cdec412c"
-  unitares/src/mcp_handlers/middleware/envelope_step.py: "0327e6202ed5cbb4"
+  unitares/src/mcp_handlers/core.py: "451b8f3d9dd2ce80"
+  unitares/src/mcp_handlers/identity/handlers.py: "c5bd71f4ab659d05"
+  unitares/src/mcp_handlers/tool_stability.py: "9049a8db3938541a"
+  unitares/src/mcp_handlers/middleware/envelope_step.py: "f2f61da6afb477a9"
+  unitares/src/mcp_handlers/middleware/identity_step.py: "d6dacf96434c8fba"
   unitares/src/monitor_metrics.py: "ea5e54b19fa1d903"
-  unitares/src/tool_modes.py: "aa75ef30ee2c2383"
-  unitares/src/mcp_handlers/identity/session.py: "e24a8588ad4b8f47"
+  unitares/src/tool_modes.py: "0f922d11fa4ac843"
+  unitares/src/mcp_handlers/identity/session.py: "cc60f281b7fc3276"
   unitares/src/mcp_handlers/schemas/identity.py: "6a02e1c69d225e98"
   unitares/src/identity/lineage_semantics.py: "a6613f2493f6b97c"
   unitares/src/coherence_provenance.py: "f41f8d84e58fa321"
   unitares/src/mcp_handlers/lifecycle/recovery_policy.py: "3d108c675fb24421"
   unitares/src/schema_brief.py: "6463bc8ed3919816"
-  unitares/skills/governance-lifecycle/SKILL.md: "e22c8d1f67a81dec"
-  unitares/skills/governance-fundamentals/SKILL.md: "20b81e7a89af1eb0"
-  unitares/skills/knowledge-graph/SKILL.md: "8e521b485806415c"
-  unitares/skills/dialectic-reasoning/SKILL.md: "379b42161aedd37e"
-  unitares/skills/discord-bridge/SKILL.md: "3ca60ac744a6223e"
-  unitares/skills/unitares-dashboard/SKILL.md: "2a100c2a96107e97"
+  unitares/skills/governance-lifecycle/SKILL.md: "0d5cfe61f45a1343"
+  unitares/skills/governance-fundamentals/SKILL.md: "e7c90dfa491b3590"
+  unitares/skills/knowledge-graph/SKILL.md: "3638f64f4d5a2aeb"
+  unitares/skills/dialectic-reasoning/SKILL.md: "bb587795b6684c1c"
+  unitares/skills/discord-bridge/SKILL.md: "7ce6a8f491281f46"
+  unitares/skills/unitares-dashboard/SKILL.md: "b15f49e6b6e30109"
 ---
 
 # UNITARES Governance
@@ -124,7 +128,10 @@ response.
 If the call is refused for identity, the response is the typed refusal rather
 than the envelope: no `next_action`, but `status`, `hint`, `next_step`,
 `safe_options` and `do_not`. It carries `success: true`, so detect it by
-`status` or `rollout_flag`, not by `success is False`. Nothing was written.
+`status` or `rollout_flag`, not by `success is False`. The target tool handler
+did not run. Treat that as a no-handler-execution receipt, not a blanket
+no-write receipt: resolver-failure paths may already have performed
+identity-resolution bookkeeping.
 
 ## Knowledge Layer
 

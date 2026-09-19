@@ -4,7 +4,7 @@ description: >
   Use when an agent is interacting with UNITARES governance for the first time, needs to
   onboard, check in, or recover from a pause/reject verdict. Covers the full agent lifecycle
   from session start through check-ins to recovery.
-last_verified: "2026-09-09"
+last_verified: "2026-09-18"
 freshness_days: 14
 source_files:
   - unitares/src/mcp_handlers/core.py
@@ -12,6 +12,9 @@ source_files:
   - unitares/src/mcp_handlers/admin/handlers.py
   - unitares/src/mcp_handlers/tool_stability.py
   - unitares/src/mcp_handlers/middleware/envelope_step.py
+  # Added 2026-09-14: strict identity refusal and its no-handler-execution
+  # guarantee live here; resolver failure can still perform bookkeeping.
+  - unitares/src/mcp_handlers/middleware/identity_step.py
   # Added 2026-08-09: this skill documents check-in and dialectic semantics but
   # was not verified against the code implementing either. That is why stale
   # `confidence` guidance survived several freshness cycles — the field it was
@@ -33,20 +36,21 @@ source_files:
   # lives. The trim rule is here; if it changes, that claim drifts silently.
   - unitares/src/schema_brief.py
 source_digests:
-  unitares/src/mcp_handlers/core.py: "d7d09d260fedd7ec"
-  unitares/src/mcp_handlers/identity/handlers.py: "6a8eb54058609b20"
-  unitares/src/mcp_handlers/admin/handlers.py: "d7dec13e6a422b43"
-  unitares/src/mcp_handlers/tool_stability.py: "b81fb422cdec412c"
-  unitares/src/mcp_handlers/middleware/envelope_step.py: "0327e6202ed5cbb4"
-  unitares/src/mcp_handlers/updates/phases.py: "0c28700d12434e77"
-  unitares/src/governance_monitor.py: "cecc4bde0de1c02b"
+  unitares/src/mcp_handlers/core.py: "451b8f3d9dd2ce80"
+  unitares/src/mcp_handlers/identity/handlers.py: "c5bd71f4ab659d05"
+  unitares/src/mcp_handlers/admin/handlers.py: "47a6f753b0ed1132"
+  unitares/src/mcp_handlers/tool_stability.py: "9049a8db3938541a"
+  unitares/src/mcp_handlers/middleware/envelope_step.py: "f2f61da6afb477a9"
+  unitares/src/mcp_handlers/middleware/identity_step.py: "d6dacf96434c8fba"
+  unitares/src/mcp_handlers/updates/phases.py: "8f4b832a428e4869"
+  unitares/src/governance_monitor.py: "12ebc67e070927c8"
   unitares/src/monitor_calibration.py: "c99375f368dd98aa"
-  unitares/src/mcp_handlers/updates/enrichments.py: "f91c10502c48275b"
-  unitares/src/mcp_handlers/dialectic/handlers.py: "b6f921fb24a523ce"
-  unitares/src/mcp_handlers/lifecycle/self_recovery.py: "9bfffd3b09f6cc0f"
+  unitares/src/mcp_handlers/updates/enrichments.py: "0aec78c062f4af99"
+  unitares/src/mcp_handlers/dialectic/handlers.py: "cebb8c905db22006"
+  unitares/src/mcp_handlers/lifecycle/self_recovery.py: "8997fbde709169e0"
   unitares/src/mcp_handlers/lifecycle/recovery_policy.py: "3d108c675fb24421"
-  unitares/src/tool_modes.py: "aa75ef30ee2c2383"
-  unitares/src/tool_mode_listing.py: "e14ecf4249c3007b"
+  unitares/src/tool_modes.py: "0f922d11fa4ac843"
+  unitares/src/tool_mode_listing.py: "3d6824551c6f921b"
   unitares/src/schema_brief.py: "6463bc8ed3919816"
 ---
 
@@ -69,7 +73,7 @@ The core lifecycle should use primary task-verb tools. Each is implemented by a 
 | Store a durable finding | `store_finding(summary=..., discovery_type=...)` | `knowledge(action="store")` |
 | Update a durable finding | `update_finding(discovery_id=..., ...)` | `knowledge(action="update")` |
 
-Use the primary workflow tools by default. Use raw implementation names only for older servers, compatibility code, or when you explicitly need the unwrapped handler response. `start_session(force_new=true)` is a process-start operation, not a per-turn continuation primitive. `request_review` reuses its `issue_description` as the thesis by default, so a lone review brief is actionable in one call. Pass explicit `reasoning`/`root_cause` to distinguish the position from the subject, or `use_brief_as_thesis=false` for the neutral two-call flow. Raw `dialectic(action="request")` remains two-call unless thesis fields or `use_brief_as_thesis=true` are supplied. Session reads carry plain-language `whose_move`/`next_call` guidance.
+Use the primary workflow tools by default. Use raw implementation names only for older servers, compatibility code, or when you explicitly need the unwrapped handler response. `start_session(force_new=true)` is a process-start operation, not a per-turn continuation primitive. `request_review` reuses its `issue_description` as the thesis by default, so a lone review brief is actionable in one call. Pass explicit `reasoning`/`root_cause` to distinguish the position from the subject, or `use_brief_as_thesis=false` for the neutral two-call flow. Raw `dialectic(action="request")` remains two-call unless thesis fields or `use_brief_as_thesis=true` are supplied. Session reads carry plain-language `whose_move`/`next_call` guidance, plus `wait_assessment` for whether a wait is yet unusual — `too_early` there means unremarkable, never that the reviewer is known alive.
 
 ## Starting a Session
 
@@ -155,8 +159,11 @@ identity, you get the typed refusal contract instead: `status`
 `safe_options`, `do_not`, and `rollout_flag`. There is no `next_action` —
 read `next_step` and `safe_options`. It carries `success: true`, because it is
 a structured refusal rather than a transport error, so branching on
-`success is False` will miss it; branch on `status` or `rollout_flag`. Nothing
-was written. Follow `next_step` rather than retrying the same call.
+`success is False` will miss it; branch on `status` or `rollout_flag`. The target
+tool handler did not run. Treat that as a no-handler-execution receipt, not a
+blanket no-write receipt: resolver-failure paths may already have performed
+identity-resolution bookkeeping. Follow `next_step` rather than retrying the
+same call.
 
 Cold-start action summaries carry a provisional headline. A `proceed` action
 before the behavioral baseline forms is permission to continue under the current
@@ -165,7 +172,11 @@ policy, not a validated all-clear. The default state read preserves the verdict.
 If you supplied a genuine `confidence`, the response may mint a concrete
 `prediction_id`. Preserve that identifier and pass it to
 `record_result(..., prediction_id="...")` when the outcome lands; otherwise the
-outcome may grade an unrelated fallback prediction. The `record_result`
+outcome may grade an unrelated fallback prediction. The advertised id is the
+check-in's own mint: evidence rows passed in `recent_tool_results` bind to
+prediction ids of their own, which the reply never advertises (before
+2026-09-17 it advertised the last evidence row's already-consumed id, so a
+`record_result` with it was refused as `PREDICTION_REUSE_CONFLICT`). The `record_result`
 `state_summary` says which happened: `prediction_binding` and
 `prediction_source` name the prediction the outcome actually graded, and
 `calibration_excluded` is true when the confidence was scraped rather than
@@ -217,6 +228,7 @@ A `guide` verdict is an early warning. Ignoring it makes `pause` more likely.
 
 - UUID is an identity anchor, not proof that the current process owns that identity
 - Session binding can happen via transport session, `client_session_id`, or short-lived continuity token
+- Binding a transport session is explicit — `bind_session`, not a side effect of `identity()` — and it can be **refused**. When the destination key resolves from a store keyed on the User-Agent alone it may belong to another caller, so the response carries `bound: false` with `rebind_refused` naming the source. Your identity is unchanged; retry from a client that sends its own session identifier.
 - Use `identity()` when continuity seems unclear
 - Inspect:
   - `identity_status`
@@ -284,7 +296,7 @@ because this skill mentions it. Upgrade the server for the complete catalog.
 - `knowledge()` — Full knowledge graph CRUD, search, synthesis, and audit router
 - `agent()` — Agent lifecycle router (list, get, update, archive, resume, delete)
 - `calibration()` — Check or update calibration data
-- `dialectic()` — Structured review router (`get`, `list`, `quick`, `request`, `thesis`, `antithesis`, `synthesis`, `reassign`). Advertised on the default `standard` since 2026-09-08: `request_review` pins `action="request"`, so without the router you could open a review and reach none of the actions that finish one
+- `dialectic()` — Structured review router (`get`, `list`, `quick`, `request`, `thesis`, `antithesis`, `synthesis`, `reassign`). Advertised in the complete catalog: `request_review` pins `action="request"`, so without the router an older restricted-profile server could open a review while exposing none of the actions that finish one
 - `export()` — Export session history
 
 ### Specialized

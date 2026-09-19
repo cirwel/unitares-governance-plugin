@@ -6,7 +6,7 @@ description: >
   pattern (window.X = { load }), the live-or-snapshot data seam, theme-aware
   charts via design tokens, and the app.html wiring (nav / pane / lazyLoad /
   RELOAD / retheme). A repo-specific reference — not general dashboard advice.
-last_verified: "2026-09-08"
+last_verified: "2026-09-14"
 freshness_days: 30
 source_files:
   - unitares/dashboard/redesign/app.html
@@ -31,11 +31,11 @@ source_files:
   - unitares/src/dashboard_auth.py
 source_digests:
   unitares/dashboard/redesign/app.html: "ac37237f646e7bde"
-  unitares/dashboard/redesign/data.js: "a62140b27844728e"
+  unitares/dashboard/redesign/data.js: "167553b85bf41e3a"
   unitares/dashboard/redesign/ws.js: "27bf5088dc4db8a3"
-  unitares/dashboard/redesign/snapshot.js: "bfa64360fdcd4a90"
+  unitares/dashboard/redesign/snapshot.js: "2586812a9522e2ea"
   unitares/dashboard/redesign/tokens.css: "ffad3d92c1033924"
-  unitares/dashboard/redesign/sections/eisv.js: "9c05bfc8a7e8a7d5"
+  unitares/dashboard/redesign/sections/eisv.js: "91e5cf78ab13eeef"
   unitares/dashboard/redesign/sections/metrics.js: "9412b1a03348fbea"
   unitares/dashboard/redesign/sections/landing.js: "814fce6a97c1139a"
   unitares/dashboard/redesign/sections/discoveries.js: "987622e5448645e7"
@@ -43,10 +43,10 @@ source_digests:
   unitares/dashboard/redesign/sections/risk.js: "d36e47793c9b31e4"
   unitares/dashboard/redesign/sections/adjudication.js: "9b3ac40599eecc8d"
   unitares/dashboard/redesign/sections/security.js: "a9ebbfd8c2186a21"
-  unitares/dashboard/package.json: "54b7e42849db8ab8"
+  unitares/dashboard/package.json: "d5b1d6b973b77099"
   unitares/dashboard/tests/telemetry-health.test.js: "efbb8e0db3f89f6b"
   unitares/src/http_api.py: "1c6b7f1e3d840fce"
-  unitares/src/http_routes/dashboard.py: "5dfb31b12e02b453"
+  unitares/src/http_routes/dashboard.py: "0fb5b075664dc0e6"
   unitares/src/http_routes/sentinel.py: "12566971b5a4c28b"
   unitares/src/http_routes/telemetry.py: "a49c4c1b1c5fcaed"
   unitares/src/dashboard_auth.py: "f2b1bbd42912995a"
@@ -63,10 +63,15 @@ facade that maps it to `/`, `/dashboard`, and `/dashboard/redesign/**`. The
 classic dashboard and its allowlist / script-load-chain / `vite` build were
 **retired** — ignore older guidance about `index.html`, `allowed_files`,
 `MetricColors`, or `Chart.defaults`. The redesign resolver constrains paths and
-file types and has no per-asset allowlist, but it does gate one asset:
-`snapshot.js` is served only to an authenticated caller
-(`_AUTHENTICATED_ONLY_FILES`), and `auth/*.html` is 404 on this route (those
-pages are served via `/auth/*`). Files are read per request, so a restart is
+file types and has no per-asset allowlist, but it does gate the assets that
+carry governance data rather than presentation: `_AUTHENTICATED_ONLY_FILES`
+holds `snapshot.js`, `preview.html` and `PLAN.md`, each served only to an
+authenticated caller. The test is the data class, not the extension — the
+latter two carry a real fleet capture and a description of the operator's own
+fleet, and were public until 2026-09-12 because the gate was a filename set
+and they landed beside the file it named. Only `snapshot.js` is loaded at
+runtime; the other two are reference artifacts. `auth/*.html` is 404 on this
+route (those pages are served via `/auth/*`). Files are read per request, so a restart is
 not needed for static edits. Entry HTML is `no-store`; relative assets receive
 an mtime version query to prevent stale browser bundles.
 
