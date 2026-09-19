@@ -55,6 +55,13 @@ old `/governance-start` scored 0.11 and the old `/checkin` 0.08, against 1.00
 for the current text. Both identity prompts give both arms the call
 signatures, so the no-plugin arm is judged on reasoning, not vocabulary.
 
+`identity-live-predecessor` and `verdict-cold-start-reading` score 1.00 in
+both arms (5 runs each): the model's own prior already handles them. They are
+kept as regression guards against a skill or command teaching the opposite,
+not as evidence the plugin helps. `verdict-cold-start-reading`'s regex grader
+bans the "thermodynamic / free energy / Shannon" framing, which the skill
+itself used until September 2026.
+
 Run the full suite with `--scaffold` so the command case gets its slot cache:
 
 ```bash

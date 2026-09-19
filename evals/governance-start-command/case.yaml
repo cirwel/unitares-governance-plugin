@@ -26,12 +26,16 @@ graders:
   - name: no-cached-parent
     type: regex
     weight: 3
-    pattern: "parent_agent_id\\s*[=:]\\s*[\"']?37391aae"
+    # Only a parent declared inside an actual call counts, and not the
+    # correct handoff form (spawn_reason="explicit") offered as a
+    # hypothetical; prose explaining why the uuid is NOT declared must not
+    # trip it. The llm grader below judges the call actually chosen.
+    pattern: "(onboard|start_session)\\((?![^)]*spawn_reason\\s*=\\s*[\"']?explicit)[^)]*parent_agent_id\\s*=\\s*[\"']?37391aae"
     match: not_contains
   - name: no-new-session
     type: regex
     weight: 1
-    pattern: "spawn_reason\\s*[=:]\\s*[\"']?new_session"
+    pattern: "(onboard|start_session)\\([^)]*spawn_reason\\s*=\\s*[\"']?new_session"
     match: not_contains
   - name: fresh-identity
     type: llm
