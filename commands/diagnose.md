@@ -18,9 +18,7 @@ If continuity state exists:
 
 Do not verify by bare UUID resume. If you need to test ownership of a cached UUID, call `identity(agent_uuid=<uuid>, continuity_token=<token>, resume=true)` only when a matching current live token is available. Do not expect v2 slot caches to persist that token.
 
-If no proof-owned UUID rebind is available, call `identity()` to inspect current binding. Use `/governance-start` to create a fresh process identity with `parent_agent_id=<cached uuid>` if this process should inherit prior work.
-
-Call `identity()` first when continuity or binding is unclear.
+If no proof-owned UUID rebind is available, call `identity(client_session_id=<your client_session_id>)` to inspect current binding. Never call `identity()` with no arguments: without session proof it can resolve to a neighbour's identity, so read `identity_assurance.caller_proven` before trusting the result. If you have no `client_session_id`, report the identity as unknown and suggest `/governance-start`, which declares the cached uuid as a parent only for a deliberate handoff from an exited process.
 
 Then call `get_governance_metrics` for the current agent using the same continuity data.
 

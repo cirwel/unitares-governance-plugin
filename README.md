@@ -124,11 +124,11 @@ another process identity. Once a process is bound, continue it with
 `client_session_id`-backed `sync_state()` / `check_working_state()` calls.
 
 1. `start_session(force_new=true)` once at process start, to mint a fresh process identity (`onboard(...)` is the canonical equivalent) — until you onboard, this process has no governance identity
-2. if this fresh process is a real handoff from finished prior work, pass `parent_agent_id=<prior uuid>` and `spawn_reason="new_session"`
+2. if this fresh process is a deliberate handoff from an exited process, pass `parent_agent_id=<prior uuid>` and `spawn_reason="explicit"`; sharing a workspace with an earlier process is not lineage
 3. call `sync_state()` when there is meaningful agent state to report, usually at most once per assistant turn (`process_agent_update(...)` is the canonical equivalent) — automatic Stop interpretations and bootstrap rows remain separately labeled
 4. call `check_working_state()` for read-only state
 5. use `identity(agent_uuid=..., continuity_token=..., resume=true)` only for same-live-owner proof-owned rebinds
-6. call `identity()` and `health_check()` when diagnosis is needed
+6. call `identity(client_session_id=...)` (never with no arguments; trust it only when `identity_assurance.caller_proven` is true) and `health_check()` when diagnosis is needed
 
 `continuity_token` is not a normal check-in argument. Use the returned
 `client_session_id` for ordinary same-process continuity; adapters should inject

@@ -529,7 +529,7 @@ if [[ -n "${UNITARES_CLIENT_SESSION_ID:-}" \
   ANCHOR_RESUME_ENABLED=1
 fi
 
-RECOVERY_GUIDANCE="Recovery: call identity() to inspect continuity, check_working_state() for governance state, and health_check() for server health."
+RECOVERY_GUIDANCE="Recovery: call identity(client_session_id=...) to inspect continuity, check_working_state() for governance state, and health_check() for server health."
 if [[ "${HOOK_HOST}" == "claude" ]]; then
   RECOVERY_GUIDANCE="Recovery: run /diagnose."
 fi

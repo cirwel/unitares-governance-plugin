@@ -11,9 +11,10 @@ session. The response said:
 
 ```json
 {
-  "action_summary": "proceed (provisional, baseline not yet formed)",
-  "state_summary": {"E": 0.71, "I": 0.63, "S": 0.18, "V": 0.08, "basin": "high"},
-  "risk_summary": {"risk": 0.21}
+  "action": "proceed",
+  "sub_action": "approve",
+  "metrics": {"E": 0.71, "I": 0.63, "S": 0.18, "V": 0.08, "risk_score": 0.21, "verdict": "safe"},
+  "baseline": {"update_count": 3, "baseline_confidence": 0.0, "is_baselined": false}
 }
 ```
 

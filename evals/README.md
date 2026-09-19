@@ -42,17 +42,21 @@ the model. These cases test the skills, not the hook context.
 
 | Case | Checks |
 |---|---|
-| `identity-fresh-session` | `start_session(force_new=true)` with no parent when a neighbour's slot file exists |
+| `identity-fresh-session` | a same-repo, same-branch neighbour of unknown liveness is not declared as parent |
 | `identity-deliberate-handoff` | lineage from an exited predecessor uses `spawn_reason="explicit"` |
+| `identity-live-predecessor` | a still-running session is a sibling, never a parent |
+| `governance-start-command` | `/governance-start` with another process's slot cache mints fresh (scaffolded; needs `--scaffold`) |
+| `checkin-command-confidence` | `/checkin` does not fill `confidence` with a habitual number (regex grader) |
 | `refusal-is-success-shaped` | a client treats `success: true` + `status: identity_required` as not gone through |
-| `checkin-confidence-optional` | `confidence` is omitted rather than filled with a habitual number |
-| `verdict-cold-start-reading` | a provisional `proceed` is not read as a quality verdict |
+| `verdict-cold-start-reading` | an unbaselined `proceed` is not read as a quality verdict |
 
-`checkin-confidence-optional` and `verdict-cold-start-reading` also pass at or
-near 1.0 without the plugin. The model's own prior carries them, so as written
-they would not catch a skill regression either; both need rewriting (the
-prompts give away the answer).
+The two command cases were checked against the commands they replaced: the
+old `/governance-start` scored 0.11 and the old `/checkin` 0.08, against 1.00
+for the current text. Both identity prompts give both arms the call
+signatures, so the no-plugin arm is judged on reasoning, not vocabulary.
 
-The scores in PR #140 were recorded against the skills mirror before #141
-re-synced it, and some prompts and graders were edited after their last run.
-Re-run on current master with `--runs 5` or more before quoting a delta.
+Run the full suite with `--scaffold` so the command case gets its slot cache:
+
+```bash
+claude plugin eval . --trust-plugin --scaffold -j 4 --runs 5
+```

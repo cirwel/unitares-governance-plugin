@@ -19,8 +19,8 @@ If a candidate is found:
 
 Then call UNITARES using the strongest honest posture for the situation:
 
-- fresh process with no prior workspace state → `onboard(force_new=true)`
-- fresh process inheriting prior workspace state → `onboard(force_new=true, parent_agent_id=<cached uuid>, spawn_reason="new_session")`
+- fresh process → `onboard(force_new=true)`, **whether or not a prior slot cache exists**. A cache left in the workspace shows co-location, not lineage: the process that wrote it may still be running, and you are not its continuation just because you share a directory.
+- deliberate handoff: declare the cached uuid only when that process has **exited** and the user (or the task) says you are continuing its work → `onboard(force_new=true, parent_agent_id=<cached uuid>, spawn_reason="explicit")`. Declaring a still-live process is rejected (`lineage_coincidental_rejected`). Do not use `spawn_reason="new_session"`: the server treats it as the legacy co-location reason, not intentional lineage.
 - include `model_type` when the current runtime is clear from context
 - do not invent a display name unless the user asked for one
 

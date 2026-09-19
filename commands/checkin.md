@@ -17,31 +17,30 @@ If a matching cache exists:
 - rely on the active session binding or `client_session_id` for ordinary check-ins
 - do not pass `continuity_token` to `process_agent_update`; it is reserved for explicit PATH 0 ownership rebinds
 
-If current binding is unclear, call `identity()` first to inspect the active binding.
+If current binding is unclear, call `identity(client_session_id=<your client_session_id>)` to inspect the active binding. Never call `identity()` with no arguments: without session proof it can resolve to a neighbour's identity. Trust the answer only when `identity_assurance.caller_proven` is true.
 
 If you must rebind to a cached UUID, include a matching live `continuity_token`
 from the same process response: `identity(agent_uuid=<uuid>,
 continuity_token=<token>, resume=true)`. Do not look for this token in the v2
 slot cache; it is not persisted there.
 
-If this is a fresh process and no ownership proof is available, use `/governance-start` to mint a fresh identity with `parent_agent_id=<cached uuid>` rather than bare UUID resume.
+If this is a fresh process and no ownership proof is available, use `/governance-start` to mint a fresh identity rather than bare UUID resume. A cached uuid is not a parent by default; `/governance-start` explains when a handoff justifies declaring it.
 
 If no local continuity state exists and the current identity is unclear, use `/governance-start` first.
 
-Call `process_agent_update` for the current agent once per assistant turn to establish a behavioral baseline. Also call it after meaningful milestones, before/after high-risk work, or when uncertainty/drift shows up.
+Call `process_agent_update` once for this `/checkin`. Outside an explicit `/checkin`, check in after meaningful milestones, before/after high-risk work, or when uncertainty/drift shows up, not every turn: the hooks already record per-turn substrate observations, and an agent report manufactured to match them is the failure the evidence classes exist to prevent.
 
 Inputs:
 
 - `response_text`: concise summary of what was actually accomplished
 - `complexity`: estimate `0.0-1.0`
-- `confidence`: honest estimate `0.0-1.0`
+- `confidence`: **optional, usually omit it.** Any value mints a tactical prediction that is scored into the fleet calibration curve, so pass one only when you are stating a genuine belief about how your work will hold up, never a habitual number
 - use the active session binding or `client_session_id`; do not auto-inject `continuity_token`
 - use `response_mode="mirror"` by default for Codex
 
 Guidelines:
 
 - Do not check in after every trivial edit or tool call.
-- Prefer one baseline check-in per assistant turn.
 - Add a check-in for meaningful milestones, completed steps, or decision points.
 - If recent local edit context exists, use it to improve the summary, but do not report raw file churn as if it were real progress.
 - If deterministic results already happened in the workflow, mention them concretely instead of speaking in generalities.

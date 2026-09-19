@@ -668,35 +668,63 @@ def _server_reachable() -> bool:
         return False
 
 
-def _archive_agent(uuid: str) -> None:
-    """Best-effort archive of a UUID created by this test.
+def _archive_agent(result: dict[str, Any]) -> str | None:
+    """Archive an identity this test created; return an error string on failure.
 
     This test hits the real governance server and creates two identities
     per run. Without teardown they pile up as ``itest-plugin#*`` ghosts in
     production (operator caught a pair-per-run accumulation 2026-04-17).
-    The server's periodic test-agent sweep is a backstop, not a substitute
-    for the test cleaning up its own state.
+
+    The call carries the created identity's own ``client_session_id``:
+    ``archive_agent`` sits behind the identity middleware, and an unbound
+    REST caller gets a success-shaped ``identity_required`` refusal, which
+    the old teardown swallowed (469 of 501 ``itest-plugin`` rows were never
+    archived, 2026-09-19). ``force`` skips the liveness guard, which reads a
+    just-onboarded identity as live.
     """
+    uuid = result.get("uuid", "")
     if not uuid:
-        return
+        return None
     payload = {
         "name": "archive_agent",
-        "arguments": {"agent_id": uuid, "reason": "itest teardown"},
+        "arguments": {
+            "agent_id": uuid,
+            "client_session_id": result.get("client_session_id", ""),
+            "reason": "itest teardown",
+            "force": True,
+        },
     }
-    body = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
-        f"{SERVER_URL}/v1/tools/call", data=body, method="POST"
+        f"{SERVER_URL}/v1/tools/call",
+        data=json.dumps(payload).encode("utf-8"),
+        method="POST",
     )
     req.add_header("Content-Type", "application/json")
     try:
-        urllib.request.urlopen(req, timeout=2).read()
-    except (urllib.error.URLError, TimeoutError, ConnectionError, OSError):
-        # Teardown is best-effort — if the server is down or the UUID was
-        # already swept by Vigil, we don't want to fail a passing test.
-        pass
+        body = json.loads(urllib.request.urlopen(req, timeout=5).read())
+    except (urllib.error.URLError, TimeoutError, ConnectionError, OSError, ValueError) as exc:
+        return f"{uuid}: {exc}"
+    inner = body.get("result", body)
+    if isinstance(inner, dict) and (
+        inner.get("status") in {"identity_required", "lineage_declaration_required"}
+        or inner.get("success") is False
+        or inner.get("error")
+    ):
+        return f"{uuid}: {json.dumps(inner)[:300]}"
+    return None
 
 
-@pytest.mark.skipif(not _server_reachable(), reason="governance server on :8767 unreachable")
+_LIVE_ITEST_ENABLED = os.environ.get("UNITARES_PLUGIN_LIVE_ITEST") == "1"
+
+
+@pytest.mark.skipif(
+    not _LIVE_ITEST_ENABLED,
+    reason="writes two identities to the live server; opt in with UNITARES_PLUGIN_LIVE_ITEST=1",
+)
+@pytest.mark.skipif(
+    _LIVE_ITEST_ENABLED and not _server_reachable(),
+    reason="governance server on :8767 unreachable",
+)
 def test_integration_two_slots_get_distinct_uuids(tmp_path: Path) -> None:
     """End-to-end: ask the real server to onboard two slots. Verify they
     actually resolve to different UUIDs. This is the regression test that
@@ -730,5 +758,5 @@ def test_integration_two_slots_get_distinct_uuids(tmp_path: Path) -> None:
             f"slot isolation broken: both slots resolved to the same UUID {result_a['uuid']}"
         )
     finally:
-        _archive_agent(result_a.get("uuid", ""))
-        _archive_agent(result_b.get("uuid", ""))
+        failures = [err for err in (_archive_agent(result_a), _archive_agent(result_b)) if err]
+    assert not failures, f"teardown left live identities behind: {failures}"
