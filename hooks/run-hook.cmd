@@ -36,6 +36,20 @@ CMDBLOCK
 # Unix: run the named script directly
 PATH="${PATH:+${PATH}:}/usr/bin:/bin:/usr/sbin:/sbin"
 export PATH
+# `claude plugin eval` strips every env var except EVAL_*, so the usual
+# UNITARES_* opt-outs cannot reach an eval child, while its hooks still run
+# as the operator against localhost. EVAL_UNITARES_OFFLINE=1 points every
+# endpoint at a closed port and disables lazy onboarding, so eval runs cannot
+# mint identities or write check-ins on the live server.
+if [ "${EVAL_UNITARES_OFFLINE:-}" = "1" ]; then
+    UNITARES_SERVER_URL="http://127.0.0.1:9"
+    UNITARES_LEASE_PLANE_URL="http://127.0.0.1:9"
+    UNITARES_SIDECAR_URL="http://127.0.0.1:9"
+    UNITARES_AUTO_ONBOARD=off
+    UNITARES_DISABLE_AUTO_ONBOARD=1
+    export UNITARES_SERVER_URL UNITARES_LEASE_PLANE_URL UNITARES_SIDECAR_URL \
+        UNITARES_AUTO_ONBOARD UNITARES_DISABLE_AUTO_ONBOARD
+fi
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SCRIPT_NAME="$1"
 shift
