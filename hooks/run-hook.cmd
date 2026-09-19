@@ -7,6 +7,18 @@ if "%~1"=="" (
     exit /b 1
 )
 set "HOOK_DIR=%~dp0"
+REM Eval isolation, mirrored from the Unix branch below: see the comment there.
+if "%EVAL_UNITARES_OFFLINE%"=="1" (
+    set "UNITARES_SERVER_URL=http://127.0.0.1:9"
+    set "UNITARES_LEASE_PLANE_URL=http://127.0.0.1:9"
+    set "LEASE_PLANE_BASE_URL=http://127.0.0.1:9"
+    set "UNITARES_SIDECAR_URL=http://127.0.0.1:9"
+    set "UNITARES_AUTO_ONBOARD=off"
+    set "UNITARES_DISABLE_AUTO_ONBOARD=1"
+    set "UNITARES_CHECKINS=off"
+    set "UNITARES_FILE_LEASES_ENABLED=0"
+    set "UNITARES_FILE_LEASES_REQUIRED=0"
+)
 if exist "C:\Program Files\Git\bin\bash.exe" (
     "C:\Program Files\Git\bin\bash.exe" "%HOOK_DIR%%~1" %2 %3 %4 %5 %6 %7 %8 %9
     exit /b !ERRORLEVEL!
@@ -38,17 +50,24 @@ PATH="${PATH:+${PATH}:}/usr/bin:/bin:/usr/sbin:/sbin"
 export PATH
 # `claude plugin eval` strips every env var except EVAL_*, so the usual
 # UNITARES_* opt-outs cannot reach an eval child, while its hooks still run
-# as the operator against localhost. EVAL_UNITARES_OFFLINE=1 points every
-# endpoint at a closed port and disables lazy onboarding, so eval runs cannot
-# mint identities or write check-ins on the live server.
+# as the operator against localhost. EVAL_UNITARES_OFFLINE=1 turns off every
+# network path: the kill switches (check-ins, lazy onboarding, file leases)
+# plus a closed port for each endpoint. config/defaults.env only fills unset
+# values, so these survive the hooks sourcing it. LEASE_PLANE_BASE_URL is set
+# as well as UNITARES_LEASE_PLANE_URL because file_lease_hook.py prefers it.
 if [ "${EVAL_UNITARES_OFFLINE:-}" = "1" ]; then
     UNITARES_SERVER_URL="http://127.0.0.1:9"
     UNITARES_LEASE_PLANE_URL="http://127.0.0.1:9"
+    LEASE_PLANE_BASE_URL="http://127.0.0.1:9"
     UNITARES_SIDECAR_URL="http://127.0.0.1:9"
     UNITARES_AUTO_ONBOARD=off
     UNITARES_DISABLE_AUTO_ONBOARD=1
-    export UNITARES_SERVER_URL UNITARES_LEASE_PLANE_URL UNITARES_SIDECAR_URL \
-        UNITARES_AUTO_ONBOARD UNITARES_DISABLE_AUTO_ONBOARD
+    UNITARES_CHECKINS=off
+    UNITARES_FILE_LEASES_ENABLED=0
+    UNITARES_FILE_LEASES_REQUIRED=0
+    export UNITARES_SERVER_URL UNITARES_LEASE_PLANE_URL LEASE_PLANE_BASE_URL \
+        UNITARES_SIDECAR_URL UNITARES_AUTO_ONBOARD UNITARES_DISABLE_AUTO_ONBOARD \
+        UNITARES_CHECKINS UNITARES_FILE_LEASES_ENABLED UNITARES_FILE_LEASES_REQUIRED
 fi
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SCRIPT_NAME="$1"

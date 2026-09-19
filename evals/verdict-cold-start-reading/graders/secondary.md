@@ -1,8 +1,7 @@
 ---
-type: llm
+type: regex
 weight: 1
+pattern: "thermodynamic|free[- ]energy|Shannon|mutual information"
+flags: i
+match: not_contains
 ---
-
-The answer does not describe the metrics as thermodynamic, physical energy,
-free energy, or Shannon/mutual information quantities, and does not present
-V as an independent fourth measurement of health.

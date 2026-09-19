@@ -142,7 +142,7 @@ debugging the underlying protocol.
 2. Keep continuity in slot-scoped `.unitares/session-<slot>.json` caches
 3. Do real work
 4. Call `sync_state(...)` when there is meaningful agent state to report (usually at most once per assistant turn)
-5. Call `identity()`, `check_working_state()`, and `health_check()` when continuity or governance state looks wrong
+5. Call `identity(client_session_id=...)` (never with no arguments; trust it only when `identity_assurance.caller_proven` is true), `check_working_state()`, and `health_check()` when continuity or governance state looks wrong
 6. Follow the bundled `unitares-governance:dialectic-reasoning` skill and call `dialectic(...)` when you need structured review
 
 With Codex lifecycle hooks configured/trusted, the Stop hook emits one automatic
@@ -156,12 +156,12 @@ those custom slash commands.
 The raw tool flow is:
 
 1. First run of a fresh process: `start_session(force_new=true)` (`onboard(...)` is the canonical equivalent)
-2. Fresh process continuing finished prior work: `start_session(force_new=true, parent_agent_id=<saved uuid>, spawn_reason="new_session")`
+2. Fresh process deliberately continuing an exited process's work: `start_session(force_new=true, parent_agent_id=<saved uuid>, spawn_reason="explicit")`. A saved uuid alone is co-location, not lineage
 3. Same still-running process: do **not** call `start_session` again; use `sync_state(..., client_session_id=<current session id>)`
 4. `sync_state()` when meaningful, usually at most once per assistant turn (`process_agent_update(...)` is the canonical equivalent)
 5. Same live owner / proof-owned rebind only: `identity(agent_uuid=..., continuity_token=..., resume=true)`
 6. `check_working_state()` for read-only state checks (`get_governance_metrics(...)` is the canonical equivalent)
-7. `identity()` if continuity looks wrong
+7. `identity(client_session_id=...)` if continuity looks wrong (never with no arguments)
 8. `health_check()` if the system itself may be part of the problem
 
 On servers with the agent-experience envelope enabled, friendly aliases lift
@@ -224,7 +224,7 @@ identity mints are not.
 - `continuity_token`: short-lived ownership proof for same-owner rebinding, not indefinite cross-process resume
 - `client_session_id`: in-session transport continuity metadata
 - `parent_agent_id`: lineage declaration for a fresh process continuing prior work
-- `session_resolution_source`: if this falls back to a weak source, inspect `identity()` and start a fresh session only when the process contract calls for one
+- `session_resolution_source`: if this falls back to a weak source, inspect `identity(client_session_id=...)` and start a fresh session only when the process contract calls for one
 - `identity_assurance`: strong is better than implicit
 
 Use the local audit when continuity looks suspicious:
@@ -240,7 +240,7 @@ identity stubs, weak resolution sources, and floor/failure log statuses.
 
 - `unitares-governance:governance-lifecycle` skill plus `start_session(...)` for onboarding and declared lineage
 - `sync_state(...)` for the turn baseline and meaningful milestones
-- `identity()`, `check_working_state()`, and `health_check()` for diagnosis
+- `identity(client_session_id=...)`, `check_working_state()`, and `health_check()` for diagnosis
 - `unitares-governance:dialectic-reasoning` skill plus `dialectic(...)` for structured review
 
 ## Claude Note

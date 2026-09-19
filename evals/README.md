@@ -23,22 +23,47 @@ env:
   EVAL_UNITARES_OFFLINE: "1"
 ```
 
-`hooks/run-hook.cmd` maps that flag to a closed port for the governance
-server, lease plane and sidecar, and disables auto-onboard. **Every new case
-must carry it.** The plugin's MCP server is not started either: under the
-default `--mocks record` a server with no mock under `evals/mocks/` stays off.
-The cases therefore ask the model to write the call out rather than make it.
+`hooks/run-hook.cmd` maps that flag, on both its Unix and Windows branches,
+to the plugin's kill switches (`UNITARES_CHECKINS=off`, auto-onboard off,
+`UNITARES_FILE_LEASES_ENABLED=0`) plus a closed port for every endpoint
+(governance server, lease plane under both variable names, sidecar).
+`tests/test_run_hook_eval_offline.py` checks the values the Python helpers
+actually resolve after `config/defaults.env` is sourced, that every case
+carries the flag, and that every Claude hook goes through the dispatcher.
+The plugin's MCP server is not started either: under the default
+`--mocks record` a server with no mock under `evals/mocks/` stays off. The
+cases therefore ask the model to write the call out rather than make it.
+
+The gate has a cost: session-start takes its offline branch, so the
+hook-delivered guidance (the workspace lineage hint, KG recall) never reaches
+the model. These cases test the skills, not the hook context.
 
 ## Cases
 
 | Case | Checks |
 |---|---|
-| `identity-fresh-session` | `start_session(force_new=true)` with no parent when a neighbour's slot file exists |
+| `identity-fresh-session` | a same-repo, same-branch neighbour of unknown liveness is not declared as parent |
 | `identity-deliberate-handoff` | lineage from an exited predecessor uses `spawn_reason="explicit"` |
+| `identity-live-predecessor` | a still-running session is a sibling, never a parent |
+| `governance-start-command` | `/governance-start` with another process's slot cache mints fresh (scaffolded; needs `--scaffold`) |
+| `checkin-command-confidence` | `/checkin` does not fill `confidence` with a habitual number (regex grader) |
 | `refusal-is-success-shaped` | a client treats `success: true` + `status: identity_required` as not gone through |
-| `checkin-confidence-optional` | `confidence` is omitted rather than filled with a habitual number |
-| `verdict-cold-start-reading` | a provisional `proceed` is not read as a quality verdict |
+| `verdict-cold-start-reading` | an unbaselined `proceed` is not read as a quality verdict |
 
-`checkin-confidence-optional` and `verdict-cold-start-reading` also pass at or
-near 1.0 without the plugin, so they guard against regressions but do not
-show the skills helping.
+The two command cases were checked against the commands they replaced: the
+old `/governance-start` scored 0.11 and the old `/checkin` 0.08, against 1.00
+for the current text. Both identity prompts give both arms the call
+signatures, so the no-plugin arm is judged on reasoning, not vocabulary.
+
+`identity-live-predecessor` and `verdict-cold-start-reading` score 1.00 in
+both arms (5 runs each): the model's own prior already handles them. They are
+kept as regression guards against a skill or command teaching the opposite,
+not as evidence the plugin helps. `verdict-cold-start-reading`'s regex grader
+bans the "thermodynamic / free energy / Shannon" framing, which the skill
+itself used until September 2026.
+
+Run the full suite with `--scaffold` so the command case gets its slot cache:
+
+```bash
+claude plugin eval . --trust-plugin --scaffold -j 4 --runs 5
+```

@@ -1,5 +1,6 @@
 """Pin the producer-aware coherence contract in the bundled skill."""
 
+import hashlib
 from pathlib import Path
 
 
@@ -17,36 +18,25 @@ def _parts() -> tuple[str, str]:
     return frontmatter, body
 
 
+def _coherence_section_sha() -> str:
+    _, body = _parts()
+    start = body.index("\n## Coherence\n")
+    end = body.index("\n## ", start + 1)
+    return hashlib.sha256(body[start + 1 : end].encode("utf-8")).hexdigest()[:16]
+
+
 def test_coherence_sources_and_roles_are_explicit() -> None:
     frontmatter, body = _parts()
 
-    # Deliberately a frozen literal, not a derived value: this assertion is a
-    # tripwire. Any edit to the skill fails here until someone re-reads the
-    # coherence contract below and re-stamps on purpose. Bumped 2026-08-21 for
-    # the v2.19.0 margin-semantics correction, which did not touch coherence.
-    #
-    # Bumped 2026-09-08 by the canonical skills sync (unitares#2106 era mirror
-    # refresh). This one DID touch coherence, so it was re-read rather than
-    # re-stamped: the unmeasurable-edge paragraph now states that the coherence
-    # edge is gated on PROVENANCE rather than on history -- it is judged only
-    # when `coherence_role` is `behavioral_update_consistency`
-    # (GovernanceConfig.COHERENCE_INTERPRETABLE_ROLE) with a matching history
-    # window and >=10 samples, so under the deployed `legacy_tanh_v` /
-    # `ode_control_feedback` producer it stays unmeasurable however much
-    # history accumulates. A `grounded` -> `eis_structural_measurement` row
-    # joins the producer table, and `nearest_edge` gains `oscillation` for a
-    # CIRS `cirs_block` pause. Every substantive assertion in this file passed
-    # unchanged against the new text, including the four producer roles below
-    # and the three sibling tests that forbid the health/balance framing and
-    # require the hidden E/I and confidence dependencies to stay disclosed --
-    # the additions widen the disclosure, they do not soften it.
-    #
-    # Bumped 2026-09-18 by the canonical skills sync. Re-read: the body diff
-    # renames the ODE model "dynamical-systems" (was "thermodynamic"), explains
-    # why `margin_scope` can read `all_edges` beside a settling/warning/critical
-    # margin, and adds prediction-bound outcome idempotency. None of it touches
-    # the coherence contract below.
-    assert 'last_verified: "2026-09-18"' in frontmatter
+    # Deliberately a frozen literal, not a derived value: this is a tripwire.
+    # It pins a hash of the "## Coherence" section only, so it fires when
+    # that contract text changes and stays quiet on freshness re-stamps and
+    # edits elsewhere in the skill. (It used to pin `last_verified`, which
+    # fired on every re-stamp and missed a content edit that kept the date.)
+    # When it fires: re-read the section against coherence_provenance.py and
+    # behavioral_sensor.py, check the assertions below still hold, then
+    # update the hash.
+    assert _coherence_section_sha() == "42e86f9405e8744a"
     assert "unitares/src/behavioral_sensor.py" in frontmatter
     assert "unitares/src/coherence_provenance.py" in frontmatter
     assert "`legacy_tanh_v`" in body
