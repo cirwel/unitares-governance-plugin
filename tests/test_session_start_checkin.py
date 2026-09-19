@@ -1407,4 +1407,4 @@ class TestWorkspaceCoordinationBriefing:
         ctx = _context(stdout)
         assert "Workspace coordination" not in ctx
         assert "/diagnose" not in ctx
-        assert "identity()" in ctx
+        assert "identity(client_session_id=...)" in ctx
