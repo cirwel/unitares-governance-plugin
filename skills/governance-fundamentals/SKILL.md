@@ -4,7 +4,7 @@ description: >
   Use when an agent needs to understand UNITARES governance concepts — EISV state vectors,
   basins, policy actions, coherence, calibration. Reference material for interpreting
   governance metrics as proprioceptive state estimation, not outcome judgment.
-last_verified: "2026-09-08"
+last_verified: "2026-09-18"
 freshness_days: 21
 source_files:
   - unitares/config/governance_config.py
@@ -31,15 +31,15 @@ source_files:
   - unitares/src/mcp_handlers/dialectic/enforcement.py
   - unitares/src/mcp_handlers/observability/outcome_events.py
 source_digests:
-  unitares/config/governance_config.py: "f7f688e938d7cf8e"
+  unitares/config/governance_config.py: "d1acabe43c6f149f"
   unitares/governance_core/coherence.py: "ef819003ee72b388"
   unitares/governance_core/parameters.py: "84bf47ca540bbc49"
   unitares/src/auto_ground_truth.py: "c17109cf5c18f2a4"
-  unitares/src/governance_monitor.py: "cecc4bde0de1c02b"
+  unitares/src/governance_monitor.py: "12ebc67e070927c8"
   unitares/src/monitor_calibration.py: "c99375f368dd98aa"
   unitares/src/governance_glossary.py: "251e06209e038a13"
   unitares/src/behavioral_state.py: "e214a51c1d7763c7"
-  unitares/src/behavioral_sensor.py: "9a4345371bf21b7f"
+  unitares/src/behavioral_sensor.py: "fce77d62fbd7b472"
   unitares/src/behavioral_assessment.py: "2cbeea287b81399e"
   unitares/src/cold_start_risk_confirmation.py: "fccd80e216d63b6e"
   unitares/src/monitor_decision.py: "c80f4e13511fe8ba"
@@ -47,20 +47,20 @@ source_digests:
   unitares/src/monitor_result.py: "9179435b91634583"
   unitares/src/coherence_provenance.py: "f41f8d84e58fa321"
   unitares/src/confidence.py: "00cc04e1f54278b4"
-  unitares/src/eisv_telemetry.py: "706c833dfcebab8f"
-  unitares/src/services/runtime_queries.py: "5e64973628fbcb7d"
+  unitares/src/eisv_telemetry.py: "24f1a47911850263"
+  unitares/src/services/runtime_queries.py: "f948bb168a59aad4"
   unitares/src/mcp_handlers/response_formatter.py: "1dce49d5fa405c49"
-  unitares/src/mcp_handlers/tool_stability.py: "b81fb422cdec412c"
+  unitares/src/mcp_handlers/tool_stability.py: "9049a8db3938541a"
   unitares/src/mcp_handlers/lifecycle/recovery_policy.py: "3d108c675fb24421"
   unitares/src/mcp_handlers/dialectic/enforcement.py: "135a7345ad47d5bf"
-  unitares/src/mcp_handlers/observability/outcome_events.py: "8bc5314d099e7b9b"
+  unitares/src/mcp_handlers/observability/outcome_events.py: "e8f54fde55262386"
 ---
 
 # Governance Fundamentals
 
 ## What UNITARES Is
 
-UNITARES provides digital proprioception for AI agents — awareness of your own state, your relationship to the system, and whether you are drifting. The live path is behavioral state estimation: observable work signals become EISV readings, smoothed over time and compared with the agent's own trajectory once a baseline exists. The thermodynamic / ODE model remains useful as a research lens and telemetry; do not present it as cold-start authority or live verdict authority.
+UNITARES provides digital proprioception for AI agents — awareness of your own state, your relationship to the system, and whether you are drifting. The live path is behavioral state estimation: observable work signals become EISV readings, smoothed over time and compared with the agent's own trajectory once a baseline exists. The dynamical-systems (ODE) model remains useful as a research lens and telemetry; do not present it as cold-start authority or live verdict authority.
 
 ## EISV State Vector
 
@@ -171,7 +171,7 @@ The actionable levels are `tight`, `warning`, and `critical` — each carries a 
 
 | Field | Values | Meaning |
 |---|---|---|
-| `margin_scope` | `all_edges`, `measured_edges_only` | Whether every edge was judged, or only some of them (emitted on `comfortable` and `tight`; absent on `settling`, `warning`, `critical`) |
+| `margin_scope` | `all_edges`, `measured_edges_only` | Whether every edge was judged, or only some of them. `GovernanceConfig.compute_proprioceptive_margin` sets it only on `comfortable`/`tight`, but several decision paths in `GovernanceConfig.make_decision` and `monitor_decision.make_decision` re-emit it with a default of `all_edges`, so an `all_edges` reading beside a `settling`/`warning`/`critical` margin is that default and not a finding that every edge was judged |
 | `unmeasurable_edges` | list of edge names | The edges that had no band to judge against, so they were not assessed at all |
 
 An edge is unmeasurable when it has no threshold band for this agent. Coherence is the usual case, and the gate is provenance, not history: the coherence edge is judged only when `coherence_role` is `behavioral_update_consistency` (`GovernanceConfig.COHERENCE_INTERPRETABLE_ROLE`), the history window carries that same role, and at least 10 samples exist. With the deployed `legacy_tanh_v` / `ode_control_feedback` producer the edge stays unmeasurable no matter how much history accumulates, so `comfortable` normally arrives as `margin_scope: measured_edges_only` with `unmeasurable_edges: ["coherence"]`. `comfortable` with `margin_scope: measured_edges_only` means "clear of the edges we could judge", not "nothing is near": read `unmeasurable_edges` for what was never assessed. Prefer the live values over assuming a fixed enum across runtime versions — `check_working_state()` is the source of truth.
@@ -212,6 +212,7 @@ Interpret it only with the accompanying `coherence_source` and `coherence_role`:
 The system tracks whether your stated confidence matches evidence. Over time this builds a calibration curve.
 
 - Grounding comes from objective signals: test pass/fail, command exit codes, lint results, file operations. These feed calibration automatically via `auto_ground_truth.py` and the `outcome_event` hook. Human validation is not required for deterministic evidence.
+- While the binding ledger is retained, prediction-bound outcomes are database-idempotent per `(agent_id, prediction_id)`: an identical retry returns the first canonical outcome without retraining calibration, while conflicting reuse is rejected. After both the canonical outcome and binding expire, a new canonical submission may be established. The in-memory prediction registry is only a cache; durable binding authority lives in the database. Calibration remains a non-durable post-commit side effect, so this persistence guarantee does not imply exactly-once calibration delivery.
 - Overconfidence is tracked and can lower Integrity / raise uncertainty through the check-in pipeline
 - When an agent omits confidence, the deployed compatibility estimator still gives legacy `C(V_ODE)` 55% of its base weight. Responses expose this as `confidence_reliability.coherence_dependency=ode_control_feedback`; it is known causal debt, not independent confidence evidence. Do not reweight it without prospective outcome calibration because confidence history can feed later entropy penalties.
 - That derived estimate stays internal: omitted confidence does not mint an agent tactical prediction or become an agent-reported calibration observation. Earlier explicit predictions remain available for their eventual outcomes. Simulation restores prediction bookkeeping and does not write trajectory calibration observations.

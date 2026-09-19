@@ -40,7 +40,13 @@ def test_coherence_sources_and_roles_are_explicit() -> None:
     # and the three sibling tests that forbid the health/balance framing and
     # require the hidden E/I and confidence dependencies to stay disclosed --
     # the additions widen the disclosure, they do not soften it.
-    assert 'last_verified: "2026-09-08"' in frontmatter
+    #
+    # Bumped 2026-09-18 by the canonical skills sync. Re-read: the body diff
+    # renames the ODE model "dynamical-systems" (was "thermodynamic"), explains
+    # why `margin_scope` can read `all_edges` beside a settling/warning/critical
+    # margin, and adds prediction-bound outcome idempotency. None of it touches
+    # the coherence contract below.
+    assert 'last_verified: "2026-09-18"' in frontmatter
     assert "unitares/src/behavioral_sensor.py" in frontmatter
     assert "unitares/src/coherence_provenance.py" in frontmatter
     assert "`legacy_tanh_v`" in body
