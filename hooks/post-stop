@@ -186,7 +186,11 @@ if [[ -z "${CSID:-}" && -n "${RAW_SLOT:-}" \
       && "${DISABLE_AUTO_ONBOARD}" != "on" ]]; then
   ONBOARD_HELPER="${PLUGIN_ROOT}/scripts/onboard_helper.py"
   if [[ -f "${ONBOARD_HELPER}" ]]; then
-    WORKSPACE_NAME="$(basename "${PWD}")"
+    # Name the session after the directory it was started in. $PWD is wherever
+    # the shell happens to be at the first Stop, which can be anywhere.
+    # CLAUDE_PROJECT_DIR is Claude Code's launch directory; other hosts fall
+    # back to $PWD.
+    WORKSPACE_NAME="$(basename "${CLAUDE_PROJECT_DIR:-${PWD}}")"
     AGENT_NAME="${UNITARES_AGENT_NAME:-${UNITARES_AGENT_PREFIX:-${HOOK_HOST}}-${WORKSPACE_NAME}}"
     MODEL_TYPE="${UNITARES_MODEL_TYPE:-${HOST_MODEL_TYPE}}"
     # Resume anchor (UNITARES_CLIENT_SESSION_ID, e.g. "agent:/thread-<id>") is
