@@ -52,8 +52,12 @@ jobs:
           manifest = skills / "SKILLS_MANIFEST.sha256"
           if not manifest.exists():
               sys.exit("SKILLS_MANIFEST.sha256 missing — re-run sync-plugin-skills.sh from unitares")
+          # skills/.attestations/ holds re-verification records; unitares
+          # excludes it from the canonical manifest, so it is excluded here too.
           files = sorted(
-              (p for p in skills.rglob("*") if p.is_file() and p.name != manifest.name),
+              (p for p in skills.rglob("*")
+               if p.is_file() and p.name != manifest.name
+               and ".attestations" not in p.relative_to(skills).parts),
               key=lambda p: p.relative_to(skills).as_posix(),
           )
           lines = [f"{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.relative_to(skills).as_posix()}" for p in files]
