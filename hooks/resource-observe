@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# UNITARES Governance Plugin — resource observation shadow (unitares#2410)
+#
+# Appends one local JSON line per Stop / PostToolUseFailure / PreCompact event
+# to ~/.unitares/resource-shadow/<UTC-date>.jsonl for the resource-grounded E
+# shadow study. Default OFF: set UNITARES_RESOURCE_SHADOW=1 to collect.
+#
+# Local only: nothing is sent to the governance server and no check-in field
+# is produced. Claude host only in v1.
+#
+# Runs async — must never block or produce output on failure.
+set -uo pipefail
+
+case "$(printf '%s' "${UNITARES_RESOURCE_SHADOW:-}" | tr '[:upper:]' '[:lower:]')" in
+  1|true|on|yes) ;;
+  *) exit 0 ;;
+esac
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PLUGIN_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+HOOK_HOST="claude"
+HOOK_EVENT=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --host) HOOK_HOST="${2:-}"; shift 2 ;;
+    --event) HOOK_EVENT="${2:-}"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+if [[ "${HOOK_HOST}" != "claude" || -z "${HOOK_EVENT}" ]]; then
+  exit 0
+fi
+
+HELPER="${PLUGIN_ROOT}/scripts/resource_shadow.py"
+[[ -f "${HELPER}" ]] || exit 0
+
+python3 "${HELPER}" --host "${HOOK_HOST}" --event "${HOOK_EVENT}" >/dev/null 2>&1 || true
+exit 0
