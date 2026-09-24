@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Check skill freshness against source file modification times."""
 
+import json
 import os
 import sys
 from datetime import datetime, timezone
@@ -66,6 +67,29 @@ def load_source_files(skill_dir: Path, frontmatter_sources: list[str]) -> list[s
     return list(frontmatter_sources)
 
 
+def latest_attestation_date(skills_dir: Path, name: str) -> str | None:
+    """`verified_date` of the newest attestation synced from unitares.
+
+    Re-verifying a skill in unitares writes a new file under
+    skills/.attestations/<skill>/<YYYYMMDDTHHMMSSZ>-<hex>.json instead of
+    editing SKILL.md (so concurrent stamping PRs cannot conflict); the format
+    is defined in unitares scripts/client/_check_freshness.py. The lexically
+    last readable file is the newest.
+    """
+    adir = skills_dir / ".attestations" / name
+    if not adir.is_dir():
+        return None
+    for path in sorted(adir.glob("*.json"), reverse=True):
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        verified = data.get("verified_date") if isinstance(data, dict) else None
+        if isinstance(verified, str) and verified:
+            return verified
+    return None
+
+
 def check_skills(plugin_root: str, projects_root: str) -> int:
     skills_dir = Path(plugin_root) / "skills"
     has_stale = False
@@ -78,6 +102,11 @@ def check_skills(plugin_root: str, projects_root: str) -> int:
         skill_name = skill_dir.name
         content = skill_file.read_text()
         meta = parse_frontmatter(content)
+        if meta:
+            # Effective date: the later of the frontmatter and the newest attestation.
+            attested = latest_attestation_date(skills_dir, skill_name)
+            if attested and attested > meta["last_verified"]:
+                meta["last_verified"] = attested
 
         if not meta:
             print(f"  [{YELLOW}-{NC}] {skill_name}: no freshness metadata")
