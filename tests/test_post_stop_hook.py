@@ -244,3 +244,51 @@ def test_lazy_onboard_names_the_session_after_its_launch_directory(tmp_path):
     name = onboard[0]["arguments"]["name"]
     assert name.split("#", 1)[0] == "claude-unitares"
     assert "career" not in name
+
+
+
+def test_codex_host_ignores_an_inherited_claude_project_dir(tmp_path):
+    LazyOnboardHandler.calls = []
+    srv = _ReusableTCPServer(("127.0.0.1", 0), LazyOnboardHandler)
+    port = srv.server_address[1]
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+
+    claude_dir = tmp_path / "claude-launch"
+    codex_dir = tmp_path / "codexwork"
+    claude_dir.mkdir()
+    codex_dir.mkdir()
+    stop_payload = json.dumps({
+        "hook_event_name": "Stop",
+        "session_id": "codex-label-slot",
+        "stop_hook_active": False,
+        "last_assistant_message": "Did some work.",
+    })
+    try:
+        env = {
+            "PATH": "/usr/bin:/bin:/usr/local/bin",
+            "HOME": str(tmp_path),
+            "UNITARES_SERVER_URL": f"http://127.0.0.1:{port}",
+            "UNITARES_CHECKIN_LOG": str(tmp_path / "checkins.log"),
+            "UNITARES_AUTO_ONBOARD": "on",
+            "CLAUDE_PLUGIN_ROOT": str(PLUGIN_ROOT),
+            "PLUGIN_ROOT": str(PLUGIN_ROOT),
+            "CLAUDE_PROJECT_DIR": str(claude_dir),
+            "PWD": str(codex_dir),
+        }
+        subprocess.run(
+            [str(PLUGIN_ROOT / "hooks" / "post-stop"), "--host", "codex"],
+            env=env,
+            cwd=str(codex_dir),
+            input=stop_payload,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    finally:
+        srv.shutdown()
+        thread.join(timeout=2)
+
+    onboard = [c for c in LazyOnboardHandler.calls if c.get("name") == "onboard"]
+    assert onboard, LazyOnboardHandler.calls
+    assert onboard[0]["arguments"]["name"].split("#", 1)[0] == "codex-codexwork"
