@@ -14,6 +14,7 @@ import argparse
 import json
 import os
 import sys
+import threading
 import urllib.request
 from pathlib import Path
 
@@ -57,9 +58,22 @@ def main() -> int:
     args = parser.parse_args()
     try:
         payload = sys.stdin.read() or "{}"
-        release(args.workspace, payload, args.budget)
     except Exception:
-        pass
+        return 0
+
+    def _run() -> None:
+        try:
+            release(args.workspace, payload, args.budget)
+        except Exception:
+            pass
+
+    # urllib's timeout bounds each socket operation, not the whole exchange, so
+    # slow headers could run past the budget. A daemon thread joined for the
+    # budget is a hard deadline: when it expires the process exits and the
+    # thread dies with it.
+    worker = threading.Thread(target=_run, daemon=True)
+    worker.start()
+    worker.join(args.budget)
     return 0
 
 

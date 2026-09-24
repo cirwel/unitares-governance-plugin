@@ -71,3 +71,45 @@ def test_session_end_releases_presence_and_sends_no_checkin(tmp_path):
             },
         }
     ]
+
+
+def test_presence_release_returns_within_budget_when_server_stalls(tmp_path):
+    """A server that accepts but never answers cannot hold the hook past its budget."""
+    import socket
+    import time
+
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    port = listener.getsockname()[1]
+
+    session_dir = tmp_path / ".unitares"
+    session_dir.mkdir()
+    slot = "stall-slot"
+    (session_dir / _slot_filename(slot)).write_text(json.dumps({
+        "uuid": "86ae619f-87e0-4040-8f29-eacece0c7904",
+        "client_session_id": "agent-stall",
+        "slot": slot,
+    }))
+    env = {
+        "PATH": "/usr/bin:/bin:/usr/local/bin",
+        "HOME": str(tmp_path),
+        "UNITARES_SERVER_URL": f"http://127.0.0.1:{port}",
+    }
+    try:
+        started = time.monotonic()
+        subprocess.run(
+            [sys.executable, str(PLUGIN_ROOT / "scripts" / "presence_release.py"),
+             "--workspace", str(tmp_path), "--budget", "0.3"],
+            env=env,
+            cwd=str(tmp_path),
+            input=json.dumps({"session_id": slot}),
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        elapsed = time.monotonic() - started
+    finally:
+        listener.close()
+
+    assert elapsed < 2.0
