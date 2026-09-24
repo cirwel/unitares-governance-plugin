@@ -43,8 +43,10 @@ def release(workspace: str, payload: str, budget: float) -> bool:
     request = urllib.request.Request(
         f"{url}/v1/tools/call", data=body, headers=governance_json_headers()
     )
-    with authorization_safe_urlopen(request, timeout=budget) as response:
-        response.read()
+    # The server acts on the request itself; the body is never read, so a slow
+    # or chunked response cannot hold the hook past its budget.
+    with authorization_safe_urlopen(request, timeout=budget):
+        pass
     return True
 
 
