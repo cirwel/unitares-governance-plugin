@@ -2,7 +2,8 @@
 # UNITARES Governance Plugin — SessionEnd hook
 #
 # Fires when the host session terminates (window close, etc). Both hosts use
-# this only for bounded local lease cleanup. Claude gives plugin-provided
+# this only for bounded lease cleanup: local file leases and the session's
+# governance presence lease. Claude gives plugin-provided
 # SessionEnd hooks a shared 1.5-second budget that a manifest timeout cannot
 # raise, so turn-level governance delivery belongs to Stop instead.
 set -uo pipefail
@@ -27,7 +28,18 @@ PAYLOAD=$(cat 2>/dev/null || echo "{}")
 FILE_LEASE_HELPER="${PLUGIN_ROOT}/scripts/file_lease_hook.py"
 if [[ -f "${FILE_LEASE_HELPER}" ]]; then
   printf '%s' "${PAYLOAD}" | python3 "${FILE_LEASE_HELPER}" release-session \
-    --workspace "${PWD}" --host "${HOOK_HOST}" --budget 0.8 >/dev/null 2>&1 || true
+    --workspace "${PWD}" --host "${HOOK_HOST}" --budget 0.8 >/dev/null 2>&1 &
 fi
 
+# Release this session's governance presence lease, in parallel with the file
+# leases so both fit the shared budget. Without it, an exited session reads as
+# live until the server-side TTL, and a successor that declares it as parent in
+# that window is refused as co-located. This sends no check-in.
+PRESENCE_HELPER="${PLUGIN_ROOT}/scripts/presence_release.py"
+if [[ -f "${PRESENCE_HELPER}" ]]; then
+  printf '%s' "${PAYLOAD}" | python3 "${PRESENCE_HELPER}" \
+    --workspace "${PWD}" --budget 0.6 >/dev/null 2>&1 &
+fi
+
+wait
 exit 0

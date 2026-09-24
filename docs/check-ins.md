@@ -99,11 +99,14 @@ Codex identity tools may arrive at the hook boundary with either
 are captured into the same slot-scoped cache, so a later Stop hook reuses the
 explicit identity instead of lazily minting a second one.
 
-`session-end` is deliberately not a third network trigger. Claude gives
+`session-end` is deliberately not a third check-in trigger. Claude gives
 plugin-provided SessionEnd hooks a shared 1.5-second budget, so that hook only
-attempts bounded lease cleanup. The preceding `post-stop` call owns final
-governance delivery; an abrupt shutdown can leave a lease only until its short
-TTL expires.
+attempts bounded lease cleanup: it releases this session's file leases and,
+when the slot cache holds a `client_session_id`, makes one bounded
+`agent(action="release_presence")` request so a successor can declare this
+session as parent right away. That request sends no check-in. The preceding
+`post-stop` call owns final governance delivery; an abrupt shutdown can leave
+a lease only until its short TTL expires.
 
 ## Kill switch
 
