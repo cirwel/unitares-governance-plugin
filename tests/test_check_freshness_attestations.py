@@ -8,6 +8,7 @@ for the SKILL.md on disk (unitares src/skill_attestations.py, THE RULE).
 
 import hashlib
 import json
+import re
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -51,7 +52,9 @@ def test_a_recent_attestation_makes_it_fresh(tmp_path):
     )
     result = _run(tmp_path)
     assert result.returncode == 0, result.stdout
-    assert "verified 2 days ago" in result.stdout
+    # The age shown comes from the attestation, not the 60-day frontmatter. It
+    # reads 3 if the run crosses midnight UTC after the fixture was written.
+    assert re.search(r"verified [23] days ago", result.stdout), result.stdout
 
 
 def test_attestations_dir_is_not_treated_as_a_skill(tmp_path):
