@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Check skill freshness against source file modification times."""
 
+import hashlib
 import json
 import os
 import sys
@@ -67,27 +68,58 @@ def load_source_files(skill_dir: Path, frontmatter_sources: list[str]) -> list[s
     return list(frontmatter_sources)
 
 
-def latest_attestation_date(skills_dir: Path, name: str) -> str | None:
-    """`verified_date` of the newest attestation synced from unitares.
+# Hex characters of sha256 kept per digest, matching unitares.
+DIGEST_HEX = 16
+
+
+def skill_text_digest(skill_md: Path) -> str:
+    """Digest of a SKILL.md as recorded in an attestation's `skill_digest`."""
+    return hashlib.sha256(skill_md.read_bytes()).hexdigest()[:DIGEST_HEX]
+
+
+def load_attestations(skills_dir: Path, name: str) -> list[dict]:
+    """Every readable attestation synced from unitares for a skill, newest first.
 
     Re-verifying a skill in unitares writes a new file under
-    skills/.attestations/<skill>/<YYYYMMDDTHHMMSSZ>-<hex>.json instead of
-    editing SKILL.md (so concurrent stamping PRs cannot conflict); the format
-    is defined in unitares scripts/client/_check_freshness.py. The lexically
-    last readable file is the newest.
+    skills/.attestations/<skill>/<YYYYMMDDTHHMMSSffffffZ>-<8 hex>.json instead
+    of editing SKILL.md (so concurrent stamping PRs cannot conflict); the format
+    is defined in unitares scripts/client/_check_freshness.py. The file name
+    leads with a microsecond UTC timestamp, so the lexically last is the newest.
+    Unreadable files and records without a `source_digests` map are skipped.
     """
     adir = skills_dir / ".attestations" / name
     if not adir.is_dir():
-        return None
+        return []
+    records: list[dict] = []
     for path in sorted(adir.glob("*.json"), reverse=True):
         try:
-            data = json.loads(path.read_text())
+            data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
-        verified = data.get("verified_date") if isinstance(data, dict) else None
-        if isinstance(verified, str) and verified:
-            return verified
-    return None
+        if isinstance(data, dict) and isinstance(data.get("source_digests"), dict):
+            records.append(data)
+    return records
+
+
+def attested_date(skills_dir: Path, name: str, skill_digest: str) -> str | None:
+    """Newest `verified_date` among the attestations that vouch for the skill
+    text on disk, or None.
+
+    Mirrors unitares src/skill_attestations.py (THE RULE): if any attestation
+    certified the current text (its `skill_digest` equals ``skill_digest``),
+    exactly those vouch, whatever their age. Otherwise the current text was
+    never certified and the newest attestation alone vouches. A stamp for other
+    skill text from a stale branch must not reset AGING for the text actually
+    on disk, even when it sorts newest.
+    """
+    records = load_attestations(skills_dir, name)
+    certified = [r for r in records if r.get("skill_digest") == skill_digest]
+    date = None
+    for record in certified or records[:1]:
+        verified = record.get("verified_date")
+        if isinstance(verified, str) and verified and (date is None or verified > date):
+            date = verified
+    return date
 
 
 def check_skills(plugin_root: str, projects_root: str) -> int:
@@ -103,8 +135,8 @@ def check_skills(plugin_root: str, projects_root: str) -> int:
         content = skill_file.read_text()
         meta = parse_frontmatter(content)
         if meta:
-            # Effective date: the later of the frontmatter and the newest attestation.
-            attested = latest_attestation_date(skills_dir, skill_name)
+            # Effective date: the later of the frontmatter and the vouching attestations.
+            attested = attested_date(skills_dir, skill_name, skill_text_digest(skill_file))
             if attested and attested > meta["last_verified"]:
                 meta["last_verified"] = attested
 

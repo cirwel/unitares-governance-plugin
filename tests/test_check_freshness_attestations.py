@@ -2,9 +2,11 @@
 
 Re-verifying a skill in unitares writes a new file under
 skills/.attestations/<skill>/ instead of editing SKILL.md, so the effective
-verified date is the later of the frontmatter and the newest attestation.
+verified date is the later of the frontmatter and the attestations that vouch
+for the SKILL.md on disk (unitares src/skill_attestations.py, THE RULE).
 """
 
+import hashlib
 import json
 import subprocess
 import sys
@@ -58,3 +60,43 @@ def test_attestations_dir_is_not_treated_as_a_skill(tmp_path):
     result = _run(tmp_path)
     assert result.returncode == 0
     assert ".attestations" not in result.stdout
+
+
+def _digest(root: Path) -> str:
+    return hashlib.sha256((root / "skills/demo/SKILL.md").read_bytes()).hexdigest()[:16]
+
+
+def _attest(root: Path, filename: str, verified: str, skill_digest: str | None = None) -> None:
+    adir = root / "skills" / ".attestations" / "demo"
+    adir.mkdir(parents=True, exist_ok=True)
+    record = {"verified_date": verified, "source_digests": {}}
+    if skill_digest is not None:
+        record["skill_digest"] = skill_digest
+    (adir / filename).write_text(json.dumps(record))
+
+
+def test_a_newer_stamp_for_other_skill_text_does_not_vouch(tmp_path):
+    # A stale branch re-stamped different SKILL.md text; it sorts newest but
+    # nobody re-verified the text on disk, so the certified stamp decides.
+    _write_skill(tmp_path, _day(60))
+    _attest(tmp_path, "20260101T000000000000Z-aaaaaaaa.json", _day(40), _digest(tmp_path))
+    _attest(tmp_path, "20260102T000000000000Z-bbbbbbbb.json", _day(1), "0000000000000000")
+    result = _run(tmp_path)
+    assert result.returncode == 1 and "AGING" in result.stdout, result.stdout
+
+
+def test_the_latest_date_among_certified_stamps_wins_regardless_of_name_order(tmp_path):
+    _write_skill(tmp_path, _day(60))
+    _attest(tmp_path, "20260101T000000000000Z-aaaaaaaa.json", _day(3), _digest(tmp_path))
+    _attest(tmp_path, "20260102T000000000000Z-bbbbbbbb.json", _day(45), _digest(tmp_path))
+    result = _run(tmp_path)
+    assert result.returncode == 0, result.stdout
+    assert "verified 3 days ago" in result.stdout
+
+
+def test_uncertified_text_falls_back_to_the_newest_stamp_alone(tmp_path):
+    _write_skill(tmp_path, _day(60))
+    _attest(tmp_path, "20260101T000000000000Z-aaaaaaaa.json", _day(2))
+    _attest(tmp_path, "20260102T000000000000Z-bbbbbbbb.json", _day(45))
+    result = _run(tmp_path)
+    assert result.returncode == 1 and "AGING" in result.stdout, result.stdout
