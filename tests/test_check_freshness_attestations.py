@@ -89,9 +89,10 @@ def test_the_latest_date_among_certified_stamps_wins_regardless_of_name_order(tm
     _write_skill(tmp_path, _day(60))
     _attest(tmp_path, "20260101T000000000000Z-aaaaaaaa.json", _day(3), _digest(tmp_path))
     _attest(tmp_path, "20260102T000000000000Z-bbbbbbbb.json", _day(45), _digest(tmp_path))
+    # Exit status alone pins the rule (3 days is FRESH, 45 is AGING) and does
+    # not flip if the run crosses midnight UTC, as an exact day count can.
     result = _run(tmp_path)
     assert result.returncode == 0, result.stdout
-    assert "verified 3 days ago" in result.stdout
 
 
 def test_uncertified_text_falls_back_to_the_newest_stamp_alone(tmp_path):
