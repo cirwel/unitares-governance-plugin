@@ -136,9 +136,12 @@ it automatically when hooks are available.
 
 On servers with the agent-experience envelope enabled, friendly alias responses
 lift `next_action`, `state_summary`, `risk_summary`, `memory_suggestions`, and
-`recovery_hint` when present while preserving the canonical payload under
-`raw_governance`. Older compatibility surfaces may return the canonical payload
-directly. Use `memory_suggestions` as retrieval cues, and prefer
+`recovery_hint` when present. Read aliases, routine check-ins and a plain fresh
+`start_session` omit the repeated canonical payload (`response_shape:
+"routine"` marks the trimmed lifecycle ones; read a new identity's uuid from
+`agent_uuid`); other responses may keep it under `raw_governance`, and
+`response_mode="full"` (`verbosity="full"` on `check_working_state`) asks for
+it. Older compatibility surfaces may return the canonical payload directly. Use `memory_suggestions` as retrieval cues, and prefer
 `recovery_hint` before inventing a recovery path. If `low_confidence` or
 `confidence_note` appears with memory suggestions, treat those suggestions as
 exploratory leads until you open the details or re-run a better search.
