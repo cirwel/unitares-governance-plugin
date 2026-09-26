@@ -42,11 +42,11 @@ source_files:
 
 # Agent Lifecycle
 
-**Last Updated:** 2026-09-08
+**Last Updated:** 2026-09-25
 
 ## Primary Workflow Names
 
-The core lifecycle should use primary task-verb tools. Each is implemented by a raw tool with the same identity rules and returns a **normalized envelope** with the operationally useful fields first (`next_action`, `state_summary`, `risk_summary`, `memory_suggestions`, `recovery_hint`). Read aliases and bounded `sync_state` modes omit the repeated canonical payload and explain how to request it explicitly; other state-changing aliases preserve it under `raw_governance`. `sync_state` does not retrieve shared memory unless `include_memory_suggestions=true` is explicit.
+The core lifecycle should use primary task-verb tools. Each is implemented by a raw tool with the same identity rules and returns a **normalized envelope** with the operationally useful fields first (`next_action`, `state_summary`, `risk_summary`, `memory_suggestions`, `recovery_hint`). Read aliases, bounded `sync_state` modes, and the write aliases `store_finding`, `update_finding` and `record_result` omit the repeated canonical payload and explain how to request it explicitly (`verbosity="full"` on `check_working_state`, `response_mode="full"` elsewhere, except as below for the finding writes); a plain fresh `start_session` omits it too (`response_shape: "routine"`, pass `response_mode="full"` on the mint to keep it); other state-changing aliases preserve it under `raw_governance`. Those three write acknowledgements keep the ids you need next (`discovery_id`, `state_summary.outcome_id`). The finding writes also carry `agent_uuid` and `written_as` (the writer's `agent_id`, `display_name` and assurance tier), so check it when you bound without an explicit `client_session_id`; `record_result` names its writer only when its binding was not server-inferred, so pass `client_session_id` if you need to see it. Their `raw_governance_hint` names what is still reachable: `response_mode="full"` on a later `record_result` (there is no read by outcome id, so an ack's own outcome payload cannot be fetched again), and for `store_finding` and `update_finding` a `knowledge(action="details", discovery_id=...)` read, which returns the stored record rather than the ack's payload; so these acks do not set `raw_governance_available`. Write-time warnings and a bounded `related_discoveries` snapshot are kept in the ack itself because that read does not return the warnings or the snapshot's summary previews; the snapshot's ids are the stored record's `related_to`, so a `store_finding` ack carrying the snapshot does not repeat them as `state_summary.related_to`. Do not repeat a write just to see its payload: `store_finding` mints a new finding on every call. `sync_state` does not retrieve shared memory unless `include_memory_suggestions=true` is explicit.
 
 | Task | Primary workflow tool | Raw implementation tool |
 |------|---------------|----------------|
@@ -137,8 +137,17 @@ The friendly tools return a normalized envelope. Read `action_summary` when
 present for the action, verdict, and evidence maturity, then `next_action`,
 `state_summary`, `risk_summary`, `memory_suggestions`, and `recovery_hint` when
 present. `check_working_state()` and `search_shared_memory()` omit the repeated
-canonical payload by default; use `lite=false` or `response_mode="full"`,
-respectively, when you need it under `raw_governance`.
+canonical payload by default; use `verbosity="full"` (alias `lite=false`) or
+`response_mode="full"`, respectively, when you need it under `raw_governance`.
+`check_working_state(verbosity="standard")` is the middle tier: EISV, verdict,
+risk_score, basin and mode with their meanings, without the diagnostics. A
+response marked `response_shape: "routine"` was trimmed because nothing in it
+needed explaining: a clean `sync_state` proceed keeps `action_summary.action`,
+`reason` and `risk_score` and the margin with its scope, but drops the repeated
+approve/safe/healthy values, and a plain fresh `start_session` omits the onboard
+record. Anything
+unusual (a guide, a pause, a resume miss, a reactivated identity, a declared
+lineage) keeps the full shape.
 
 One response is deliberately **not** that envelope. When a call is refused for
 identity, you get the typed refusal contract instead: `status`
@@ -206,7 +215,7 @@ watched less, or from a busy one that you have already reported.
 |---------|-----------|
 | **proceed / approve** | Continue normally |
 | **proceed / guide** + guidance text | Read the guidance, adjust your approach, keep going |
-| **pause / reject** | Stop your current task. Reflect on what is flagged. Consider requesting a dialectic review |
+| **pause / reject** | Check-ins and new shared-memory entries are refused (not queued); dialectic moves still work. Stop and read the `reason` and `guidance`. A paused agent's risk is frozen at the reading that paused it, so self-recovery rarely applies; a dialectic review opened for the pause, an operator, or re-evaluation at expiry usually ends it (see Recovery) |
 | **margin: tight** | You are inside the band around a decision threshold — `nearest_edge` names which. This is a threshold distance, not a basin position. Be more careful with next steps |
 
 A `guide` verdict is an early warning. Ignoring it makes `pause` more likely.
@@ -230,7 +239,10 @@ Strong ownership proof is better than implicit continuity. If the runtime falls 
 
 ## Recovery
 
-When you are paused, stuck, or need intervention:
+When you are paused, stuck, or need intervention. A paused agent cannot write
+the check-in that would lower its risk, so quick and review succeed only when
+the reading that paused it is already under their gates; otherwise the dialectic
+review opened for the pause, an operator, or re-evaluation at expiry ends it.
 
 | Situation | Tool | Notes |
 |-----------|------|-------|
@@ -238,7 +250,7 @@ When you are paused, stuck, or need intervention:
 | Clearly safe self-resume | `self_recovery(action="quick")` | Requires low risk and no active void |
 | Moderate state with reflection | `self_recovery(action="review", reflection="...")` | Requires a genuine reflection; may accept conditions |
 | Disagree with verdict, want structured review | `request_review(issue_description="...")` | One-call request + thesis by default; pass `use_brief_as_thesis=false` for a neutral two-call flow |
-| Human/operator override | `agent(action="resume", agent_id="...")` | Privileged lifecycle mutation; not ordinary self-recovery |
+| Human/operator override | `operator_resume_agent(target_agent_id="...", reason="...")` | Operator-only. Refuses an active void or risk above 0.80 ("requires human intervention"), and needs `force=true` above 0.60. Never resume your own pause through an operator path |
 
 Recovery is not a shortcut. Its authoritative checks are risk, active void, status,
 ownership, and (for review recovery) reflection/persistence evidence. Legacy
@@ -283,7 +295,7 @@ because this skill mentions it. Upgrade the server for the complete catalog.
 - `store_finding(...)` — Store a durable discovery, root cause, or correction
 - `update_finding(discovery_id=..., ...)` — Revise or close an existing finding
 - `knowledge(action="note", ...)` — Quick contribution to the knowledge graph
-- `self_recovery(action="check"|"quick"|"review")` — Get moving again after a pause. The pause and auth-refusal responses name this tool by hand, and it is advertised by default so a schema-driven client can actually call it.
+- `self_recovery(action="check"|"quick"|"review")` — Get moving again after a pause while risk is below its gates (review refuses at risk 0.65 and above, except for the legacy cold-start trap). The check-in envelope names it for a pause below those gates and names the dialectic session above them. It is advertised by default so a schema-driven client can actually call it.
 
 ### Common (use when needed)
 
