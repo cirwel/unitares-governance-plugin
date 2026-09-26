@@ -25,11 +25,17 @@ Then call UNITARES using the strongest honest posture for the situation:
 - do not invent a display name unless the user asked for one
 
 `start_session(...)` is the friendly equivalent of `onboard(...)` on servers
-that expose the agent-experience aliases. It takes the same parameters. On
-servers with the envelope enabled, it returns the same canonical payload under
-`raw_governance`, with `agent_uuid`, `client_session_id`, `next_action`,
-`state_summary`, `risk_summary`, `memory_suggestions`, and `recovery_hint`
-lifted when present for easier agent use. Older compatibility surfaces may
+that expose the agent-experience aliases, with the same identity rules. On
+servers with the envelope enabled it lifts `agent_uuid`, `client_session_id`,
+`agent_id`, `display_name`, `is_new`, `identity_resolution_outcome`,
+`session_resolution_source` when the payload carries it, a compact
+`identity_assurance` (tier, session_source, caller_proven, baseline),
+`next_action` and `state_summary`. **Read the uuid from `agent_uuid`.** A plain
+fresh mint (`response_shape: "routine"`) does not repeat the canonical payload,
+and `continuity_token` rides under `rebind` with its use-only-for caveat; any
+other mint (a resume miss, a reactivated identity, a declared lineage, a label
+rename, an unrecognised notice), or `response_mode="full"`, also carries the
+canonical payload under `raw_governance`. Older compatibility surfaces may
 return the canonical payload directly. Treat `memory_suggestions` as retrieval
 prompts and `recovery_hint` as the first recovery route when a response reports
 degraded state. If the alias is unavailable, call `onboard(...)` directly.
