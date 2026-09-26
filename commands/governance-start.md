@@ -27,7 +27,8 @@ Then call UNITARES using the strongest honest posture for the situation:
 `start_session(...)` is the friendly equivalent of `onboard(...)` on servers
 that expose the agent-experience aliases, with the same identity rules. On
 servers with the envelope enabled it lifts `agent_uuid`, `client_session_id`,
-`agent_id`, `display_name`, `is_new`, `identity_resolution_outcome`, a compact
+`agent_id`, `display_name`, `is_new`, `identity_resolution_outcome`,
+`session_resolution_source` when the payload carries it, a compact
 `identity_assurance` (tier, session_source, caller_proven, baseline),
 `next_action` and `state_summary`. **Read the uuid from `agent_uuid`.** A plain
 fresh mint (`response_shape: "routine"`) does not repeat the canonical payload,

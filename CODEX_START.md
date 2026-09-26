@@ -166,8 +166,10 @@ The raw tool flow is:
 
 On servers with the agent-experience envelope enabled, friendly aliases lift
 `next_action`, `state_summary`, `risk_summary`, `memory_suggestions`, and
-`recovery_hint` when present. Read aliases, routine check-ins and a plain fresh
-`start_session` omit the repeated canonical payload, marked
+`recovery_hint` when present. Read aliases (`check_working_state`,
+`search_shared_memory`) omit the repeated canonical payload and flag
+`raw_governance_available` with a hint. A routine `sync_state` proceed and a
+plain fresh `start_session` omit it too and are marked
 `response_shape: "routine"`. Read a new identity's uuid from `agent_uuid`.
 Other responses may carry the payload under `raw_governance`, and
 `response_mode="full"` (`verbosity="full"` on `check_working_state`) asks for
