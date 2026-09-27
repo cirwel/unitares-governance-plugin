@@ -1479,3 +1479,29 @@ def test_session_start_adds_nothing_when_file_leases_work(tmp_path, lease_server
         },
     )
     assert "File leases" not in context
+
+
+def test_an_environment_alias_beats_the_secrets_file(tmp_path, monkeypatch):
+    """GOVERNANCE_TOKEN in the environment must not be shadowed by the secrets
+    file's LEASE_PLANE_BEARER_TOKEN, which the loader inserts into os.environ."""
+    _no_configured_bearer(monkeypatch, tmp_path)
+    secrets = tmp_path / "secrets.env"
+    _write_secret(secrets, "file-token")
+    monkeypatch.setenv("UNITARES_SECRETS_ENV", str(secrets))
+    monkeypatch.setenv("GOVERNANCE_TOKEN", "env-alias-token")
+    assert file_lease_hook._configured_bearer_token() == "env-alias-token"
+
+
+def test_status_is_bounded_by_a_wall_clock_deadline(tmp_path, monkeypatch):
+    _no_configured_bearer(monkeypatch, tmp_path)
+
+    def stall(_timeout_s):
+        time.sleep(5)
+        return {"state": "on"}
+
+    monkeypatch.setattr(file_lease_hook, "_lease_status_unbounded", stall)
+    started = time.monotonic()
+    status = file_lease_hook.lease_status(deadline_s=0.2)
+    assert time.monotonic() - started < 1.0
+    assert status["state"] == "off"
+    assert status["error"] == "deadline_exceeded"

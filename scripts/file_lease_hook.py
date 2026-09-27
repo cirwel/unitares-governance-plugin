@@ -16,6 +16,7 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -252,14 +253,30 @@ def _enabled() -> bool:
     }
 
 
+_BEARER_ENV_NAMES = (
+    "LEASE_PLANE_BEARER_TOKEN",
+    "UNITARES_LEASE_PLANE_BEARER_TOKEN",
+    "GOVERNANCE_TOKEN",
+)
+
+
+def _bearer_from_env() -> str:
+    for name in _BEARER_ENV_NAMES:
+        value = (os.environ.get(name) or "").strip()
+        if value:
+            return value
+    return ""
+
+
 def _configured_bearer_token() -> str:
+    # Any bearer the process environment already names wins, under whichever
+    # alias; the secrets file only fills in when the environment has none, so
+    # its primary key cannot shadow an alias the operator set explicitly.
+    token = _bearer_from_env()
+    if token:
+        return token
     _load_env_file()
-    return (
-        os.environ.get("LEASE_PLANE_BEARER_TOKEN")
-        or os.environ.get("UNITARES_LEASE_PLANE_BEARER_TOKEN")
-        or os.environ.get("GOVERNANCE_TOKEN")
-        or ""
-    ).strip()
+    return _bearer_from_env()
 
 
 def _is_loopback_url(url: str) -> bool:
@@ -1247,12 +1264,34 @@ def cmd_release_batch(args: argparse.Namespace, stdin_text: str) -> int:
     return 0
 
 
-def lease_status(timeout_s: float = 0.5) -> dict[str, Any]:
+def lease_status(timeout_s: float = 0.5, deadline_s: float = 1.5) -> dict[str, Any]:
     """Whether edits in this environment are actually lease-protected.
 
     Reads GET /v1/health with the bearer the edit hook would use, so "on"
     means an acquire would authenticate, not merely that a port is open.
+    SessionStart calls this, so the whole probe (DNS, redirects, a slowly
+    streamed body) is bounded by ``deadline_s`` of wall clock, not only by the
+    per-operation socket timeout.
     """
+    result: dict[str, Any] = {}
+
+    def run() -> None:
+        result.update(_lease_status_unbounded(timeout_s))
+
+    worker = threading.Thread(target=run, name="lease-status-probe", daemon=True)
+    worker.start()
+    worker.join(max(0.05, deadline_s))
+    if worker.is_alive() or not result:
+        return {
+            "state": "off",
+            "reason": "unreachable",
+            "url": _base_url(),
+            "error": "deadline_exceeded",
+        }
+    return result
+
+
+def _lease_status_unbounded(timeout_s: float) -> dict[str, Any]:
     url = _base_url()
     if not _enabled():
         return {"state": "disabled", "url": url}
