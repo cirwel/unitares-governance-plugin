@@ -834,6 +834,25 @@ if [ -n "${WORKSPACE_BRIEFING}" ]; then
 ${WORKSPACE_BRIEFING}"
 fi
 
+# ---------------------------------------------------------------------------
+# File-lease status
+#
+# The pre-edit hook fails open, so a missing or misconfigured lease plane is
+# otherwise silent: edits simply go unprotected. Say so once per session when
+# leases are enabled but would not work. Nothing is added when they work or
+# were switched off (UNITARES_FILE_LEASES_ENABLED=0). The probe is one local
+# GET with a 0.5s timeout; any failure of the helper itself adds nothing.
+# ---------------------------------------------------------------------------
+FILE_LEASE_HELPER="${PLUGIN_ROOT}/scripts/file_lease_hook.py"
+if [ -f "${FILE_LEASE_HELPER}" ]; then
+  FILE_LEASE_STATUS="$(python3 "${FILE_LEASE_HELPER}" status --format line </dev/null 2>/dev/null || true)"
+  if [ -n "${FILE_LEASE_STATUS}" ]; then
+    CONTEXT="${CONTEXT}
+
+${FILE_LEASE_STATUS}"
+  fi
+fi
+
 ESCAPED_CONTEXT="$(escape_for_json "${CONTEXT}")"
 # Persist delivery state only after stdout accepts the serialized response. If
 # the host kills SessionStart or closes the pipe first, the next run must still

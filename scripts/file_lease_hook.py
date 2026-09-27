@@ -16,8 +16,10 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from pathlib import Path
@@ -39,6 +41,15 @@ except ImportError:  # Executed directly from an installed plugin.
     from _session_cache_io import session_cache_lock
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8788"
+# The bearer the UNITARES Docker Compose stack gives its lease plane when .env
+# sets none (docker-compose `LEASE_PLANE_BEARER_TOKEN` default). It is a
+# published constant, not a secret: the Compose lease plane publishes on
+# loopback only. It is tried only for a loopback lease plane and only when no
+# bearer is configured, so a default Compose install gets file leases with no
+# setup; a lease plane with its own bearer rejects it and the hook fails open.
+# Required mode (UNITARES_FILE_LEASES_REQUIRED) never uses it.
+COMPOSE_DEFAULT_BEARER = "unitares-local-lease-plane"
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 # Leases are released in PostToolUse right after each edit, so this TTL is now
 # only a backstop for the crash-mid-edit window (acquire fired, the session
 # died before release-edit ran). A short TTL means even that orphan self-heals
@@ -187,12 +198,23 @@ def _debug(message: str) -> None:
         pass
 
 
+def _secrets_env_path() -> Path:
+    """The secrets file the server's tooling also reads, in the same order:
+    UNITARES_SECRETS_ENV, then ~/.config/unitares/secrets.env, then the older
+    ~/.config/cirwel/secrets.env when only that one exists."""
+    override = os.environ.get("UNITARES_SECRETS_ENV")
+    if override:
+        return Path(os.path.expanduser(override))
+    neutral = Path(os.path.expanduser("~/.config/unitares/secrets.env"))
+    legacy = Path(os.path.expanduser("~/.config/cirwel/secrets.env"))
+    if not neutral.exists() and legacy.exists():
+        return legacy
+    return neutral
+
+
 def _load_env_file() -> None:
     """Load a simple KEY=VALUE env file without overriding existing env."""
-    env_path = os.path.expanduser(
-        os.environ.get("UNITARES_SECRETS_ENV", "~/.config/cirwel/secrets.env")
-    )
-    path = Path(env_path)
+    path = _secrets_env_path()
     if not path.exists():
         return
     try:
@@ -231,14 +253,55 @@ def _enabled() -> bool:
     }
 
 
-def _bearer_token() -> str:
+_BEARER_ENV_NAMES = (
+    "LEASE_PLANE_BEARER_TOKEN",
+    "UNITARES_LEASE_PLANE_BEARER_TOKEN",
+    "GOVERNANCE_TOKEN",
+)
+
+
+def _bearer_from_env() -> str:
+    for name in _BEARER_ENV_NAMES:
+        value = (os.environ.get(name) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _configured_bearer_token() -> str:
+    # Any bearer the process environment already names wins, under whichever
+    # alias; the secrets file only fills in when the environment has none, so
+    # its primary key cannot shadow an alias the operator set explicitly.
+    token = _bearer_from_env()
+    if token:
+        return token
     _load_env_file()
-    return (
-        os.environ.get("LEASE_PLANE_BEARER_TOKEN")
-        or os.environ.get("UNITARES_LEASE_PLANE_BEARER_TOKEN")
-        or os.environ.get("GOVERNANCE_TOKEN")
-        or ""
-    ).strip()
+    return _bearer_from_env()
+
+
+def _is_loopback_url(url: str) -> bool:
+    try:
+        host = urllib.parse.urlsplit(url).hostname or ""
+    except ValueError:
+        return False
+    return host.lower() in _LOOPBACK_HOSTS
+
+
+def _bearer_token_with_source() -> tuple[str, str]:
+    """The bearer to present, and where it came from: "configured",
+    "compose_default" (loopback lease plane, nothing configured) or "none"."""
+    token = _configured_bearer_token()
+    if token:
+        return token, "configured"
+    # Required mode is an explicit fail-closed policy; it names its bearer
+    # rather than inheriting a development default.
+    if _is_loopback_url(_base_url()) and not _required():
+        return COMPOSE_DEFAULT_BEARER, "compose_default"
+    return "", "none"
+
+
+def _bearer_token() -> str:
+    return _bearer_token_with_source()[0]
 
 
 def _base_url() -> str:
@@ -1201,6 +1264,128 @@ def cmd_release_batch(args: argparse.Namespace, stdin_text: str) -> int:
     return 0
 
 
+def lease_status(timeout_s: float = 0.5, deadline_s: float = 1.5) -> dict[str, Any]:
+    """Whether edits in this environment are actually lease-protected.
+
+    Reads GET /v1/health with the bearer the edit hook would use, so "on"
+    means an acquire would authenticate, not merely that a port is open.
+    SessionStart calls this, so the whole probe (DNS, redirects, a slowly
+    streamed body) is bounded by ``deadline_s`` of wall clock, not only by the
+    per-operation socket timeout.
+    """
+    result: dict[str, Any] = {}
+
+    def run() -> None:
+        result.update(_lease_status_unbounded(timeout_s))
+
+    worker = threading.Thread(target=run, name="lease-status-probe", daemon=True)
+    worker.start()
+    worker.join(max(0.05, deadline_s))
+    if worker.is_alive() or not result:
+        return {
+            "state": "off",
+            "reason": "unreachable",
+            "url": _base_url(),
+            "error": "deadline_exceeded",
+        }
+    return result
+
+
+def _lease_status_unbounded(timeout_s: float) -> dict[str, Any]:
+    url = _base_url()
+    if not _enabled():
+        return {"state": "disabled", "url": url}
+    token, source = _bearer_token_with_source()
+    if not token:
+        return {"state": "off", "reason": "no_bearer", "url": url, "bearer": source}
+    request = urllib.request.Request(
+        url + "/v1/health",
+        headers={"Accept": "application/json", "Authorization": f"Bearer {token}"},
+        method="GET",
+    )
+    raw = b""
+    try:
+        with authorization_safe_urlopen(request, timeout=max(0.05, timeout_s)) as response:
+            code = response.status
+            raw = response.read(65536)
+    except urllib.error.HTTPError as exc:
+        code = exc.code
+    except Exception as exc:
+        return {
+            "state": "off",
+            "reason": "unreachable",
+            "url": url,
+            "bearer": source,
+            "error": type(exc).__name__,
+        }
+    if 200 <= code < 300:
+        # A 2xx alone could come from any web server on that port; "on" needs
+        # the lease plane's own health shape, the protocol the acquire speaks.
+        try:
+            body = json.loads(raw.decode("utf-8")) if raw else {}
+        except (UnicodeDecodeError, ValueError):
+            body = {}
+        protocol = body.get("protocol_version") if isinstance(body, dict) else None
+        if (
+            isinstance(body, dict)
+            and body.get("ok") is True
+            and isinstance(protocol, str)
+            and protocol.startswith("v1.")
+        ):
+            return {"state": "on", "url": url, "bearer": source, "protocol_version": protocol}
+        return {"state": "off", "reason": "not_a_lease_plane", "url": url, "bearer": source}
+    if code in (401, 403):
+        return {"state": "off", "reason": "bearer_rejected", "url": url, "bearer": source}
+    return {"state": "off", "reason": f"http_{code}", "url": url, "bearer": source}
+
+
+def _status_line(status: dict[str, Any]) -> str:
+    """One line for session context when leases are enabled but not working;
+    empty when they work or were switched off on purpose."""
+    if status.get("state") != "off":
+        return ""
+    url = status.get("url", "")
+    reason = status.get("reason")
+    if reason == "unreachable":
+        why = f"no lease plane answered at {url}"
+        fix = (
+            "Run the UNITARES lease plane, or set UNITARES_FILE_LEASES_ENABLED=0 "
+            "if you work with one agent at a time."
+        )
+    elif reason == "bearer_rejected":
+        why = f"the lease plane at {url} rejected the bearer"
+        fix = (
+            "Put the lease plane's LEASE_PLANE_BEARER_TOKEN in "
+            f"{_secrets_env_path()} or the environment."
+        )
+    elif reason == "no_bearer":
+        why = f"no bearer is configured for the lease plane at {url}"
+        fix = (
+            f"Set LEASE_PLANE_BEARER_TOKEN in {_secrets_env_path()} or the environment."
+        )
+    elif reason == "not_a_lease_plane":
+        why = f"the service at {url} does not answer as a v1 lease plane"
+        fix = "Point LEASE_PLANE_BASE_URL at the UNITARES lease plane."
+    else:
+        why = f"the lease plane at {url} answered {reason}"
+        fix = "Check the lease plane's health."
+    return (
+        f"File leases: OFF ({why}). Edits here are not protected against another "
+        f"agent editing the same file at the same time. {fix}"
+    )
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    status = lease_status()
+    if args.format == "line":
+        line = _status_line(status)
+        if line:
+            print(line)
+    else:
+        print(json.dumps(status, sort_keys=True))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -1211,6 +1396,7 @@ def build_parser() -> argparse.ArgumentParser:
             "release-batch",
             "heartbeat-session",
             "release-session",
+            "status",
         ],
     )
     parser.add_argument("--workspace", default=os.getcwd())
@@ -1221,12 +1407,20 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional aggregate release-session deadline in seconds.",
     )
+    parser.add_argument(
+        "--format",
+        choices=("json", "line"),
+        default="json",
+        help="status output: the JSON record, or a context line only when leases are off.",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None, stdin_text: str | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.command == "status":
+        return cmd_status(args)
     text = sys.stdin.read() if stdin_text is None else stdin_text
     if args.command == "pre-edit":
         return cmd_pre_edit(args, text)

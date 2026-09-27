@@ -52,6 +52,26 @@ class LeaseHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(encoded)
 
+    health_token: str = "lease-token"
+    health_payload: dict = {"ok": True, "status": "ok", "protocol_version": "v1.0"}
+
+    def do_GET(self):  # noqa: N802 - BaseHTTPRequestHandler API
+        self.__class__.calls.append(
+            {"path": self.path, "authorization": self.headers.get("Authorization", "")}
+        )
+        if self.path != "/v1/health":
+            status, payload = 404, {"ok": False, "error": "not_found"}
+        elif self.headers.get("Authorization") == f"Bearer {self.__class__.health_token}":
+            status, payload = 200, self.__class__.health_payload
+        else:
+            status, payload = 401, {"ok": False, "error": "unauthorized"}
+        encoded = json.dumps(payload).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(encoded)))
+        self.end_headers()
+        self.wfile.write(encoded)
+
     def log_message(self, format, *args):  # noqa: A002
         return
 
@@ -59,6 +79,8 @@ class LeaseHandler(BaseHTTPRequestHandler):
 @pytest.fixture
 def lease_server():
     LeaseHandler.calls = []
+    LeaseHandler.health_token = "lease-token"
+    LeaseHandler.health_payload = {"ok": True, "status": "ok", "protocol_version": "v1.0"}
     LeaseHandler.acquire_response = {
         "ok": True,
         "lease": {
@@ -174,6 +196,8 @@ def test_pre_edit_missing_token_fails_open_by_default(tmp_path, monkeypatch):
     monkeypatch.delenv("UNITARES_LEASE_PLANE_BEARER_TOKEN", raising=False)
     monkeypatch.delenv("GOVERNANCE_TOKEN", raising=False)
     monkeypatch.setenv("UNITARES_SECRETS_ENV", str(tmp_path / "missing.env"))
+    # A remote lease plane: the loopback Compose default does not apply.
+    monkeypatch.setenv("LEASE_PLANE_BASE_URL", "http://lease-plane.invalid:8788")
 
     rc = file_lease_hook.main(
         ["pre-edit", "--workspace", str(tmp_path)],
@@ -1289,3 +1313,195 @@ def test_surface_id_fail_open_outside_git(tmp_path):
     # Not a git repo -> degrade to the raw absolute path (never break an edit).
     s = file_lease_hook._surface_id("a/b.py", tmp_path)
     assert s == f"file://{tmp_path / 'a' / 'b.py'}"
+
+
+def _no_configured_bearer(monkeypatch, tmp_path):
+    for name in ("LEASE_PLANE_BEARER_TOKEN", "UNITARES_LEASE_PLANE_BEARER_TOKEN", "GOVERNANCE_TOKEN",
+                 "UNITARES_FILE_LEASES_REQUIRED", "UNITARES_FILE_LEASES_ENABLED"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("UNITARES_SECRETS_ENV", str(tmp_path / "missing.env"))
+
+
+def test_loopback_lease_plane_uses_the_compose_default_bearer(tmp_path, monkeypatch, lease_server):
+    """A default Compose install configures no bearer on the host; the hook
+    must still take leases from the loopback lease plane Compose started."""
+    _no_configured_bearer(monkeypatch, tmp_path)
+    monkeypatch.setenv("LEASE_PLANE_BASE_URL", f"http://127.0.0.1:{lease_server.server_address[1]}")
+
+    rc = file_lease_hook.main(
+        ["pre-edit", "--workspace", str(tmp_path)],
+        stdin_text=_payload(tool_use_id="toolu_compose_default"),
+    )
+
+    assert rc == 0
+    acquires = [c for c in LeaseHandler.calls if c["path"] == "/v1/lease/acquire"]
+    assert acquires
+    assert acquires[0]["authorization"] == f"Bearer {file_lease_hook.COMPOSE_DEFAULT_BEARER}"
+
+
+def test_configured_bearer_wins_over_the_compose_default(tmp_path, monkeypatch, lease_server):
+    _no_configured_bearer(monkeypatch, tmp_path)
+    monkeypatch.setenv("LEASE_PLANE_BASE_URL", f"http://127.0.0.1:{lease_server.server_address[1]}")
+    monkeypatch.setenv("LEASE_PLANE_BEARER_TOKEN", "operator-token")
+    assert file_lease_hook._bearer_token_with_source() == ("operator-token", "configured")
+
+
+def test_remote_lease_plane_never_gets_the_compose_default(tmp_path, monkeypatch):
+    _no_configured_bearer(monkeypatch, tmp_path)
+    monkeypatch.setenv("LEASE_PLANE_BASE_URL", "https://lease.example.com")
+    assert file_lease_hook._bearer_token_with_source() == ("", "none")
+
+
+def test_required_mode_never_uses_the_compose_default(tmp_path, monkeypatch):
+    _no_configured_bearer(monkeypatch, tmp_path)
+    monkeypatch.setenv("LEASE_PLANE_BASE_URL", "http://127.0.0.1:8788")
+    monkeypatch.setenv("UNITARES_FILE_LEASES_REQUIRED", "1")
+    assert file_lease_hook._bearer_token_with_source() == ("", "none")
+
+
+def _write_secret(path, token):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"LEASE_PLANE_BEARER_TOKEN={token}\n", encoding="utf-8")
+
+
+def test_secrets_file_resolution_order(tmp_path, monkeypatch):
+    _no_configured_bearer(monkeypatch, tmp_path)
+    monkeypatch.delenv("UNITARES_SECRETS_ENV", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("LEASE_PLANE_BASE_URL", "https://lease.example.com")
+    neutral = tmp_path / ".config" / "unitares" / "secrets.env"
+    legacy = tmp_path / ".config" / "cirwel" / "secrets.env"
+
+    assert file_lease_hook._secrets_env_path() == neutral
+
+    _write_secret(legacy, "legacy-token")
+    assert file_lease_hook._secrets_env_path() == legacy
+    assert file_lease_hook._configured_bearer_token() == "legacy-token"
+
+    monkeypatch.delenv("LEASE_PLANE_BEARER_TOKEN", raising=False)
+    _write_secret(neutral, "neutral-token")
+    assert file_lease_hook._secrets_env_path() == neutral
+    assert file_lease_hook._configured_bearer_token() == "neutral-token"
+
+    monkeypatch.delenv("LEASE_PLANE_BEARER_TOKEN", raising=False)
+    override = tmp_path / "elsewhere.env"
+    _write_secret(override, "override-token")
+    monkeypatch.setenv("UNITARES_SECRETS_ENV", str(override))
+    assert file_lease_hook._configured_bearer_token() == "override-token"
+
+
+def test_status_on_when_the_bearer_authenticates(tmp_path, monkeypatch, lease_server):
+    _lease_env(monkeypatch, lease_server)
+    status = file_lease_hook.lease_status()
+    assert status["state"] == "on"
+    assert status["bearer"] == "configured"
+    assert file_lease_hook._status_line(status) == ""
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [{}, {"ok": True}, {"ok": True, "protocol_version": "v2.0"}, {"ok": "yes", "protocol_version": "v1.0"}],
+)
+def test_status_needs_a_lease_plane_health_body(tmp_path, monkeypatch, lease_server, payload):
+    """A 2xx from some other service on that port must not read as protected."""
+    _lease_env(monkeypatch, lease_server)
+    LeaseHandler.health_payload = payload
+    status = file_lease_hook.lease_status()
+    assert status["state"] == "off"
+    assert status["reason"] == "not_a_lease_plane"
+    assert "does not answer as a v1 lease plane" in file_lease_hook._status_line(status)
+
+
+def test_status_off_when_the_bearer_is_rejected(tmp_path, monkeypatch, lease_server):
+    _no_configured_bearer(monkeypatch, tmp_path)
+    monkeypatch.setenv("LEASE_PLANE_BASE_URL", f"http://127.0.0.1:{lease_server.server_address[1]}")
+    status = file_lease_hook.lease_status()
+    assert status == {
+        "state": "off",
+        "reason": "bearer_rejected",
+        "url": f"http://127.0.0.1:{lease_server.server_address[1]}",
+        "bearer": "compose_default",
+    }
+    line = file_lease_hook._status_line(status)
+    assert line.startswith("File leases: OFF (the lease plane at ")
+    assert "LEASE_PLANE_BEARER_TOKEN" in line
+
+
+def test_status_off_when_no_lease_plane_answers(tmp_path, monkeypatch):
+    _no_configured_bearer(monkeypatch, tmp_path)
+    monkeypatch.setenv("LEASE_PLANE_BASE_URL", "http://127.0.0.1:1")
+    status = file_lease_hook.lease_status()
+    assert status["state"] == "off"
+    assert status["reason"] == "unreachable"
+    line = file_lease_hook._status_line(status)
+    assert "no lease plane answered at http://127.0.0.1:1" in line
+    assert "UNITARES_FILE_LEASES_ENABLED=0" in line
+
+
+def test_status_is_silent_when_leases_are_switched_off(tmp_path, monkeypatch):
+    _no_configured_bearer(monkeypatch, tmp_path)
+    monkeypatch.setenv("UNITARES_FILE_LEASES_ENABLED", "0")
+    status = file_lease_hook.lease_status()
+    assert status["state"] == "disabled"
+    assert file_lease_hook._status_line(status) == ""
+
+
+def test_status_command_reads_no_stdin(tmp_path, monkeypatch, capsys):
+    _no_configured_bearer(monkeypatch, tmp_path)
+    monkeypatch.setenv("LEASE_PLANE_BASE_URL", "http://127.0.0.1:1")
+    monkeypatch.setattr("sys.stdin", None)
+    assert file_lease_hook.main(["status", "--format", "line"]) == 0
+    assert "File leases: OFF" in capsys.readouterr().out
+
+
+def test_session_start_says_when_file_leases_are_off(tmp_path):
+    from tests.test_session_start_golden import _render
+
+    context = _render(
+        tmp_path,
+        extra_env={
+            "UNITARES_FILE_LEASES_ENABLED": "1",
+            "LEASE_PLANE_BASE_URL": "http://127.0.0.1:1",
+        },
+    )
+    assert "File leases: OFF (no lease plane answered at http://127.0.0.1:1)" in context
+
+
+def test_session_start_adds_nothing_when_file_leases_work(tmp_path, lease_server):
+    from tests.test_session_start_golden import _render
+
+    context = _render(
+        tmp_path,
+        extra_env={
+            "UNITARES_FILE_LEASES_ENABLED": "1",
+            "LEASE_PLANE_BASE_URL": f"http://127.0.0.1:{lease_server.server_address[1]}",
+            "LEASE_PLANE_BEARER_TOKEN": "lease-token",
+        },
+    )
+    assert "File leases" not in context
+
+
+def test_an_environment_alias_beats_the_secrets_file(tmp_path, monkeypatch):
+    """GOVERNANCE_TOKEN in the environment must not be shadowed by the secrets
+    file's LEASE_PLANE_BEARER_TOKEN, which the loader inserts into os.environ."""
+    _no_configured_bearer(monkeypatch, tmp_path)
+    secrets = tmp_path / "secrets.env"
+    _write_secret(secrets, "file-token")
+    monkeypatch.setenv("UNITARES_SECRETS_ENV", str(secrets))
+    monkeypatch.setenv("GOVERNANCE_TOKEN", "env-alias-token")
+    assert file_lease_hook._configured_bearer_token() == "env-alias-token"
+
+
+def test_status_is_bounded_by_a_wall_clock_deadline(tmp_path, monkeypatch):
+    _no_configured_bearer(monkeypatch, tmp_path)
+
+    def stall(_timeout_s):
+        time.sleep(5)
+        return {"state": "on"}
+
+    monkeypatch.setattr(file_lease_hook, "_lease_status_unbounded", stall)
+    started = time.monotonic()
+    status = file_lease_hook.lease_status(deadline_s=0.2)
+    assert time.monotonic() - started < 1.0
+    assert status["state"] == "off"
+    assert status["error"] == "deadline_exceeded"

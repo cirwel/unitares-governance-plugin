@@ -69,6 +69,9 @@ def _render(tmp_path, *, host="claude", extra_env=None, session_id="golden-slot-
         # Git-sourced sibling briefing depends on the checkout it runs in.
         # Deterministic goldens must not embed the developer's worktrees.
         "UNITARES_HOOK_SKIP_WORKSPACE_BRIEFING": "1",
+        # The file-lease status line depends on whether a lease plane runs on
+        # this machine; tests/test_file_lease_hook.py pins it separately.
+        "UNITARES_FILE_LEASES_ENABLED": "0",
     }
     if extra_env:
         env.update(extra_env)
