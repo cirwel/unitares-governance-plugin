@@ -1264,9 +1264,11 @@ def lease_status(timeout_s: float = 0.5) -> dict[str, Any]:
         headers={"Accept": "application/json", "Authorization": f"Bearer {token}"},
         method="GET",
     )
+    raw = b""
     try:
         with authorization_safe_urlopen(request, timeout=max(0.05, timeout_s)) as response:
             code = response.status
+            raw = response.read(65536)
     except urllib.error.HTTPError as exc:
         code = exc.code
     except Exception as exc:
@@ -1278,7 +1280,21 @@ def lease_status(timeout_s: float = 0.5) -> dict[str, Any]:
             "error": type(exc).__name__,
         }
     if 200 <= code < 300:
-        return {"state": "on", "url": url, "bearer": source}
+        # A 2xx alone could come from any web server on that port; "on" needs
+        # the lease plane's own health shape, the protocol the acquire speaks.
+        try:
+            body = json.loads(raw.decode("utf-8")) if raw else {}
+        except (UnicodeDecodeError, ValueError):
+            body = {}
+        protocol = body.get("protocol_version") if isinstance(body, dict) else None
+        if (
+            isinstance(body, dict)
+            and body.get("ok") is True
+            and isinstance(protocol, str)
+            and protocol.startswith("v1.")
+        ):
+            return {"state": "on", "url": url, "bearer": source, "protocol_version": protocol}
+        return {"state": "off", "reason": "not_a_lease_plane", "url": url, "bearer": source}
     if code in (401, 403):
         return {"state": "off", "reason": "bearer_rejected", "url": url, "bearer": source}
     return {"state": "off", "reason": f"http_{code}", "url": url, "bearer": source}
@@ -1308,6 +1324,9 @@ def _status_line(status: dict[str, Any]) -> str:
         fix = (
             f"Set LEASE_PLANE_BEARER_TOKEN in {_secrets_env_path()} or the environment."
         )
+    elif reason == "not_a_lease_plane":
+        why = f"the service at {url} does not answer as a v1 lease plane"
+        fix = "Point LEASE_PLANE_BASE_URL at the UNITARES lease plane."
     else:
         why = f"the lease plane at {url} answered {reason}"
         fix = "Check the lease plane's health."

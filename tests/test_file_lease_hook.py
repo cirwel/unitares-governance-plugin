@@ -53,6 +53,7 @@ class LeaseHandler(BaseHTTPRequestHandler):
         self.wfile.write(encoded)
 
     health_token: str = "lease-token"
+    health_payload: dict = {"ok": True, "status": "ok", "protocol_version": "v1.0"}
 
     def do_GET(self):  # noqa: N802 - BaseHTTPRequestHandler API
         self.__class__.calls.append(
@@ -61,7 +62,7 @@ class LeaseHandler(BaseHTTPRequestHandler):
         if self.path != "/v1/health":
             status, payload = 404, {"ok": False, "error": "not_found"}
         elif self.headers.get("Authorization") == f"Bearer {self.__class__.health_token}":
-            status, payload = 200, {"ok": True}
+            status, payload = 200, self.__class__.health_payload
         else:
             status, payload = 401, {"ok": False, "error": "unauthorized"}
         encoded = json.dumps(payload).encode("utf-8")
@@ -79,6 +80,7 @@ class LeaseHandler(BaseHTTPRequestHandler):
 def lease_server():
     LeaseHandler.calls = []
     LeaseHandler.health_token = "lease-token"
+    LeaseHandler.health_payload = {"ok": True, "status": "ok", "protocol_version": "v1.0"}
     LeaseHandler.acquire_response = {
         "ok": True,
         "lease": {
@@ -1394,6 +1396,20 @@ def test_status_on_when_the_bearer_authenticates(tmp_path, monkeypatch, lease_se
     assert status["state"] == "on"
     assert status["bearer"] == "configured"
     assert file_lease_hook._status_line(status) == ""
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [{}, {"ok": True}, {"ok": True, "protocol_version": "v2.0"}, {"ok": "yes", "protocol_version": "v1.0"}],
+)
+def test_status_needs_a_lease_plane_health_body(tmp_path, monkeypatch, lease_server, payload):
+    """A 2xx from some other service on that port must not read as protected."""
+    _lease_env(monkeypatch, lease_server)
+    LeaseHandler.health_payload = payload
+    status = file_lease_hook.lease_status()
+    assert status["state"] == "off"
+    assert status["reason"] == "not_a_lease_plane"
+    assert "does not answer as a v1 lease plane" in file_lease_hook._status_line(status)
 
 
 def test_status_off_when_the_bearer_is_rejected(tmp_path, monkeypatch, lease_server):
