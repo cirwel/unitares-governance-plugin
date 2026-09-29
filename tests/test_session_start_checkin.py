@@ -943,6 +943,16 @@ class TestSkillInjection:
         assert "--- Governance Fundamentals (reference) ---" in ctx
         assert "EISV State Vector" in ctx
 
+    def test_excerpt_opt_in_tolerates_surrounding_whitespace(self, tmp_path):
+        """Values from .env files and plists often carry a space or newline."""
+        stdout, _ = _run_hook(
+            tmp_path,
+            "http://127.0.0.1:1",
+            host="codex",
+            extra_env={"UNITARES_HOOK_FUNDAMENTALS_EXCERPT": " on\n"},
+        )
+        assert "EISV State Vector" in _context(stdout)
+
     def test_unrecognized_excerpt_value_keeps_the_pointer(self, tmp_path):
         stdout, _ = _serve_and_run(
             tmp_path,

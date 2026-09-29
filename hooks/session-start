@@ -90,26 +90,37 @@ SKILL_POINTER=""
 FETCH_SKILLS_HELPER="${PLUGIN_ROOT}/scripts/_fetch_skills.py"
 SKILL_FETCHED=""
 SKILL_STDERR_FILE=""
-# Both supported hosts expose the bundled skills on demand. Claude Code
-# serves `unitares-governance:governance-fundamentals` through its Skill
-# tool, with its own freshness check at invocation time. Codex loads the
-# same directory through the plugin manifest (`"skills": "./skills/"` in
-# .codex-plugin/plugin.json) and lists each skill, with its SKILL.md path,
-# in the session's developer instructions. Injecting the 80-line excerpt
-# duplicates a surface the host already provides — ~4.3 KB per fresh
-# SessionStart and again on every post-TTL re-fire. Emit a pointer instead
-# and skip the fetch entirely (one less python spawn + server round-trip).
+# Both supported hosts expose the bundled skills on demand, so the hook
+# points at them instead of inlining an 80-line excerpt (~4.3 KB per fresh
+# SessionStart and again on every post-TTL re-fire), and skips the fetch
+# (one less python spawn + server round-trip). Claude Code serves
+# `unitares-governance:governance-fundamentals` through its Skill tool, so
+# its pointer names the skill to invoke. Codex loads the same directory
+# through the plugin manifest (`"skills": "./skills/"` in
+# .codex-plugin/plugin.json) but resolves a skill id to the plugin version
+# captured when the process started, which a marketplace refresh can
+# remove; its pointer therefore gives the SKILL.md path under this hook's
+# own PLUGIN_ROOT, which is the version running now. Neither host checks a
+# skill's freshness when it is read, so the pointer carries no staleness
+# marker, where the fetched excerpt could say it was stale or bundled.
 #
-# UNITARES_HOOK_FUNDAMENTALS_EXCERPT=on restores the inline excerpt, with
-# its server fetch, offline-mirror fallback, and freshness warning, for a
-# host build that does not load plugin skills.
-FUNDAMENTALS_EXCERPT_MODE="$(printf '%s' "${UNITARES_HOOK_FUNDAMENTALS_EXCERPT:-off}" | tr '[:upper:]' '[:lower:]')"
+# The pointer is used only when the skill file exists under PLUGIN_ROOT; an
+# install without it gets the excerpt. UNITARES_HOOK_FUNDAMENTALS_EXCERPT=on
+# restores the excerpt, with its server fetch and offline-mirror fallback,
+# for a host build that does not load plugin skills.
+FUNDAMENTALS_EXCERPT_MODE="$(printf '%s' "${UNITARES_HOOK_FUNDAMENTALS_EXCERPT:-off}" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
 case "${FUNDAMENTALS_EXCERPT_MODE}" in
   1|on|true|yes) FUNDAMENTALS_EXCERPT_MODE="on" ;;
   *) FUNDAMENTALS_EXCERPT_MODE="off" ;;
 esac
-if [[ "${FUNDAMENTALS_EXCERPT_MODE}" != "on" ]]; then
-  SKILL_POINTER="Full reference available on demand: invoke \`unitares-governance:governance-fundamentals\` for metric semantics (EISV dimensions, basins, verdicts, calibration, recovery), or \`unitares-governance:governance-lifecycle\` for the identity ontology (onboarding, \`force_new\`, lineage via \`parent_agent_id\`, proof-owned resume). Read the relevant one before interpreting metrics or declaring lineage; do not guess semantics."
+FUNDAMENTALS_SKILL_MD="${PLUGIN_ROOT}/skills/governance-fundamentals/SKILL.md"
+LIFECYCLE_SKILL_MD="${PLUGIN_ROOT}/skills/governance-lifecycle/SKILL.md"
+if [[ "${FUNDAMENTALS_EXCERPT_MODE}" != "on" && -f "${FUNDAMENTALS_SKILL_MD}" ]]; then
+  if [[ "${HOOK_HOST}" == "claude" ]]; then
+    SKILL_POINTER="Full reference available on demand: invoke \`unitares-governance:governance-fundamentals\` for metric semantics (EISV dimensions, basins, verdicts, calibration, recovery), or \`unitares-governance:governance-lifecycle\` for the identity ontology (onboarding, \`force_new\`, lineage via \`parent_agent_id\`, proof-owned resume). Read the relevant one before interpreting metrics or declaring lineage; do not guess semantics."
+  else
+    SKILL_POINTER="Full reference available on demand: read ${FUNDAMENTALS_SKILL_MD} (skill \`unitares-governance:governance-fundamentals\`) for metric semantics (EISV dimensions, basins, verdicts, calibration, recovery), or ${LIFECYCLE_SKILL_MD} (\`unitares-governance:governance-lifecycle\`) for the identity ontology (onboarding, \`force_new\`, lineage via \`parent_agent_id\`, proof-owned resume). Read the relevant one before interpreting metrics or declaring lineage; do not guess semantics."
+  fi
 elif [[ -f "${FETCH_SKILLS_HELPER}" ]]; then
   SKILL_STDERR_FILE=$(mktemp -t unitares-fetch-skills.XXXXXX 2>/dev/null || true)
   if [[ -n "${SKILL_STDERR_FILE}" ]]; then
@@ -134,7 +145,7 @@ elif [[ -f "${FETCH_SKILLS_HELPER}" ]]; then
   fi
 fi
 if [[ -n "${SKILL_POINTER}" ]]; then
-  : # default on every host: pointer only — never materialize excerpt content
+  : # pointer (the default where the skill file exists): never materialize excerpt content
 elif [[ -n "${SKILL_FETCHED}" ]]; then
   SKILL_CONTENT="$(printf '%s\n' "${SKILL_FETCHED}" | sed -n '1,80p')"
 else
@@ -652,9 +663,9 @@ ${RECOVERY_GUIDANCE}"
 ${WORKSPACE_LINEAGE_HINT}"
   fi
 
-  # Skip the Fundamentals block in compact mode. The freshness warning
-  # (if any) still injects on the *next* fresh-workspace fire when the
-  # full block returns, so calibration on stale skill files isn't lost.
+  # Skip the Fundamentals block in compact mode. A freshness warning, when
+  # the excerpt path produces one, injects on the next fresh-workspace fire
+  # when the full block returns.
   if [[ "${ANCHOR_RESUME_ENABLED}" != "1" && "${COMPACT_MODE}" != "1" && "${NUDGE_ALREADY_SHOWN}" != "1" ]]; then
     if [[ -n "${SKILL_CONTENT}" ]]; then
       CONTEXT="${CONTEXT}

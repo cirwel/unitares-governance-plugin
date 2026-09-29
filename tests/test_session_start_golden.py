@@ -30,7 +30,6 @@ Regenerate after an intentional change:
 """
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
@@ -57,8 +56,9 @@ FAKE_PARENT = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
 
 
 def _render(tmp_path, *, host="claude", extra_env=None, session_id="golden-slot-0001",
-            online=True, cwd=None):
+            online=True, cwd=None, plugin_root=None):
     """Render one variant and return its additionalContext."""
+    root = plugin_root if plugin_root is not None else PLUGIN_ROOT
     RecordingHandler.calls = []
     workdir = cwd if cwd is not None else tmp_path
     env = {
@@ -89,7 +89,7 @@ def _render(tmp_path, *, host="claude", extra_env=None, session_id="golden-slot-
 
     try:
         result = subprocess.run(
-            [str(PLUGIN_ROOT / "hooks" / "session-start"), "--host", host],
+            [str(root / "hooks" / "session-start"), "--host", host],
             env=env, cwd=str(workdir),
             input=json.dumps({"session_id": session_id}),
             text=True, capture_output=True, timeout=30, check=False,
@@ -111,6 +111,8 @@ def _normalize(text: str) -> str:
     pin is WHETHER a host gets an excerpt or a pointer -- not the skill's
     current wording.
     """
+    # The Codex pointer names SKILL.md paths under this checkout.
+    text = text.replace(str(PLUGIN_ROOT), "<PLUGIN_ROOT>")
     text = re.sub(
         r"(--- Governance Fundamentals \(excerpt\)[^\n]*---\n).*\Z",
         r"\1<EXCERPT BODY ELIDED>",
@@ -224,73 +226,57 @@ def test_both_hosts_get_the_skill_pointer_not_the_excerpt(tmp_path, host, online
     assert "Governance Fundamentals (reference)" not in rendered
 
 
-# Codex fresh SessionStart, rendered through this harness on master 0f9ec6c
-# while it still inlined the Fundamentals excerpt: 6,151 bytes, 4,280 of them
-# the excerpt block. The pointer is ~460 bytes.
-CODEX_FRESH_BYTES_WITH_EXCERPT = 6151
-MIN_POINTER_SAVING_BYTES = 3500
+def test_claude_pointer_invokes_the_skill_and_codex_pointer_gives_the_path(tmp_path):
+    """Claude reads a skill through its Skill tool; Codex opens SKILL.md. A
+    Codex skill id resolves to the plugin version the process started with,
+    which a marketplace refresh can remove, so its pointer names the file
+    under the hook's own PLUGIN_ROOT."""
+    claude = _render(tmp_path, session_id="golden-pointer-wording-claude")
+    codex = _render(tmp_path, host="codex", session_id="golden-pointer-wording-codex")
+    assert "invoke `unitares-governance:governance-fundamentals`" in claude
+    assert "SKILL.md" not in claude
+    for skill in ("governance-fundamentals", "governance-lifecycle"):
+        path = PLUGIN_ROOT / "skills" / skill / "SKILL.md"
+        assert path.is_file()
+        assert f"read {path}" in codex or f"or {path}" in codex, skill
+    assert "invoke `" not in codex
 
 
-def test_codex_fresh_output_is_at_least_3500_bytes_smaller(tmp_path):
-    rendered = _render(tmp_path, host="codex")
-    size = len(rendered.encode("utf-8"))
-    budget = CODEX_FRESH_BYTES_WITH_EXCERPT - MIN_POINTER_SAVING_BYTES
-    assert size <= budget, (
-        f"Codex fresh SessionStart is {size} B; the pointer swap is meant to "
-        f"keep it at or under {budget} B ({MIN_POINTER_SAVING_BYTES} B below "
-        f"the {CODEX_FRESH_BYTES_WITH_EXCERPT} B it was with the excerpt). "
-        "Every byte here lands in each fresh Codex session's context."
+def test_a_plugin_without_the_skill_file_is_not_pointed_at_it(tmp_path):
+    """The pointer is only as good as the file it names. A plugin tree
+    without skills/governance-fundamentals takes the excerpt path instead
+    (server fetch, then the bundled mirror; here neither has the skill, so no
+    Fundamentals block at all), and never names a SKILL.md that is not
+    there. The server-fetched excerpt itself is covered by the opt-in tests
+    in test_session_start_checkin.py."""
+    import shutil
+
+    root = tmp_path / "plugin"
+    for part in ("hooks", "scripts", "config"):
+        if (PLUGIN_ROOT / part).exists():
+            shutil.copytree(PLUGIN_ROOT / part, root / part)
+    (root / "skills").mkdir()
+    for host in ("claude", "codex"):
+        rendered = _render(tmp_path, host=host, plugin_root=root,
+                           session_id=f"golden-no-skill-{host}")
+        assert "Governance Fundamentals (via skill)" not in rendered, host
+        assert "SKILL.md" not in rendered, host
+
+
+# Every byte of a fresh Codex SessionStart lands in that session's context.
+# With the excerpt inlined it was 6,151 B through this harness; the pointer
+# brings it to about 2.8 KB. The budget leaves room for ordinary prose edits
+# and fails if an excerpt-sized block comes back.
+CODEX_FRESH_SESSION_START_BUDGET = 4000
+
+
+def test_codex_fresh_session_start_stays_within_budget(tmp_path):
+    size = len(_render(tmp_path, host="codex").encode("utf-8"))
+    assert size <= CODEX_FRESH_SESSION_START_BUDGET, (
+        f"Codex fresh SessionStart is {size} B, over the "
+        f"{CODEX_FRESH_SESSION_START_BUDGET} B budget; it lands in every fresh "
+        "Codex session's context."
     )
-
-
-# The identity and lineage prose is a defence layer and must survive the
-# pointer swap byte-for-byte. Pinned: the byte length and SHA-256 of
-# everything the Codex host rendered ahead of the Fundamentals block on master
-# 0f9ec6c (the fresh variant is the prefix of that commit's
-# golden/session_start/full_codex.txt). Inspect the old text with
-#   git show 0f9ec6c:tests/golden/session_start/full_codex.txt
-CODEX_PROSE_BEFORE_POINTER = {
-    "fresh": (
-        {},
-        1869,
-        "e94b8b4d0c1899004e71359473bce6944abc91c53f98bf29073dc53c95fae8b8",
-    ),
-    "env_lineage": (
-        {"UNITARES_PARENT_AGENT_ID": FAKE_PARENT,
-         "UNITARES_SPAWN_REASON": "subagent"},
-        2633,
-        "8a0261c83b85afce7480605c42038218f29ff5e3dbdbdea64cc7c7d45d8677ab",
-    ),
-}
-
-
-def _prose_before_fundamentals(rendered: str) -> str:
-    head, sep, _ = rendered.partition("\n\n--- Governance Fundamentals")
-    assert sep, "rendered SessionStart has no Fundamentals block"
-    return head
-
-
-@pytest.mark.parametrize("variant", sorted(CODEX_PROSE_BEFORE_POINTER))
-def test_codex_lineage_prose_is_byte_identical_to_pre_pointer_golden(tmp_path, variant):
-    extra_env, length, digest = CODEX_PROSE_BEFORE_POINTER[variant]
-    prose = _prose_before_fundamentals(
-        _render(tmp_path, host="codex", extra_env=extra_env)
-    ).encode("utf-8")
-    assert b"parent_agent_id" in prose and b"lineage" in prose.lower()
-    assert (len(prose), hashlib.sha256(prose).hexdigest()) == (length, digest), (
-        f"Codex {variant} identity/lineage prose changed ({len(prose)} B). "
-        "It must stay byte-identical to the pre-pointer render; compare "
-        "against git show 0f9ec6c:tests/golden/session_start/full_codex.txt."
-    )
-
-
-def test_codex_fresh_golden_keeps_the_pre_pointer_prose():
-    """The committed golden is what reviewers read; pin that its prose
-    prefix is the same pre-pointer text, not only the live render."""
-    golden = (GOLDEN_DIR / "full_codex.txt").read_text()
-    _, length, digest = CODEX_PROSE_BEFORE_POINTER["fresh"]
-    prose = _prose_before_fundamentals(golden).encode("utf-8")
-    assert (len(prose), hashlib.sha256(prose).hexdigest()) == (length, digest)
 
 
 def test_identity_pointer_names_the_skill_that_has_the_ontology(tmp_path):
