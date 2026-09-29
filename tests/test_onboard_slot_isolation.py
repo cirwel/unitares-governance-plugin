@@ -676,7 +676,7 @@ def _archive_agent(result: dict[str, Any]) -> str | None:
     production (operator caught a pair-per-run accumulation 2026-04-17).
 
     The call carries the created identity's own ``client_session_id``:
-    ``archive_agent`` sits behind the identity middleware, and an unbound
+    ``agent(action="archive")`` sits behind the identity middleware, and an unbound
     REST caller gets a success-shaped ``identity_required`` refusal, which
     the old teardown swallowed (469 of 501 ``itest-plugin`` rows were never
     archived, 2026-09-19). ``force`` skips the liveness guard, which reads a
@@ -686,8 +686,9 @@ def _archive_agent(result: dict[str, Any]) -> str | None:
     if not uuid:
         return None
     payload = {
-        "name": "archive_agent",
+        "name": "agent",
         "arguments": {
+            "action": "archive",
             "agent_id": uuid,
             "client_session_id": result.get("client_session_id", ""),
             "reason": "itest teardown",
