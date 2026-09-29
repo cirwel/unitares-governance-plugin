@@ -37,5 +37,5 @@ tool reports degraded or paused state.
 
 Recovery: call identity(client_session_id=...) to inspect continuity, check_working_state() for governance state, and health_check() for server health.
 
---- Governance Fundamentals (excerpt) (bundled mirror — server unreachable, may be stale) ---
-<EXCERPT BODY ELIDED>
+--- Governance Fundamentals (via skill) ---
+Full reference available on demand: invoke `unitares-governance:governance-fundamentals` for metric semantics (EISV dimensions, basins, verdicts, calibration, recovery), or `unitares-governance:governance-lifecycle` for the identity ontology (onboarding, `force_new`, lineage via `parent_agent_id`, proof-owned resume). Read the relevant one before interpreting metrics or declaring lineage; do not guess semantics.

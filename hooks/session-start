@@ -88,14 +88,25 @@ SKILL_POINTER=""
 FETCH_SKILLS_HELPER="${PLUGIN_ROOT}/scripts/_fetch_skills.py"
 SKILL_FETCHED=""
 SKILL_STDERR_FILE=""
-# Claude Code exposes the bundled skill on demand via the Skill tool
-# (`unitares-governance:governance-fundamentals`), with its own freshness
-# check at invocation time. Injecting the 80-line excerpt there duplicates
-# a surface the host already provides — ~1k tokens per fresh session-start
-# and again on every post-TTL re-fire. Emit a pointer instead and skip the
-# fetch entirely (one less python spawn + server round-trip at SessionStart).
-# Codex and other hosts have no skill system; they keep the full excerpt.
-if [[ "${HOOK_HOST}" == "claude" ]]; then
+# Both supported hosts expose the bundled skills on demand. Claude Code
+# serves `unitares-governance:governance-fundamentals` through its Skill
+# tool, with its own freshness check at invocation time. Codex loads the
+# same directory through the plugin manifest (`"skills": "./skills/"` in
+# .codex-plugin/plugin.json) and lists each skill, with its SKILL.md path,
+# in the session's developer instructions. Injecting the 80-line excerpt
+# duplicates a surface the host already provides — ~4.3 KB per fresh
+# SessionStart and again on every post-TTL re-fire. Emit a pointer instead
+# and skip the fetch entirely (one less python spawn + server round-trip).
+#
+# UNITARES_HOOK_FUNDAMENTALS_EXCERPT=on restores the inline excerpt, with
+# its server fetch, offline-mirror fallback, and freshness warning, for a
+# host build that does not load plugin skills.
+FUNDAMENTALS_EXCERPT_MODE="$(printf '%s' "${UNITARES_HOOK_FUNDAMENTALS_EXCERPT:-off}" | tr '[:upper:]' '[:lower:]')"
+case "${FUNDAMENTALS_EXCERPT_MODE}" in
+  1|on|true|yes) FUNDAMENTALS_EXCERPT_MODE="on" ;;
+  *) FUNDAMENTALS_EXCERPT_MODE="off" ;;
+esac
+if [[ "${FUNDAMENTALS_EXCERPT_MODE}" != "on" ]]; then
   SKILL_POINTER="Full reference available on demand: invoke \`unitares-governance:governance-fundamentals\` for metric semantics (EISV dimensions, basins, verdicts, calibration, recovery), or \`unitares-governance:governance-lifecycle\` for the identity ontology (onboarding, \`force_new\`, lineage via \`parent_agent_id\`, proof-owned resume). Read the relevant one before interpreting metrics or declaring lineage; do not guess semantics."
 elif [[ -f "${FETCH_SKILLS_HELPER}" ]]; then
   SKILL_STDERR_FILE=$(mktemp -t unitares-fetch-skills.XXXXXX 2>/dev/null || true)
@@ -121,7 +132,7 @@ elif [[ -f "${FETCH_SKILLS_HELPER}" ]]; then
   fi
 fi
 if [[ -n "${SKILL_POINTER}" ]]; then
-  : # claude host: pointer only — never materialize excerpt content
+  : # default on every host: pointer only — never materialize excerpt content
 elif [[ -n "${SKILL_FETCHED}" ]]; then
   SKILL_CONTENT="$(printf '%s\n' "${SKILL_FETCHED}" | sed -n '1,80p')"
 else
@@ -229,8 +240,8 @@ fi
 
 # ---------------------------------------------------------------------------
 # Compact mode — when this workspace already has a fresh slot-scoped cache
-# (mtime < 1h), the agent has almost certainly seen the full Fundamentals
-# excerpt and the long onboard-prose this hour. Per-turn SessionStart
+# (mtime < 1h), the agent has almost certainly seen the Fundamentals
+# block and the long onboard-prose this hour. Per-turn SessionStart
 # resume events can fire frequently in normal host use; re-injecting
 # the full ~3KB context every fire is repetition without information.
 # We collapse to a one-line prompt and skip the Fundamentals block.
@@ -572,7 +583,7 @@ manufacture a check-in to satisfy this note.
 ${RECOVERY_GUIDANCE}"
   elif [[ "${COMPACT_MODE}" == "1" ]]; then
     # Compact prose: assumes the agent saw the full note + Fundamentals
-    # excerpt earlier this hour (workspace cache mtime < TTL). Keep
+    # block earlier this hour (workspace cache mtime < TTL). Keep
     # `force_new=true` (force_new pin-resume guard, regression-tested),
     # the ontology pointer (so a forgetful agent can re-read), and the
     # operator escape hatch — drop everything else.
@@ -639,7 +650,7 @@ ${RECOVERY_GUIDANCE}"
 ${WORKSPACE_LINEAGE_HINT}"
   fi
 
-  # Skip the Fundamentals excerpt in compact mode. The freshness warning
+  # Skip the Fundamentals block in compact mode. The freshness warning
   # (if any) still injects on the *next* fresh-workspace fire when the
   # full block returns, so calibration on stale skill files isn't lost.
   if [[ "${ANCHOR_RESUME_ENABLED}" != "1" && "${COMPACT_MODE}" != "1" && "${NUDGE_ALREADY_SHOWN}" != "1" ]]; then

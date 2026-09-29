@@ -30,6 +30,7 @@ Regenerate after an intentional change:
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -145,8 +146,9 @@ def test_golden_full_claude(tmp_path):
 
 
 def test_golden_full_codex(tmp_path):
-    """Codex has no skill system, so it gets the excerpt where Claude gets
-    a pointer. Pinning both sides keeps that host split honest."""
+    """Codex loads plugin skills through its manifest, so it gets the same
+    skill pointer Claude does. Its host-specific lines (recovery route,
+    lazy-onboarding host name) still differ, so it keeps its own golden."""
     _assert_golden("full_codex", _render(tmp_path, host="codex"))
 
 
@@ -170,6 +172,10 @@ def test_golden_anchored(tmp_path):
 
 def test_golden_offline(tmp_path):
     _assert_golden("offline", _render(tmp_path, online=False))
+
+
+def test_golden_offline_codex(tmp_path):
+    _assert_golden("offline_codex", _render(tmp_path, host="codex", online=False))
 
 
 # --------------------------------------------------------------------------
@@ -197,18 +203,94 @@ def test_full_variant_still_carries_affordance(tmp_path, term):
     )
 
 
-def test_claude_gets_pointer_codex_gets_excerpt(tmp_path):
-    """The host split is a real behavioural contract, not a formatting detail.
+SKILL_POINTER_NAMES = (
+    "unitares-governance:governance-fundamentals",
+    "unitares-governance:governance-lifecycle",
+)
 
-    Distinct session_ids matter: the first render writes a nudge marker for
-    its slot, and a second render reusing that slot gets the shortened
-    already-shown variant instead of the full one.
-    """
-    claude = _render(tmp_path, session_id="golden-split-claude")
-    codex = _render(tmp_path, host="codex", session_id="golden-split-codex")
-    assert "invoke" in claude and "governance-fundamentals" in claude
-    assert "--- Governance Fundamentals (excerpt)" not in claude
-    assert "--- Governance Fundamentals (excerpt)" in codex
+
+@pytest.mark.parametrize("online", [True, False], ids=["online", "offline"])
+@pytest.mark.parametrize("host", ["claude", "codex"])
+def test_both_hosts_get_the_skill_pointer_not_the_excerpt(tmp_path, host, online):
+    """Both hosts load the bundled skills on demand, so neither gets the
+    80-line excerpt; each gets the pointer naming both skills. The offline
+    path carries the pointer too."""
+    rendered = _render(tmp_path, host=host, online=online,
+                       session_id=f"golden-pointer-{host}-{online}")
+    assert "--- Governance Fundamentals (via skill) ---" in rendered
+    for name in SKILL_POINTER_NAMES:
+        assert name in rendered, f"{host} pointer no longer names {name}"
+    assert "Governance Fundamentals (excerpt)" not in rendered
+    assert "Governance Fundamentals (reference)" not in rendered
+
+
+# Codex fresh SessionStart, rendered through this harness on master 0f9ec6c
+# while it still inlined the Fundamentals excerpt: 6,151 bytes, 4,280 of them
+# the excerpt block. The pointer is ~460 bytes.
+CODEX_FRESH_BYTES_WITH_EXCERPT = 6151
+MIN_POINTER_SAVING_BYTES = 3500
+
+
+def test_codex_fresh_output_is_at_least_3500_bytes_smaller(tmp_path):
+    rendered = _render(tmp_path, host="codex")
+    size = len(rendered.encode("utf-8"))
+    budget = CODEX_FRESH_BYTES_WITH_EXCERPT - MIN_POINTER_SAVING_BYTES
+    assert size <= budget, (
+        f"Codex fresh SessionStart is {size} B; the pointer swap is meant to "
+        f"keep it at or under {budget} B ({MIN_POINTER_SAVING_BYTES} B below "
+        f"the {CODEX_FRESH_BYTES_WITH_EXCERPT} B it was with the excerpt). "
+        "Every byte here lands in each fresh Codex session's context."
+    )
+
+
+# The identity and lineage prose is a defence layer and must survive the
+# pointer swap byte-for-byte. Pinned: the byte length and SHA-256 of
+# everything the Codex host rendered ahead of the Fundamentals block on master
+# 0f9ec6c (the fresh variant is the prefix of that commit's
+# golden/session_start/full_codex.txt). Inspect the old text with
+#   git show 0f9ec6c:tests/golden/session_start/full_codex.txt
+CODEX_PROSE_BEFORE_POINTER = {
+    "fresh": (
+        {},
+        1869,
+        "e94b8b4d0c1899004e71359473bce6944abc91c53f98bf29073dc53c95fae8b8",
+    ),
+    "env_lineage": (
+        {"UNITARES_PARENT_AGENT_ID": FAKE_PARENT,
+         "UNITARES_SPAWN_REASON": "subagent"},
+        2633,
+        "8a0261c83b85afce7480605c42038218f29ff5e3dbdbdea64cc7c7d45d8677ab",
+    ),
+}
+
+
+def _prose_before_fundamentals(rendered: str) -> str:
+    head, sep, _ = rendered.partition("\n\n--- Governance Fundamentals")
+    assert sep, "rendered SessionStart has no Fundamentals block"
+    return head
+
+
+@pytest.mark.parametrize("variant", sorted(CODEX_PROSE_BEFORE_POINTER))
+def test_codex_lineage_prose_is_byte_identical_to_pre_pointer_golden(tmp_path, variant):
+    extra_env, length, digest = CODEX_PROSE_BEFORE_POINTER[variant]
+    prose = _prose_before_fundamentals(
+        _render(tmp_path, host="codex", extra_env=extra_env)
+    ).encode("utf-8")
+    assert b"parent_agent_id" in prose and b"lineage" in prose.lower()
+    assert (len(prose), hashlib.sha256(prose).hexdigest()) == (length, digest), (
+        f"Codex {variant} identity/lineage prose changed ({len(prose)} B). "
+        "It must stay byte-identical to the pre-pointer render; compare "
+        "against git show 0f9ec6c:tests/golden/session_start/full_codex.txt."
+    )
+
+
+def test_codex_fresh_golden_keeps_the_pre_pointer_prose():
+    """The committed golden is what reviewers read; pin that its prose
+    prefix is the same pre-pointer text, not only the live render."""
+    golden = (GOLDEN_DIR / "full_codex.txt").read_text()
+    _, length, digest = CODEX_PROSE_BEFORE_POINTER["fresh"]
+    prose = _prose_before_fundamentals(golden).encode("utf-8")
+    assert (len(prose), hashlib.sha256(prose).hexdigest()) == (length, digest)
 
 
 def test_identity_pointer_names_the_skill_that_has_the_ontology(tmp_path):
