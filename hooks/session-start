@@ -3,10 +3,10 @@
 #
 # Identity-honesty Part C (Session C, 2026-04-17):
 # This hook no longer creates an identity on the agent's behalf. It confirms
-# governance is reachable, loads the fundamentals skill, and emits context
-# instructing the agent to make its own first MCP tool call (onboard /
-# identity / bind_session). The post-identity PostToolUse hook captures the
-# response and writes the session cache.
+# governance is reachable, points at the fundamentals and lifecycle skills,
+# and emits context instructing the agent to make its own first MCP tool
+# call (onboard / identity / bind_session). The post-identity PostToolUse
+# hook captures the response and writes the session cache.
 #
 # See docs/specs/2026-04-17-session-start-stops-creating-identities.md
 # in the unitares repo for the architectural rationale.
@@ -71,7 +71,9 @@ print(json.dumps(sys.argv[1])[1:-1])
 }
 
 # ---------------------------------------------------------------------------
-# Load a short reference snippet via S15-c fetch helper.
+# Fundamentals reference: a skill pointer by default. Only with
+# UNITARES_HOOK_FUNDAMENTALS_EXCERPT=on does the hook load a short reference
+# snippet via the S15-c fetch helper, as described below.
 #
 # The helper tries server fetch (cache → /v1/tools/call skills tool) and
 # falls back to the bundled mirror at
@@ -88,15 +90,37 @@ SKILL_POINTER=""
 FETCH_SKILLS_HELPER="${PLUGIN_ROOT}/scripts/_fetch_skills.py"
 SKILL_FETCHED=""
 SKILL_STDERR_FILE=""
-# Claude Code exposes the bundled skill on demand via the Skill tool
-# (`unitares-governance:governance-fundamentals`), with its own freshness
-# check at invocation time. Injecting the 80-line excerpt there duplicates
-# a surface the host already provides — ~1k tokens per fresh session-start
-# and again on every post-TTL re-fire. Emit a pointer instead and skip the
-# fetch entirely (one less python spawn + server round-trip at SessionStart).
-# Codex and other hosts have no skill system; they keep the full excerpt.
-if [[ "${HOOK_HOST}" == "claude" ]]; then
-  SKILL_POINTER="Full reference available on demand: invoke \`unitares-governance:governance-fundamentals\` for metric semantics (EISV dimensions, basins, verdicts, calibration, recovery), or \`unitares-governance:governance-lifecycle\` for the identity ontology (onboarding, \`force_new\`, lineage via \`parent_agent_id\`, proof-owned resume). Read the relevant one before interpreting metrics or declaring lineage; do not guess semantics."
+# Both supported hosts expose the bundled skills on demand, so the hook
+# points at them instead of inlining an 80-line excerpt (~4.3 KB per fresh
+# SessionStart and again on every post-TTL re-fire), and skips the fetch
+# (one less python spawn + server round-trip). Claude Code serves
+# `unitares-governance:governance-fundamentals` through its Skill tool, so
+# its pointer names the skill to invoke. Codex loads the same directory
+# through the plugin manifest (`"skills": "./skills/"` in
+# .codex-plugin/plugin.json) but resolves a skill id to the plugin version
+# captured when the process started, which a marketplace refresh can
+# remove; its pointer therefore gives the SKILL.md path under this hook's
+# own PLUGIN_ROOT, which is the version running now. Neither host checks a
+# skill's freshness when it is read, so the pointer carries no staleness
+# marker, where the fetched excerpt could say it was stale or bundled.
+#
+# The pointer names both skills, so it is used only when both SKILL.md files
+# exist under PLUGIN_ROOT; an install missing either gets the excerpt. UNITARES_HOOK_FUNDAMENTALS_EXCERPT=on
+# restores the excerpt, with its server fetch and offline-mirror fallback,
+# for a host build that does not load plugin skills.
+FUNDAMENTALS_EXCERPT_MODE="$(printf '%s' "${UNITARES_HOOK_FUNDAMENTALS_EXCERPT:-off}" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
+case "${FUNDAMENTALS_EXCERPT_MODE}" in
+  1|on|true|yes) FUNDAMENTALS_EXCERPT_MODE="on" ;;
+  *) FUNDAMENTALS_EXCERPT_MODE="off" ;;
+esac
+FUNDAMENTALS_SKILL_MD="${PLUGIN_ROOT}/skills/governance-fundamentals/SKILL.md"
+LIFECYCLE_SKILL_MD="${PLUGIN_ROOT}/skills/governance-lifecycle/SKILL.md"
+if [[ "${FUNDAMENTALS_EXCERPT_MODE}" != "on" && -f "${FUNDAMENTALS_SKILL_MD}" && -f "${LIFECYCLE_SKILL_MD}" ]]; then
+  if [[ "${HOOK_HOST}" == "claude" ]]; then
+    SKILL_POINTER="Full reference available on demand: invoke \`unitares-governance:governance-fundamentals\` for metric semantics (EISV dimensions, basins, verdicts, calibration, recovery), or \`unitares-governance:governance-lifecycle\` for the identity ontology (onboarding, \`force_new\`, lineage via \`parent_agent_id\`, proof-owned resume). Read the relevant one before interpreting metrics or declaring lineage; do not guess semantics."
+  else
+    SKILL_POINTER="Full reference available on demand: read ${FUNDAMENTALS_SKILL_MD} (skill \`unitares-governance:governance-fundamentals\`) for metric semantics (EISV dimensions, basins, verdicts, calibration, recovery), or ${LIFECYCLE_SKILL_MD} (\`unitares-governance:governance-lifecycle\`) for the identity ontology (onboarding, \`force_new\`, lineage via \`parent_agent_id\`, proof-owned resume). Read the relevant one before interpreting metrics or declaring lineage; do not guess semantics."
+  fi
 elif [[ -f "${FETCH_SKILLS_HELPER}" ]]; then
   SKILL_STDERR_FILE=$(mktemp -t unitares-fetch-skills.XXXXXX 2>/dev/null || true)
   if [[ -n "${SKILL_STDERR_FILE}" ]]; then
@@ -121,7 +145,7 @@ elif [[ -f "${FETCH_SKILLS_HELPER}" ]]; then
   fi
 fi
 if [[ -n "${SKILL_POINTER}" ]]; then
-  : # claude host: pointer only — never materialize excerpt content
+  : # pointer (the default where the skill file exists): never materialize excerpt content
 elif [[ -n "${SKILL_FETCHED}" ]]; then
   SKILL_CONTENT="$(printf '%s\n' "${SKILL_FETCHED}" | sed -n '1,80p')"
 else
@@ -229,8 +253,8 @@ fi
 
 # ---------------------------------------------------------------------------
 # Compact mode — when this workspace already has a fresh slot-scoped cache
-# (mtime < 1h), the agent has almost certainly seen the full Fundamentals
-# excerpt and the long onboard-prose this hour. Per-turn SessionStart
+# (mtime < 1h), the agent has almost certainly seen the Fundamentals
+# block and the long onboard-prose this hour. Per-turn SessionStart
 # resume events can fire frequently in normal host use; re-injecting
 # the full ~3KB context every fire is repetition without information.
 # We collapse to a one-line prompt and skip the Fundamentals block.
@@ -572,7 +596,7 @@ manufacture a check-in to satisfy this note.
 ${RECOVERY_GUIDANCE}"
   elif [[ "${COMPACT_MODE}" == "1" ]]; then
     # Compact prose: assumes the agent saw the full note + Fundamentals
-    # excerpt earlier this hour (workspace cache mtime < TTL). Keep
+    # block earlier this hour (workspace cache mtime < TTL). Keep
     # `force_new=true` (force_new pin-resume guard, regression-tested),
     # the ontology pointer (so a forgetful agent can re-read), and the
     # operator escape hatch — drop everything else.
@@ -639,9 +663,9 @@ ${RECOVERY_GUIDANCE}"
 ${WORKSPACE_LINEAGE_HINT}"
   fi
 
-  # Skip the Fundamentals excerpt in compact mode. The freshness warning
-  # (if any) still injects on the *next* fresh-workspace fire when the
-  # full block returns, so calibration on stale skill files isn't lost.
+  # Skip the Fundamentals block in compact mode. A freshness warning, when
+  # the excerpt path produces one, injects on the next fresh-workspace fire
+  # when the full block returns.
   if [[ "${ANCHOR_RESUME_ENABLED}" != "1" && "${COMPACT_MODE}" != "1" && "${NUDGE_ALREADY_SHOWN}" != "1" ]]; then
     if [[ -n "${SKILL_CONTENT}" ]]; then
       CONTEXT="${CONTEXT}

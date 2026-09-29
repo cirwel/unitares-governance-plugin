@@ -245,6 +245,7 @@ including `0` and `off` kill switches:
 | `UNITARES_HTTP_API_TOKEN` | unset | Client bearer token for governance REST calls, Claude's bundled MCP transport, and a separately registered authenticated Codex transport; hosted deployments must use one token accepted by the server |
 | `UNITARES_AGENT_PREFIX` | host-specific | Prefix for generated client-side names (`claude` or `codex` unless overridden) |
 | `UNITARES_AUTO_ONBOARD` | `on` | Let the host Stop hook create a slot-scoped identity before its first turn summary when needed |
+| `UNITARES_HOOK_FUNDAMENTALS_EXCERPT` | `off` | SessionStart points both hosts at the `governance-fundamentals` and `governance-lifecycle` skills; `on` inlines the ~4 KB Fundamentals excerpt instead, for a host build that does not load plugin skills |
 | `UNITARES_FILE_LEASES_ENABLED` | `1` | Enable host edit leases (Claude Edit/Write/MultiEdit; Codex apply_patch) |
 | `UNITARES_FILE_LEASES_REQUIRED` | `0` | Block edits when lease infrastructure is missing/unreachable; truthy values take precedence over `UNITARES_FILE_LEASES_ENABLED=0` |
 | `UNITARES_FILE_LEASE_TTL_S` | `30` | Crash/failure backstop for a lease not released by PostToolUse |

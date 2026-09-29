@@ -2,7 +2,8 @@
 
 The adapters emit canonical `process_agent_update` calls at semantic trigger
 points. `session-start` is deliberately read-only: it checks server
-reachability, fetches the governance fundamentals excerpt, and prompts the
+reachability, points the agent at the `governance-fundamentals` and
+`governance-lifecycle` skills (both hosts load them on demand), and prompts the
 agent to call `start_session(force_new=true)` / `onboard(force_new=true)` itself
 only when no identity is cached for this fresh process. If the agent does not
 do that before the turn ends, `post-stop` lazily onboards a slot-scoped identity

@@ -56,8 +56,9 @@ FAKE_PARENT = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
 
 
 def _render(tmp_path, *, host="claude", extra_env=None, session_id="golden-slot-0001",
-            online=True, cwd=None):
+            online=True, cwd=None, plugin_root=None):
     """Render one variant and return its additionalContext."""
+    root = plugin_root if plugin_root is not None else PLUGIN_ROOT
     RecordingHandler.calls = []
     workdir = cwd if cwd is not None else tmp_path
     env = {
@@ -88,7 +89,7 @@ def _render(tmp_path, *, host="claude", extra_env=None, session_id="golden-slot-
 
     try:
         result = subprocess.run(
-            [str(PLUGIN_ROOT / "hooks" / "session-start"), "--host", host],
+            [str(root / "hooks" / "session-start"), "--host", host],
             env=env, cwd=str(workdir),
             input=json.dumps({"session_id": session_id}),
             text=True, capture_output=True, timeout=30, check=False,
@@ -110,6 +111,8 @@ def _normalize(text: str) -> str:
     pin is WHETHER a host gets an excerpt or a pointer -- not the skill's
     current wording.
     """
+    # The Codex pointer names SKILL.md paths under this checkout.
+    text = text.replace(str(PLUGIN_ROOT), "<PLUGIN_ROOT>")
     text = re.sub(
         r"(--- Governance Fundamentals \(excerpt\)[^\n]*---\n).*\Z",
         r"\1<EXCERPT BODY ELIDED>",
@@ -145,8 +148,9 @@ def test_golden_full_claude(tmp_path):
 
 
 def test_golden_full_codex(tmp_path):
-    """Codex has no skill system, so it gets the excerpt where Claude gets
-    a pointer. Pinning both sides keeps that host split honest."""
+    """Codex loads plugin skills through its manifest, so it gets the same
+    skill pointer Claude does. Its host-specific lines (recovery route,
+    lazy-onboarding host name) still differ, so it keeps its own golden."""
     _assert_golden("full_codex", _render(tmp_path, host="codex"))
 
 
@@ -170,6 +174,10 @@ def test_golden_anchored(tmp_path):
 
 def test_golden_offline(tmp_path):
     _assert_golden("offline", _render(tmp_path, online=False))
+
+
+def test_golden_offline_codex(tmp_path):
+    _assert_golden("offline_codex", _render(tmp_path, host="codex", online=False))
 
 
 # --------------------------------------------------------------------------
@@ -197,18 +205,98 @@ def test_full_variant_still_carries_affordance(tmp_path, term):
     )
 
 
-def test_claude_gets_pointer_codex_gets_excerpt(tmp_path):
-    """The host split is a real behavioural contract, not a formatting detail.
+SKILL_POINTER_NAMES = (
+    "unitares-governance:governance-fundamentals",
+    "unitares-governance:governance-lifecycle",
+)
 
-    Distinct session_ids matter: the first render writes a nudge marker for
-    its slot, and a second render reusing that slot gets the shortened
-    already-shown variant instead of the full one.
-    """
-    claude = _render(tmp_path, session_id="golden-split-claude")
-    codex = _render(tmp_path, host="codex", session_id="golden-split-codex")
-    assert "invoke" in claude and "governance-fundamentals" in claude
-    assert "--- Governance Fundamentals (excerpt)" not in claude
-    assert "--- Governance Fundamentals (excerpt)" in codex
+
+@pytest.mark.parametrize("online", [True, False], ids=["online", "offline"])
+@pytest.mark.parametrize("host", ["claude", "codex"])
+def test_both_hosts_get_the_skill_pointer_not_the_excerpt(tmp_path, host, online):
+    """Both hosts load the bundled skills on demand, so neither gets the
+    80-line excerpt; each gets the pointer naming both skills. The offline
+    path carries the pointer too."""
+    rendered = _render(tmp_path, host=host, online=online,
+                       session_id=f"golden-pointer-{host}-{online}")
+    assert "--- Governance Fundamentals (via skill) ---" in rendered
+    for name in SKILL_POINTER_NAMES:
+        assert name in rendered, f"{host} pointer no longer names {name}"
+    assert "Governance Fundamentals (excerpt)" not in rendered
+    assert "Governance Fundamentals (reference)" not in rendered
+
+
+def test_claude_pointer_invokes_the_skill_and_codex_pointer_gives_the_path(tmp_path):
+    """Claude reads a skill through its Skill tool; Codex opens SKILL.md. A
+    Codex skill id resolves to the plugin version the process started with,
+    which a marketplace refresh can remove, so its pointer names the file
+    under the hook's own PLUGIN_ROOT."""
+    claude = _render(tmp_path, session_id="golden-pointer-wording-claude")
+    codex = _render(tmp_path, host="codex", session_id="golden-pointer-wording-codex")
+    assert "invoke `unitares-governance:governance-fundamentals`" in claude
+    assert "SKILL.md" not in claude
+    for skill in ("governance-fundamentals", "governance-lifecycle"):
+        path = PLUGIN_ROOT / "skills" / skill / "SKILL.md"
+        assert path.is_file()
+        assert f"read {path}" in codex or f"or {path}" in codex, skill
+    assert "invoke `" not in codex
+
+
+def test_a_plugin_without_the_skill_file_is_not_pointed_at_it(tmp_path):
+    """The pointer is only as good as the file it names. A plugin tree
+    without skills/governance-fundamentals takes the excerpt path instead
+    (server fetch, then the bundled mirror; here neither has the skill, so no
+    Fundamentals block at all), and never names a SKILL.md that is not
+    there. The server-fetched excerpt itself is covered by the opt-in tests
+    in test_session_start_checkin.py."""
+    import shutil
+
+    root = tmp_path / "plugin"
+    for part in ("hooks", "scripts", "config"):
+        if (PLUGIN_ROOT / part).exists():
+            shutil.copytree(PLUGIN_ROOT / part, root / part)
+    (root / "skills").mkdir()
+    for host in ("claude", "codex"):
+        rendered = _render(tmp_path, host=host, plugin_root=root,
+                           session_id=f"golden-no-skill-{host}")
+        assert "Governance Fundamentals (via skill)" not in rendered, host
+        assert "SKILL.md" not in rendered, host
+
+
+def test_a_plugin_missing_one_named_skill_gets_the_excerpt_not_the_pointer(tmp_path):
+    """The pointer names both skills, so a tree with the fundamentals skill
+    but not the lifecycle one (a partial sync, a retired skill) takes the
+    excerpt path rather than naming a SKILL.md that is not there."""
+    import shutil
+
+    root = tmp_path / "plugin"
+    for part in ("hooks", "scripts", "config"):
+        if (PLUGIN_ROOT / part).exists():
+            shutil.copytree(PLUGIN_ROOT / part, root / part)
+    shutil.copytree(PLUGIN_ROOT / "skills" / "governance-fundamentals",
+                    root / "skills" / "governance-fundamentals")
+    for host in ("claude", "codex"):
+        rendered = _render(tmp_path, host=host, plugin_root=root,
+                           session_id=f"golden-one-skill-{host}")
+        assert "Governance Fundamentals (via skill)" not in rendered, host
+        assert "governance-lifecycle/SKILL.md" not in rendered, host
+        assert "--- Governance Fundamentals (excerpt)" in rendered, host
+
+
+# Every byte of a fresh Codex SessionStart lands in that session's context.
+# With the excerpt inlined it was 6,151 B through this harness; the pointer
+# brings it to about 2.8 KB. The budget leaves room for ordinary prose edits
+# and fails if an excerpt-sized block comes back.
+CODEX_FRESH_SESSION_START_BUDGET = 4000
+
+
+def test_codex_fresh_session_start_stays_within_budget(tmp_path):
+    size = len(_render(tmp_path, host="codex").encode("utf-8"))
+    assert size <= CODEX_FRESH_SESSION_START_BUDGET, (
+        f"Codex fresh SessionStart is {size} B, over the "
+        f"{CODEX_FRESH_SESSION_START_BUDGET} B budget; it lands in every fresh "
+        "Codex session's context."
+    )
 
 
 def test_identity_pointer_names_the_skill_that_has_the_ontology(tmp_path):
