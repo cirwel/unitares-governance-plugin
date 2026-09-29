@@ -16,41 +16,41 @@ Three operations run against it: **ingest** (read a source, integrate it into 10
 
 ## What the UNITARES KG is
 
-The UNITARES knowledge graph is that specialized infrastructure. It is backed by PostgreSQL with Apache AGE for graph queries and pgvector for embeddings, and it is **fleet-wide and multi-agent** rather than single-user. It exposes full CRUD through `knowledge(action=...)` — `store`, `search`, `get`, `list`, `update`, `details`, `note`, `supersede`, `cleanup`, `stats`, `audit` — over typed discoveries (`insight`, `bug_found`, `pattern`, `architectural_decision`, ...) with a status lifecycle (`open → resolved → archived → cold`, plus `superseded`, `disputed`, `wont_fix`). Reads emit best-effort `knowledge_read` audit events with reader context. Conflicts are resolved through structured dialectic with quorum escalation, not left as a TODO. The AGE graph reconciles against the durable Postgres tables on startup via drift detection and selective rehydration.
+The UNITARES knowledge graph is shared infrastructure for a fleet of agents. PostgreSQL full-text search is the default backend; Apache AGE is an optional graph backend, and semantic retrieval depends on the configured backend. It exposes typed discoveries (`insight`, `bug_found`, `pattern`, `architectural_decision`, ...) through `knowledge(action=...)`, with search, status updates, lifecycle audit and cleanup, and on-demand topic synthesis. Findings carry provenance and can be revised or superseded. A search hit is a lead to verify against current evidence, not a current-state guarantee. Structured dialectic is a separate way to review contested claims.
 
 ## Where each one wins
 
 | Axis | LLM wiki | UNITARES KG |
 |---|---|---|
-| Multi-agent / concurrent writers | single user/agent | fleet-wide, leases, lineage |
-| Provenance & audit | `log.md` only | non-cooperative audit, read events |
-| Conflict handling | lint *suggests* | dialectic + verdicts, supersede edges |
-| Scale | ~100 sources | Postgres + pgvector + AGE |
-| Lifecycle / governance | none | status model, cleanup, calibration |
-| Synthesis into a compounding artifact | **core strength** | **weak spot** |
+| Multi-agent / concurrent writers | single user/agent | fleet-wide shared findings |
+| Provenance & audit | `log.md` only | attributed findings and read audit |
+| Conflict handling | lint *suggests* | status updates, supersession, separate dialectic review |
+| Scale | ~100 sources | PostgreSQL search; optional AGE graph backend |
+| Lifecycle / governance | workflow-defined lint | status model, cleanup, staleness audit |
+| Synthesis into a compounding artifact | maintained during ingest | on-demand topic rollups |
 | Zero-infra, human-readable | yes | needs a running server |
 
-On every axis it was designed for — concurrency, audit, governance, scale — the KG is more capable. The LLM wiki wins on exactly one thing, and it is a real thing.
+These are different operating models. The KG supports shared, attributable findings; the wiki pattern puts a maintained narrative at the center of retrieval.
 
 ## The gap worth taking seriously
 
-The wiki's **ingest** step integrates a new source *into existing pages*: it rewrites the synthesis so the narrative compounds and the cross-references are already materialized before any query arrives. The UNITARES KG stores discrete discovery rows and `related_to` edges; synthesis happens only on *read* (`synthesize=true` on search). The knowledge-graph skill says so plainly — "the graph accumulates knowledge well but does not close loops automatically."
+The wiki's **ingest** step integrates a new source *into existing pages*: it rewrites the synthesis and cross-references before any query arrives. The UNITARES KG stores discrete discoveries and can create persistent topic rollups with `knowledge(action="synthesize")`. The action runs on demand, or when explicitly scheduled, rather than on every write. Search can also synthesize at read time when its `synthesize` option is used.
 
-That is precisely the gap the wiki pattern closes. The LLM wiki is therefore best read not as a competitor to replace the KG but as a **missing layer** the KG could adopt: a pass that maintains rolled-up entity/topic pages over the raw discovery rows, so the compounding artifact exists before a query forces it into being.
+The remaining gap is maintenance: a wiki editor incorporates each new source into its narrative, while a KG topic rollup reflects its members only when synthesis runs again. Neither a stored rollup nor an open discovery proves that its claims still match the current system. The KG has staleness signals, audit, status updates, and supersession, but agents still need to verify consequential claims and close findings when the evidence changes.
 
-One caveat carries real weight, because bloat is the genuine risk here. The wiki's *per-source* ingest fits a single-user, ~100-source, human-curated flow; a multi-agent fleet writing constantly is a different volume profile, and running an LLM synthesis pass on every `store`/`note` would be exactly the "auto-checkin every trivial write" behavior this project lists as a non-goal — added latency, cost, and a fresh source of stale auto-generated rows. The transferable shape is therefore **periodic or on-demand synthesis as a lifecycle action** (a `knowledge(action="synthesize")` alongside the existing `cleanup`, `audit`, and `stats`), not a write-time hook. Reframed that way it reuses machinery that already exists, adds no per-write cost, and changes no schema. That is the version worth building.
+Running an LLM synthesis pass on every `store` or `note` would add latency, cost, and more generated rows to maintain. The existing on-demand action keeps that work explicit. A periodic cadence may help for active topics, but it should be justified by observed retrieval needs and paired with a way to detect stale rollups.
 
 ## "Or any others" — the credible neighbors
 
 The honest competitive set is not RAG but agent-memory knowledge graphs, and two of them are ahead of us on a specific dimension:
 
 - **Zep / Graphiti** — a bi-temporal knowledge graph for agent memory. On time-aware reasoning (when a fact became true or false, and invalidation of superseded facts) it is more capable than the UNITARES KG today. But matching it is a substrate-level change — migration, AGE query rewrites, and a time dimension threaded through every read path — for a payoff (point-in-time reconstruction, automatic invalidation) that is speculative for the current use case, given that `superseded` status plus `created_at` already covers most of it. This is a YAGNI candidate: a documented idea, not a roadmap item, until a concrete temporal-reasoning failure is actually observed.
-- **Microsoft GraphRAG** — community detection plus hierarchical summarization. This is the wiki's compounding synthesis done at graph scale, and it is the closest existing implementation of the layer the KG is missing.
+- **Microsoft GraphRAG** — community detection plus hierarchical summarization. UNITARES now has topic rollups, but does not claim GraphRAG-style community detection or automatic hierarchical maintenance.
 - **Letta/MemGPT, Mem0, Cognee** — single-agent memory systems; weaker than the KG on fleet coordination, audit, and governance.
 
 ## Bottom line
 
-Neither the LLM wiki nor the other systems are more capable than the UNITARES KG across the board; the KG dominates on the multi-agent, auditable, governed-fleet problem it was built for. The LLM wiki is more capable on compounding synthesis, and Graphiti on temporal reasoning. Naming both is cheap and worth doing, but only one is worth building soon: a **periodic synthesis lifecycle action** (lean, reuses existing machinery). **Temporal edges stay a documented idea** — deferred until a real temporal failure justifies the substrate cost. The point of the comparison is to borrow deliberately, not to switch substrates or build everything the neighbors have.
+The KG remains useful for fleet-wide, attributable discoveries. On-demand topic synthesis is already available; the next question is whether a measured retrieval need warrants running it on a cadence and checking that rollups stay current. Temporal fact validity remains a documented idea, deferred until a concrete failure justifies the substrate cost.
 
 ## Sources
 
