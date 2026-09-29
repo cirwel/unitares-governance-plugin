@@ -263,6 +263,26 @@ def test_a_plugin_without_the_skill_file_is_not_pointed_at_it(tmp_path):
         assert "SKILL.md" not in rendered, host
 
 
+def test_a_plugin_missing_one_named_skill_gets_the_excerpt_not_the_pointer(tmp_path):
+    """The pointer names both skills, so a tree with the fundamentals skill
+    but not the lifecycle one (a partial sync, a retired skill) takes the
+    excerpt path rather than naming a SKILL.md that is not there."""
+    import shutil
+
+    root = tmp_path / "plugin"
+    for part in ("hooks", "scripts", "config"):
+        if (PLUGIN_ROOT / part).exists():
+            shutil.copytree(PLUGIN_ROOT / part, root / part)
+    shutil.copytree(PLUGIN_ROOT / "skills" / "governance-fundamentals",
+                    root / "skills" / "governance-fundamentals")
+    for host in ("claude", "codex"):
+        rendered = _render(tmp_path, host=host, plugin_root=root,
+                           session_id=f"golden-one-skill-{host}")
+        assert "Governance Fundamentals (via skill)" not in rendered, host
+        assert "governance-lifecycle/SKILL.md" not in rendered, host
+        assert "--- Governance Fundamentals (excerpt)" in rendered, host
+
+
 # Every byte of a fresh Codex SessionStart lands in that session's context.
 # With the excerpt inlined it was 6,151 B through this harness; the pointer
 # brings it to about 2.8 KB. The budget leaves room for ordinary prose edits

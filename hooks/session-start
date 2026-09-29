@@ -104,8 +104,8 @@ SKILL_STDERR_FILE=""
 # skill's freshness when it is read, so the pointer carries no staleness
 # marker, where the fetched excerpt could say it was stale or bundled.
 #
-# The pointer is used only when the skill file exists under PLUGIN_ROOT; an
-# install without it gets the excerpt. UNITARES_HOOK_FUNDAMENTALS_EXCERPT=on
+# The pointer names both skills, so it is used only when both SKILL.md files
+# exist under PLUGIN_ROOT; an install missing either gets the excerpt. UNITARES_HOOK_FUNDAMENTALS_EXCERPT=on
 # restores the excerpt, with its server fetch and offline-mirror fallback,
 # for a host build that does not load plugin skills.
 FUNDAMENTALS_EXCERPT_MODE="$(printf '%s' "${UNITARES_HOOK_FUNDAMENTALS_EXCERPT:-off}" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
@@ -115,7 +115,7 @@ case "${FUNDAMENTALS_EXCERPT_MODE}" in
 esac
 FUNDAMENTALS_SKILL_MD="${PLUGIN_ROOT}/skills/governance-fundamentals/SKILL.md"
 LIFECYCLE_SKILL_MD="${PLUGIN_ROOT}/skills/governance-lifecycle/SKILL.md"
-if [[ "${FUNDAMENTALS_EXCERPT_MODE}" != "on" && -f "${FUNDAMENTALS_SKILL_MD}" ]]; then
+if [[ "${FUNDAMENTALS_EXCERPT_MODE}" != "on" && -f "${FUNDAMENTALS_SKILL_MD}" && -f "${LIFECYCLE_SKILL_MD}" ]]; then
   if [[ "${HOOK_HOST}" == "claude" ]]; then
     SKILL_POINTER="Full reference available on demand: invoke \`unitares-governance:governance-fundamentals\` for metric semantics (EISV dimensions, basins, verdicts, calibration, recovery), or \`unitares-governance:governance-lifecycle\` for the identity ontology (onboarding, \`force_new\`, lineage via \`parent_agent_id\`, proof-owned resume). Read the relevant one before interpreting metrics or declaring lineage; do not guess semantics."
   else
