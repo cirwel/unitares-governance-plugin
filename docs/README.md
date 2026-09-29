@@ -30,9 +30,8 @@ it — so the reasoning survives past the conversation that produced it.
   motion. Many "multi-agent" asks are governance-layer asks in disguise.
 - [**The LLM wiki is a layer, not a competitor**](./llm-wiki-vs-kg.md) —
   how the UNITARES knowledge graph compares to Karpathy's LLM-wiki pattern,
-  Graphiti, and GraphRAG. The KG dominates on the multi-agent, audited,
-  governed problem; the one gap worth taking — compounding synthesis — belongs
-  as a periodic lifecycle action, not a write-time hook.
+  Graphiti, and GraphRAG. The KG supports on-demand topic rollups; the remaining
+  question is how to keep those rollups and their source findings current.
 - [**Do we need an ontology? No — we need a normalizer**](./ontology-need.md) —
   why the "ontology" question is mostly a tag-formatting problem, solved by a
   deterministic client-side normalizer plus a short curated synonym map on the
