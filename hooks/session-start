@@ -3,10 +3,10 @@
 #
 # Identity-honesty Part C (Session C, 2026-04-17):
 # This hook no longer creates an identity on the agent's behalf. It confirms
-# governance is reachable, loads the fundamentals skill, and emits context
-# instructing the agent to make its own first MCP tool call (onboard /
-# identity / bind_session). The post-identity PostToolUse hook captures the
-# response and writes the session cache.
+# governance is reachable, points at the fundamentals and lifecycle skills,
+# and emits context instructing the agent to make its own first MCP tool
+# call (onboard / identity / bind_session). The post-identity PostToolUse
+# hook captures the response and writes the session cache.
 #
 # See docs/specs/2026-04-17-session-start-stops-creating-identities.md
 # in the unitares repo for the architectural rationale.
@@ -71,7 +71,9 @@ print(json.dumps(sys.argv[1])[1:-1])
 }
 
 # ---------------------------------------------------------------------------
-# Load a short reference snippet via S15-c fetch helper.
+# Fundamentals reference: a skill pointer by default. Only with
+# UNITARES_HOOK_FUNDAMENTALS_EXCERPT=on does the hook load a short reference
+# snippet via the S15-c fetch helper, as described below.
 #
 # The helper tries server fetch (cache → /v1/tools/call skills tool) and
 # falls back to the bundled mirror at
