@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# UNITARES Governance Plugin — repeat-failure reflex (Claude PostToolUseFailure)
+#
+# Host-observed, local-only, advisory. Counts identical failing tool calls per
+# slot and, at the threshold, injects one line of additionalContext telling the
+# agent to stop retrying unchanged. No network, no identity, no tool content
+# persisted. Disable with UNITARES_FAILURE_REFLEX=off.
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PLUGIN_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+DEFAULTS="${PLUGIN_ROOT}/config/defaults.env"
+if [[ -f "${DEFAULTS}" ]]; then
+  # shellcheck disable=SC1090
+  source "${DEFAULTS}"
+fi
+
+REFLEX="${PLUGIN_ROOT}/scripts/failure_reflex.py"
+if [[ ! -f "${REFLEX}" || -t 0 ]]; then
+  exit 0
+fi
+
+python3 "${REFLEX}" 2>/dev/null || true
+exit 0

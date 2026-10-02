@@ -97,6 +97,17 @@
             "async": true
           }
         ]
+      },
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" post-tool-failure --host claude",
+            "async": false,
+            "timeout": 3
+          }
+        ]
       }
     ],
     "PermissionDenied": [
