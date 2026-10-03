@@ -73,6 +73,8 @@ def _render(tmp_path, *, host="claude", extra_env=None, session_id="golden-slot-
         # The file-lease status line depends on whether a lease plane runs on
         # this machine; tests/test_file_lease_hook.py pins it separately.
         "UNITARES_FILE_LEASES_ENABLED": "0",
+        # Goldens capture the opt-in lazy-onboarding prose.
+        "UNITARES_AUTO_ONBOARD": "on",
     }
     if extra_env:
         env.update(extra_env)

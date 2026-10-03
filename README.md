@@ -7,6 +7,13 @@
 
 Client/plugin integration layer for **UNITARES** — the runtime governance layer for heterogeneous AI-agent fleets. This repo provides Claude/Codex-facing skills, command guidance, hook scripts, and sidecar tooling for connecting coding agents to a running UNITARES governance server. The runtime itself lives in [`cirwel/unitares`](https://github.com/cirwel/unitares); Hermes-native lifecycle bindings live in [`cirwel/unitares-host-adapter`](https://github.com/cirwel/unitares-host-adapter).
 
+## Before You Install
+
+- This is a client for a **self-hosted, single-operator** UNITARES server. Without a reachable server the hooks do nothing and the skills have nothing to talk to. See [Prerequisites](#prerequisites).
+- Hooks run on every Edit/Write (file leases) and on shell pushes (merged-PR guard). Both fail open: an unreachable server or lease plane never blocks you unless you set `UNITARES_FILE_LEASES_REQUIRED=1`.
+- No governance identity is created unasked. Set `UNITARES_AUTO_ONBOARD=on` to let the Stop hook mint one when the agent has not onboarded.
+- Verdicts (proceed, guide, pause) are a state estimate for the agent and operator. This repo makes no claim that pausing improves outcomes.
+
 ## Install With Claude Code
 
 This repository is a Claude Code plugin marketplace. Add the marketplace, then
@@ -244,7 +251,7 @@ including `0` and `off` kill switches:
 | `UNITARES_SERVER_URL` | `http://localhost:8767` | Governance server base URL |
 | `UNITARES_HTTP_API_TOKEN` | unset | Client bearer token for governance REST calls, Claude's bundled MCP transport, and a separately registered authenticated Codex transport; hosted deployments must use one token accepted by the server |
 | `UNITARES_AGENT_PREFIX` | host-specific | Prefix for generated client-side names (`claude` or `codex` unless overridden) |
-| `UNITARES_AUTO_ONBOARD` | `on` | Let the host Stop hook create a slot-scoped identity before its first turn summary when needed |
+| `UNITARES_AUTO_ONBOARD` | `off` | Set to `on` to let the host Stop hook create a slot-scoped identity before its first turn summary when the agent has not onboarded; off leaves un-onboarded sessions as identity-free floor observations |
 | `UNITARES_HOOK_FUNDAMENTALS_EXCERPT` | `off` | SessionStart points both hosts at the `governance-fundamentals` and `governance-lifecycle` skills; `on` inlines the ~4 KB Fundamentals excerpt instead, for a host build that does not load plugin skills |
 | `UNITARES_FILE_LEASES_ENABLED` | `1` | Enable host edit leases (Claude Edit/Write/MultiEdit; Codex apply_patch) |
 | `UNITARES_FILE_LEASES_REQUIRED` | `0` | Block edits when lease infrastructure is missing/unreachable; truthy values take precedence over `UNITARES_FILE_LEASES_ENABLED=0` |

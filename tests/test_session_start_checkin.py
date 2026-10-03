@@ -92,9 +92,14 @@ def _run_hook(
         "CLAUDE_PLUGIN_ROOT": str(PLUGIN_ROOT),
         "PWD": str(workdir),
         "USER": "testuser",
+        # Lazy onboarding is opt-in; the prose tests below describe that path.
+        # TestAutoOnboardDefaultOff pins the default.
+        "UNITARES_AUTO_ONBOARD": "on",
     }
     if extra_env:
         env.update(extra_env)
+        # A None value unsets the variable, to exercise the shipped default.
+        env = {k: v for k, v in env.items() if v is not None}
 
     stdin_payload = {"session_id": claude_session_id} if claude_session_id else {}
 
@@ -230,6 +235,16 @@ class TestSessionStartContext:
         assert "start_session(" in ctx
         assert "onboard(" in ctx
         assert "Stop hook will lazily create a slot-scoped identity" in ctx
+
+    def test_default_does_not_promise_lazy_onboarding(self, tmp_path):
+        # UNITARES_AUTO_ONBOARD unset: the shipped default is off, so the note
+        # must not tell the agent an identity will appear at turn stop.
+        stdout, _ = _serve_and_run(
+            tmp_path, extra_env={"UNITARES_AUTO_ONBOARD": None}
+        )
+        ctx = _context(stdout)
+        assert "lazily create" not in ctx
+        assert "recorded identity-free" in ctx
 
     def test_online_context_avoids_pressure_framing(self, tmp_path):
         stdout, _ = _serve_and_run(tmp_path)
