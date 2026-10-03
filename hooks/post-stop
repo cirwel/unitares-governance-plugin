@@ -173,7 +173,7 @@ fi
 # force_new=true, per-slot name scoping, lineage via parent_agent_id, no
 # persisted continuity token.
 CHECKINS_MODE="$(printf '%s' "${UNITARES_CHECKINS:-on}" | tr '[:upper:]' '[:lower:]')"
-AUTO_ONBOARD_MODE="$(printf '%s' "${UNITARES_AUTO_ONBOARD:-on}" | tr '[:upper:]' '[:lower:]')"
+AUTO_ONBOARD_MODE="$(printf '%s' "${UNITARES_AUTO_ONBOARD:-off}" | tr '[:upper:]' '[:lower:]')"
 DISABLE_AUTO_ONBOARD="$(printf '%s' "${UNITARES_DISABLE_AUTO_ONBOARD:-0}" | tr '[:upper:]' '[:lower:]')"
 if [[ -z "${CSID:-}" && -n "${RAW_SLOT:-}" \
       && "${CHECKINS_MODE}" != "off" \

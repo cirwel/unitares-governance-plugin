@@ -160,7 +160,7 @@ UNITARES Watcher receipt change before enabling these hooks. Remove any legacy
 host-global Watcher surface/chime hooks when enabling the plugin path, or the
 same host can receive one migration-time duplicate.
 
-The `session-start` hook remains read-only: it tells the agent to call `start_session(force_new=true)` before substantive work. If the agent has not onboarded by the end of the turn, `post-stop` uses `scripts/onboard_helper.py` to lazily mint a fresh, slot-scoped identity and then emits the normal `turn_stop` summary under that identity. Set `UNITARES_AUTO_ONBOARD=off` or legacy `UNITARES_DISABLE_AUTO_ONBOARD=1` to fall back to identity-free floor observations for un-onboarded sessions.
+The `session-start` hook remains read-only: it tells the agent to call `start_session(force_new=true)` before substantive work. By default, an agent that has not onboarded by the end of the turn gets identity-free floor observations. Set `UNITARES_AUTO_ONBOARD=on` to have `post-stop` use `scripts/onboard_helper.py` to lazily mint a fresh, slot-scoped identity and emit the normal `turn_stop` summary under it; legacy `UNITARES_DISABLE_AUTO_ONBOARD=1` forces it off.
 
 For the full Claude check-in trigger contract, see [check-ins.md](./check-ins.md).
 
