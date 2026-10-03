@@ -56,11 +56,14 @@ def _run_hook_with_mock_server(
             "UNITARES_SERVER_URL": f"http://127.0.0.1:{port}",
             "UNITARES_CHECKIN_LOG": str(workspace / "checkins.log"),
             "UNITARES_AUTO_CHECKIN_ENABLED": "1",
+            # Lazy onboarding is opt-in; these tests exercise that path.
+            "UNITARES_AUTO_ONBOARD": "on",
             "CLAUDE_PLUGIN_ROOT": str(PLUGIN_ROOT),
             "PWD": str(workspace),
         }
         if extra_env:
             env.update(extra_env)
+            env = {k: v for k, v in env.items() if v is not None}
         hook = PLUGIN_ROOT / "hooks" / hook_name
         subprocess.run(
             [str(hook)],
@@ -99,6 +102,19 @@ def _onboard_args(calls: list[dict]) -> dict:
     onboard_calls = [c for c in calls if c.get("name") == "onboard"]
     assert onboard_calls, f"expected onboard call in {calls!r}"
     return onboard_calls[0]["arguments"]
+
+
+def test_post_stop_does_not_onboard_by_default(tmp_path):
+    """Lazy onboarding is opt-in: a fresh install must not mint identities."""
+    calls = _run_hook_with_mock_server(
+        "post-stop",
+        tmp_path,
+        "turn-slot-default-off",
+        extra_env={"UNITARES_AUTO_ONBOARD": None},
+        return_all=True,
+    )
+
+    assert not [c for c in calls if c.get("name") == "onboard"], calls
 
 
 def test_post_stop_bare_anchor_mints_instead_of_resuming(tmp_path):

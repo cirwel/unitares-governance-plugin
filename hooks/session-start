@@ -553,6 +553,22 @@ if [[ -n "${UNITARES_CLIENT_SESSION_ID:-}" \
   ANCHOR_RESUME_ENABLED=1
 fi
 
+# Lazy onboarding is opt-in (config/defaults.env). Describe what the Stop hook
+# will actually do so the agent is not told an identity will appear when it
+# will not.
+case "$(printf '%s' "${UNITARES_AUTO_ONBOARD:-off}" | tr '[:upper:]' '[:lower:]')" in
+  on|1|true|yes)
+    if [[ "${UNITARES_DISABLE_AUTO_ONBOARD:-0}" == "1" ]]; then
+      AUTO_ONBOARD_NOTE="If you do not bind manually, this session is recorded identity-free."
+      AUTO_ONBOARD_NUDGE="no identity is bound by turn stop, the session is recorded identity-free."
+    else
+      AUTO_ONBOARD_NOTE="If you do not bind manually, the Stop hook will lazily create a slot-scoped identity before it emits the turn summary."
+      AUTO_ONBOARD_NUDGE="the Stop hook will lazily create a slot-scoped governance identity before emitting its substrate summary."
+    fi ;;
+  *)
+    AUTO_ONBOARD_NOTE="If you do not bind manually, this session is recorded identity-free (UNITARES_AUTO_ONBOARD is off)."
+    AUTO_ONBOARD_NUDGE="no identity is bound by turn stop, the session is recorded identity-free (UNITARES_AUTO_ONBOARD is off)." ;;
+esac
 RECOVERY_GUIDANCE="Recovery: call identity(client_session_id=...) to inspect continuity, check_working_state() for governance state, and health_check() for server health."
 if [[ "${HOOK_HOST}" == "claude" ]]; then
   RECOVERY_GUIDANCE="Recovery: run /diagnose."
@@ -608,7 +624,7 @@ After governance calls, read \`next_action\`, \`memory_suggestions\`, and \`reco
 ${RECOVERY_GUIDANCE}"
   elif [[ "${NUDGE_ALREADY_SHOWN}" == "1" ]]; then
     CONTEXT="UNITARES Governance: ONLINE
-Onboarding context was already shown for this session. If no identity is cached by turn stop, the Stop hook will lazily create a slot-scoped governance identity before emitting its substrate summary.
+Onboarding context was already shown for this session. If no identity is cached by turn stop, ${AUTO_ONBOARD_NUDGE}
 Use \`sync_state(...)\` only for meaningful state worth reporting. Do not manufacture a check-in for this reminder.
 ${RECOVERY_GUIDANCE}"
   else
@@ -622,11 +638,9 @@ work when you can. Call:
 
     start_session(force_new=true)          # canonical/raw: onboard(force_new=true)
 
-SessionStart has not created an identity yet. If you do not bind manually,
-the Stop hook will lazily create a slot-scoped identity before it emits the
-turn summary, unless \`UNITARES_AUTO_ONBOARD=off\` or
-\`UNITARES_DISABLE_AUTO_ONBOARD=1\` is set. Manual start_session is still
-preferred when you need governance MCP calls during the turn.
+SessionStart has not created an identity yet. ${AUTO_ONBOARD_NOTE}
+Manual start_session is still preferred when you need governance MCP calls
+during the turn.
 
 Do not manufacture a check-in to satisfy this note. Use \`sync_state(...)\`
 only when there is meaningful state worth reporting:
