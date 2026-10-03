@@ -12,7 +12,7 @@ permissions:
 jobs:
   test:
     name: Plugin tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Check out repository
@@ -75,7 +75,7 @@ jobs:
 
   scope:
     name: Scope guard
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
