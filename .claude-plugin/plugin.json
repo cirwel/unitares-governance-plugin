@@ -1,6 +1,6 @@
 {
   "name": "unitares-governance",
-  "description": "Runtime governance for AI agents — agents check in while they work and get a proceed/guide/pause/reject verdict, with drift from each agent's own baseline (EISV) surfaced to operator and agent. Bundles auto-onboard, auto-checkin, dialectic review, and a shared knowledge graph.",
+  "description": "Mounts Claude Code agents into UNITARES: accountable identity, check-ins that return a state estimate the agent can read mid-run, dialectic review, and a shared knowledge graph. Bundles auto-onboard and auto-checkin.",
   "version": "0.4.19",
   "author": {
     "name": "CIRWEL"
