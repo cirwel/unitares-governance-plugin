@@ -329,3 +329,22 @@ def test_codex_stop_ignores_transcript_path(tmp_path):
 
     assert event.model == ""
     assert event.model_source == "unavailable"
+
+
+@pytest.mark.parametrize("bad", ["/tmp/x\x00.jsonl", "/tmp/\ud800.jsonl"])
+def test_claude_stop_transcript_path_that_cannot_be_opened_never_raises(bad):
+    event = _claude_stop(transcript_path=bad)
+
+    assert event.model == ""
+    assert event.model_source == "unavailable"
+
+
+def test_claude_stop_transcript_fifo_does_not_block(tmp_path):
+    import os
+
+    fifo = tmp_path / "session.jsonl"
+    os.mkfifo(fifo)  # open() for reading would block forever with no writer
+    event = _claude_stop(transcript_path=str(fifo))
+
+    assert event.model == ""
+    assert event.model_source == "unavailable"

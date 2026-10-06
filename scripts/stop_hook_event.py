@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
+import stat
 import sys
 from dataclasses import asdict, dataclass
 from typing import Any, Mapping
@@ -137,12 +139,19 @@ def _model_from_transcript(payload: Mapping[str, Any], maximum: int = 160) -> st
     if not isinstance(path, str) or not path.startswith("/") or not path.endswith(".jsonl"):
         return ""
     try:
-        with open(path, "rb") as handle:
-            size = handle.seek(0, 2)
+        # O_NONBLOCK so a FIFO named ``*.jsonl`` cannot hang the hook; fstat on
+        # the opened descriptor (not a prior stat) so the check cannot race.
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                return ""
+            size = os.lseek(fd, 0, os.SEEK_END)
             start = max(0, size - _TRANSCRIPT_TAIL_BYTES)
-            handle.seek(start)
-            data = handle.read(_TRANSCRIPT_TAIL_BYTES)
-    except OSError:
+            os.lseek(fd, start, os.SEEK_SET)
+            data = os.read(fd, _TRANSCRIPT_TAIL_BYTES)
+        finally:
+            os.close(fd)
+    except (OSError, ValueError):  # ValueError: embedded NUL or lone surrogate
         return ""
     lines = data.split(b"\n")
     if start > 0:
