@@ -227,3 +227,105 @@ def test_stop_contract_rejects_secret_shaped_model_before_hook_argv():
     assert event.model == ""
     assert event.model_source == "unavailable"
     assert secret not in json.dumps(event.to_json_dict())
+
+
+def _transcript(tmp_path, entries, name="session.jsonl"):
+    path = tmp_path / name
+    path.write_text("\n".join(json.dumps(e) for e in entries) + "\n")
+    return str(path)
+
+
+def _assistant(model):
+    return {"type": "assistant", "message": {"model": model, "content": []}}
+
+
+def _claude_stop(**extra):
+    payload = {"session_id": "claude-slot", "last_assistant_message": "Done."}
+    payload.update(extra)
+    return stop_hook_event.normalize_stop_hook(payload, host="claude")
+
+
+def test_claude_stop_reads_model_from_transcript_when_payload_has_none(tmp_path):
+    path = _transcript(
+        tmp_path,
+        [_assistant("claude-opus-5-5"), {"type": "user"}, _assistant("claude-sonnet-5-5")],
+    )
+    event = _claude_stop(transcript_path=path)
+
+    assert event.model == "claude-sonnet-5-5"
+    assert event.model_source == "harness_reported"
+
+
+def test_claude_stop_payload_model_wins_over_transcript(tmp_path):
+    path = _transcript(tmp_path, [_assistant("claude-sonnet-5-5")])
+    event = _claude_stop(model="claude-opus-5-5", transcript_path=path)
+
+    assert event.model == "claude-opus-5-5"
+
+
+@pytest.mark.parametrize(
+    "make_path",
+    [
+        lambda tmp: str(tmp / "missing.jsonl"),
+        lambda tmp: "relative/session.jsonl",
+        lambda tmp: str(tmp),
+        lambda tmp: _transcript(tmp, [_assistant("claude-sonnet-5-5")], name="session.txt"),
+    ],
+)
+def test_claude_stop_unusable_transcript_path_stays_unavailable(tmp_path, make_path):
+    event = _claude_stop(transcript_path=make_path(tmp_path))
+
+    assert event.model == ""
+    assert event.model_source == "unavailable"
+
+
+def test_claude_stop_transcript_skips_synthetic_and_unsafe_models(tmp_path):
+    secret = "sk-ant-" + "A" * 40
+    path = _transcript(
+        tmp_path,
+        [_assistant("claude-sonnet-5-5"), _assistant("<synthetic>"), _assistant(secret)],
+    )
+    event = _claude_stop(transcript_path=path)
+
+    # Newest usable entry wins; unusable ones are skipped, never retained.
+    assert event.model == "claude-sonnet-5-5"
+    assert secret not in json.dumps(event.to_json_dict())
+
+
+def test_claude_stop_transcript_with_no_usable_model_stays_unavailable(tmp_path):
+    path = _transcript(tmp_path, [{"type": "user"}, _assistant("<synthetic>"), _assistant(None)])
+    event = _claude_stop(transcript_path=path)
+
+    assert event.model == ""
+    assert event.model_source == "unavailable"
+
+
+def test_claude_stop_transcript_tolerates_garbage_lines(tmp_path):
+    path = tmp_path / "session.jsonl"
+    path.write_text(
+        json.dumps(_assistant("claude-sonnet-5-5")) + "\nnot json\n[1,2]\n\n"
+    )
+    assert _claude_stop(transcript_path=str(path)).model == "claude-sonnet-5-5"
+
+
+def test_claude_stop_transcript_read_is_bounded_to_the_tail(tmp_path):
+    path = tmp_path / "session.jsonl"
+    old = json.dumps(_assistant("claude-opus-5-5")) + "\n"
+    filler = json.dumps({"type": "user", "x": "y" * 1000}) + "\n"
+    path.write_text(old + filler * 1000)  # ~1 MB; old entry far outside the tail
+
+    event = _claude_stop(transcript_path=str(path))
+
+    assert event.model == ""
+    assert event.model_source == "unavailable"
+
+
+def test_codex_stop_ignores_transcript_path(tmp_path):
+    path = _transcript(tmp_path, [_assistant("claude-sonnet-5-5")])
+    event = stop_hook_event.normalize_stop_hook(
+        {"session_id": "s", "last_assistant_message": "x", "transcript_path": path},
+        host="codex",
+    )
+
+    assert event.model == ""
+    assert event.model_source == "unavailable"

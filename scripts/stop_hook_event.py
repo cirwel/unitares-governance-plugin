@@ -86,6 +86,22 @@ def _decode_payload(raw: str | Mapping[str, Any]) -> dict[str, Any]:
     return decoded
 
 
+def _safe_identifier_text(value: Any, maximum: int) -> str:
+    """Return ``value`` if it is one retainable exact identifier, else empty."""
+    if not isinstance(value, str) or not value.strip():
+        return ""
+    text = value.strip()
+    if len(text) > maximum:
+        return ""
+    if any(ord(char) < 32 or ord(char) == 127 for char in text):
+        return ""
+    if "://" in text or redact_secrets(text) != text:
+        return ""
+    if not _SAFE_IDENTIFIER_RE.fullmatch(text):
+        return ""
+    return text
+
+
 def _provenance_identifier(
     payload: Mapping[str, Any], *keys: str, maximum: int = 160
 ) -> str:
@@ -99,16 +115,51 @@ def _provenance_identifier(
         value = payload.get(key)
         if not isinstance(value, str) or not value.strip():
             continue
-        text = value.strip()
-        if len(text) > maximum:
-            return ""
-        if any(ord(char) < 32 or ord(char) == 127 for char in text):
-            return ""
-        if "://" in text or redact_secrets(text) != text:
-            return ""
-        if not _SAFE_IDENTIFIER_RE.fullmatch(text):
-            return ""
-        return text
+        return _safe_identifier_text(value, maximum)
+    return ""
+
+
+# Claude Stop payloads carry no model field, but the host records the model on
+# every assistant entry of its transcript. The newest entries are at the end, so
+# only a bounded tail is read: this runs once per turn.
+_TRANSCRIPT_TAIL_BYTES = 256 * 1024
+
+
+def _model_from_transcript(payload: Mapping[str, Any], maximum: int = 160) -> str:
+    """Return the newest usable assistant model in the host transcript tail.
+
+    Empty on any problem (no path, relative path, not a ``.jsonl`` regular file,
+    unreadable, no usable entry). Never raises: a turn summary must not fail
+    because provenance could not be read. Entries whose model is not a safe
+    identifier (for example ``<synthetic>``) are skipped, not retained.
+    """
+    path = payload.get("transcript_path")
+    if not isinstance(path, str) or not path.startswith("/") or not path.endswith(".jsonl"):
+        return ""
+    try:
+        with open(path, "rb") as handle:
+            size = handle.seek(0, 2)
+            start = max(0, size - _TRANSCRIPT_TAIL_BYTES)
+            handle.seek(start)
+            data = handle.read(_TRANSCRIPT_TAIL_BYTES)
+    except OSError:
+        return ""
+    lines = data.split(b"\n")
+    if start > 0:
+        lines = lines[1:]  # first line is probably cut mid-record
+    for line in reversed(lines):
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(entry, dict) or entry.get("type") != "assistant":
+            continue
+        message = entry.get("message")
+        if not isinstance(message, dict):
+            continue
+        model = _safe_identifier_text(message.get("model"), maximum)
+        if model:
+            return model
     return ""
 
 
@@ -139,7 +190,7 @@ def normalize_claude(payload: Mapping[str, Any]) -> StopHookEvent:
         )
     else:
         raise StopHookPayloadError("legacy Claude Stop tool_calls must be a list")
-    model = _provenance_identifier(payload, "model")
+    model = _provenance_identifier(payload, "model") or _model_from_transcript(payload)
     return StopHookEvent(
         host="claude",
         session_id=str(payload.get("session_id") or "").strip(),
