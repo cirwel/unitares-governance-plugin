@@ -1,7 +1,7 @@
 {
   "name": "unitares-governance",
   "description": "Mounts Claude Code agents into UNITARES: accountable identity, check-ins that return a state estimate the agent can read mid-run, dialectic review, and a shared knowledge graph. Bundles auto-onboard and auto-checkin.",
-  "version": "0.4.19",
+  "version": "0.4.20",
   "author": {
     "name": "CIRWEL"
   },
