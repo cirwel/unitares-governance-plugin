@@ -32,7 +32,7 @@ This is also why the question *one Hermes with five profiles vs. five Hermes vs.
 
 ## What UNITARES is
 
-UNITARES is accountability infrastructure for long-running AI agents: a self-hosted, single-operator federation kernel for agent identity, claims and evidence, review, outcomes, and reconstruction. At each check-in it returns a policy action, with auditable provenance. It does not orchestrate; it keeps the record that orchestrated agents share.
+UNITARES is accountability infrastructure for long-running AI agents: a self-hosted, single-operator federation kernel for agent identity, claims and evidence, review, outcomes, and reconstruction. At each check-in it returns a policy action, with auditable provenance. It does not orchestrate agents; it provides shared records, review, and policy actions across agent runtimes.
 
 - Shared knowledge graph is **fleet-wide**, not runtime-local
 - Verdict authority is **cross-runtime** (proceed / guide / pause / reject)
