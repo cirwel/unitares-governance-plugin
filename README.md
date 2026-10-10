@@ -5,14 +5,13 @@
 [![Codex Plugin](https://img.shields.io/badge/Codex-plugin-10a37f.svg)](./CODEX_START.md)
 [![Version](https://img.shields.io/badge/version-0.4.20-blue.svg)](.claude-plugin/plugin.json)
 
-Client/plugin integration layer for **UNITARES** — the runtime governance layer for heterogeneous AI-agent fleets. This repo provides Claude/Codex-facing skills, command guidance, hook scripts, and sidecar tooling for connecting coding agents to a running UNITARES governance server. The runtime itself lives in [`cirwel/unitares`](https://github.com/cirwel/unitares); Hermes-native lifecycle bindings live in [`cirwel/unitares-host-adapter`](https://github.com/cirwel/unitares-host-adapter).
+Claude Code and Codex plugin for **UNITARES**, accountability infrastructure for long-running AI agents. The plugin installs hooks that connect Claude Code and Codex sessions to a running UNITARES server for accountable identity, per-turn check-ins, shared findings, and review. This repo provides the skills, command guidance, hook scripts, and sidecar tooling that connect coding agents to that server. The runtime itself lives in [`cirwel/unitares`](https://github.com/cirwel/unitares); Hermes-native lifecycle bindings live in [`cirwel/unitares-host-adapter`](https://github.com/cirwel/unitares-host-adapter).
 
 ## Before You Install
 
 - This is a client for a **self-hosted, single-operator** UNITARES server. Without a reachable server the hooks do nothing and the skills have nothing to talk to. See [Prerequisites](#prerequisites).
 - Hooks run on every Edit/Write (file leases) and on shell pushes (merged-PR guard). Both fail open: an unreachable server or lease plane never blocks you unless you set `UNITARES_FILE_LEASES_REQUIRED=1`.
 - No governance identity is created unasked. Set `UNITARES_AUTO_ONBOARD=on` to let the Stop hook mint one when the agent has not onboarded.
-- Verdicts (proceed, guide, pause) are a state estimate for the agent and operator. This repo makes no claim that pausing improves outcomes.
 
 ## Install With Claude Code
 
@@ -55,6 +54,10 @@ Use it to:
 - request dialectic review
 - work with the knowledge graph
 - adapt UNITARES workflows to Codex, ChatGPT, Claude, and other clients
+
+## Limits
+
+- Verdicts (proceed, guide, pause) are a state estimate for the agent and operator. This repo makes no claim that pausing improves outcomes.
 
 ## What Lives Elsewhere
 
