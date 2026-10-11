@@ -5,7 +5,7 @@
 [![Codex Plugin](https://img.shields.io/badge/Codex-plugin-10a37f.svg)](./CODEX_START.md)
 [![Version](https://img.shields.io/badge/version-0.4.20-blue.svg)](.claude-plugin/plugin.json)
 
-Claude Code and Codex plugin for **UNITARES**, accountability infrastructure for long-running AI agents. The plugin installs hooks that connect Claude Code and Codex sessions to a running UNITARES server for accountable identity, per-turn check-ins, shared findings, and review. This repo provides the skills, command guidance, hook scripts, and sidecar tooling that connect coding agents to that server. The runtime itself lives in [`cirwel/unitares`](https://github.com/cirwel/unitares); Hermes-native lifecycle bindings live in [`cirwel/unitares-host-adapter`](https://github.com/cirwel/unitares-host-adapter).
+Claude Code and Codex plugin for **UNITARES**, accountability infrastructure for long-running AI agents. The plugin provides hooks and guidance for accountable identity, meaningful agent-authored check-ins, shared findings, and review across Claude Code and Codex sessions. An enabled Stop hook may add an automatic state interpretation; it is separate from an agent-authored check-in. This repo provides the skills, command guidance, hook scripts, and sidecar tooling that connect coding agents to that server. The runtime itself lives in [`cirwel/unitares`](https://github.com/cirwel/unitares); Hermes-native lifecycle bindings live in [`cirwel/unitares-host-adapter`](https://github.com/cirwel/unitares-host-adapter).
 
 ## Before You Install
 
