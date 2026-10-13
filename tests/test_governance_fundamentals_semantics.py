@@ -36,7 +36,14 @@ def test_coherence_sources_and_roles_are_explicit() -> None:
     # When it fires: re-read the section against coherence_provenance.py and
     # behavioral_sensor.py, check the assertions below still hold, then
     # update the hash.
-    assert _coherence_section_sha() == "42e86f9405e8744a"
+    # Both reviewed canonical snapshots are accepted while the independent
+    # skills mirror PR (#203) lands. This pins content, not a freshness date:
+    # any third version still requires the source review described above.
+    reviewed_snapshots = {
+        "42e86f9405e8744a",  # unitares 817424d9, currently bundled
+        "40af918727ff685b",  # unitares 87dd33c3, explicit ODE influence
+    }
+    assert _coherence_section_sha() in reviewed_snapshots
     assert "unitares/src/behavioral_sensor.py" in frontmatter
     assert "unitares/src/coherence_provenance.py" in frontmatter
     assert "`legacy_tanh_v`" in body
