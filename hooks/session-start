@@ -212,20 +212,62 @@ fi
 # ---------------------------------------------------------------------------
 WORKSPACE_LINEAGE_HINT=""
 HOST_SESSION_ID=""
-# Both supported hosts send the hook event as JSON with session_id.
+SESSION_START_STDIN=""
+# Use the same slot derivation as PostToolUse and the governance injector,
+# including Codex's stable thread/conversation/transcript fallbacks.
 if [[ ! -t 0 ]]; then
   SESSION_START_STDIN=$(cat 2>/dev/null) || SESSION_START_STDIN=""
   if [[ -n "${SESSION_START_STDIN}" ]]; then
-    HOST_SESSION_ID=$(python3 - "${SESSION_START_STDIN}" <<'PY' 2>/dev/null || true
-import json, sys
-try:
-    data = json.loads(sys.argv[1])
-    print((data.get("session_id") or "").strip())
-except Exception:
-    pass
-PY
-    )
+    HOST_SESSION_ID=$(printf '%s' "${SESSION_START_STDIN}" | python3 "${PLUGIN_ROOT}/scripts/_slot_from_stdin.py" 2>/dev/null || true)
   fi
+fi
+
+# Codex emits source=compact for the immediate continuation, including
+# mid-turn compaction. It does not establish a new process or a lineage edge.
+# Restore guidance from exactly the cache used by later tool hooks, including
+# its validated HOME mirror when cwd changed. Never expose proof in context.
+CODEX_COMPACTION_CONTEXT=""
+if [[ "${HOOK_HOST}" == "codex" && -n "${SESSION_START_STDIN}" ]]; then
+  CODEX_COMPACTION_CONTEXT=$(python3 - "${SESSION_START_STDIN}" "${PLUGIN_ROOT}/scripts" <<'PY' 2>/dev/null || true
+import json, os, re, sys
+sys.path.insert(0, sys.argv[2])
+from _session_lookup import _extract_slot, resolve_session_file
+from _session_cache_io import read_json_dict_unlocked
+
+try:
+    event = json.loads(sys.argv[1])
+except (ValueError, TypeError):
+    sys.exit(0)
+if not isinstance(event, dict) or event.get("source") != "compact":
+    sys.exit(0)
+
+path = resolve_session_file(os.getcwd(), _extract_slot(sys.argv[1]))
+cache = read_json_dict_unlocked(path) if path is not None else {}
+uuid = cache.get("uuid") or cache.get("agent_uuid")
+binding = cache.get("client_session_id")
+usable = (
+    isinstance(uuid, str)
+    and re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", uuid)
+    and isinstance(binding, str) and binding.strip()
+)
+print("Codex reported context compaction for this session. Compaction alone does not "
+      "establish a new driver process. Do not mint a new identity or declare lineage "
+      "just because this hook ran.")
+if usable:
+    print(f"The exact session cache holds your existing governance identity `{uuid}`. "
+          "Continue using its client_session_id. Supported governance tool hooks inject "
+          "that binding; for calls requiring explicit proof, read only this cache: "
+          + json.dumps(str(path)) + ".")
+else:
+    print("No usable binding was found for this exact session. Keep using a "
+          "client_session_id retained in your context, if available. If this session "
+          "never onboarded, start_session(force_new=true) creates its first identity. "
+          "Otherwise diagnose the missing binding before replacing it. Never adopt "
+          "another workspace slot as continuation proof.")
+print("Use identity(client_session_id=...) to inspect a known binding; never call "
+      "bare identity(). Use sync_state(...) only for meaningful state worth reporting.")
+PY
+  )
 fi
 
 WORKSPACE_CACHE=""
@@ -324,7 +366,7 @@ fi
 # (spawn reason).
 # ---------------------------------------------------------------------------
 ENV_PARENT_UUID="${UNITARES_PARENT_AGENT_ID:-}"
-if [[ -n "${ENV_PARENT_UUID}" ]]; then
+if [[ -z "${CODEX_COMPACTION_CONTEXT}" && -n "${ENV_PARENT_UUID}" ]]; then
   if [[ "${ENV_PARENT_UUID}" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
     ENV_SPAWN_REASON="${UNITARES_SPAWN_REASON:-subagent}"
     if [[ ! "${ENV_SPAWN_REASON}" =~ ^[A-Za-z0-9_-]{1,64}$ ]]; then
@@ -338,7 +380,7 @@ This is a candidate, not an obligation — if it does not match how this process
   fi
 fi
 
-if [[ -z "${WORKSPACE_LINEAGE_HINT}" && -n "${WORKSPACE_CACHE}" && -f "${WORKSPACE_CACHE}" ]]; then
+if [[ -z "${CODEX_COMPACTION_CONTEXT}" && -z "${WORKSPACE_LINEAGE_HINT}" && -n "${WORKSPACE_CACHE}" && -f "${WORKSPACE_CACHE}" ]]; then
   WORKSPACE_LINEAGE_HINT=$(python3 - "${WORKSPACE_CACHE}" <<'PY' 2>/dev/null || true
 import json, re, sys
 from pathlib import Path
@@ -407,7 +449,7 @@ fi
 #     conversation) from a workspace match (this workspace's most recent
 #     prior session, but possibly a different harness invocation).
 # ---------------------------------------------------------------------------
-if [[ -n "${HOST_SESSION_ID}" && -z "${WORKSPACE_LINEAGE_HINT}" ]]; then
+if [[ -z "${CODEX_COMPACTION_CONTEXT}" && -n "${HOST_SESSION_ID}" && -z "${WORKSPACE_LINEAGE_HINT}" ]]; then
   SESSION_CACHE_HELPER=""
   for candidate in \
     "${PLUGIN_ROOT}/scripts/session_cache.py" \
@@ -576,6 +618,11 @@ fi
 
 if [[ -z "${HEALTH_STATUS}" ]]; then
   CONTEXT="UNITARES Governance: OFFLINE (${SERVER_URL} unreachable). No governance identity is currently bound for this session. Governance tools may be unavailable."
+  if [[ -n "${CODEX_COMPACTION_CONTEXT}" ]]; then
+    CONTEXT="UNITARES Governance: OFFLINE (${SERVER_URL} unreachable). Governance tools may be unavailable.
+
+${CODEX_COMPACTION_CONTEXT}"
+  fi
   if [[ -n "${SKILL_CONTENT}" ]]; then
     CONTEXT="${CONTEXT}
 
@@ -610,6 +657,10 @@ for the turn-to-turn flow of this conversation.
 Use \`sync_state(...)\` only for meaningful state worth reporting; do not
 manufacture a check-in to satisfy this note.
 ${RECOVERY_GUIDANCE}"
+  elif [[ -n "${CODEX_COMPACTION_CONTEXT}" ]]; then
+    CONTEXT="UNITARES Governance: ONLINE
+
+${CODEX_COMPACTION_CONTEXT}"
   elif [[ "${COMPACT_MODE}" == "1" ]]; then
     # Compact prose: assumes the agent saw the full note + Fundamentals
     # block earlier this hour (workspace cache mtime < TTL). Keep
@@ -680,7 +731,7 @@ ${WORKSPACE_LINEAGE_HINT}"
   # Skip the Fundamentals block in compact mode. A freshness warning, when
   # the excerpt path produces one, injects on the next fresh-workspace fire
   # when the full block returns.
-  if [[ "${ANCHOR_RESUME_ENABLED}" != "1" && "${COMPACT_MODE}" != "1" && "${NUDGE_ALREADY_SHOWN}" != "1" ]]; then
+  if [[ "${ANCHOR_RESUME_ENABLED}" != "1" && -z "${CODEX_COMPACTION_CONTEXT}" && "${COMPACT_MODE}" != "1" && "${NUDGE_ALREADY_SHOWN}" != "1" ]]; then
     if [[ -n "${SKILL_CONTENT}" ]]; then
       CONTEXT="${CONTEXT}
 

@@ -76,6 +76,17 @@ then continue with `client_session_id`-backed check-ins. The automatic Stop
 summary is a non-agent-authored substrate interpretation, not a replacement
 agent report. Avoid per-tool or per-edit check-in noise.
 
+Codex's `SessionStart` event with `source: "compact"` continues the current
+session, including compaction in the middle of a turn. The hook preserves the
+existing binding guidance using the same exact slot lookup as later tool hooks,
+including stable Codex fallback fields and a valid HOME mirror after a cwd
+change. It does not mint a UUID or infer a lineage edge from compaction alone.
+If the binding is missing, recover the session's known `client_session_id`;
+another workspace slot is not proof of continuity. Startup, resume, and clear
+events do not establish same-process continuity: a genuinely new driver still
+onboards fresh and declares a verified predecessor when inheriting its work.
+See the [Codex hook lifecycle](https://learn.chatgpt.com/docs/hooks#sessionstart).
+
 ## Recommended Default
 
 Use `explicit` mode unless you are deliberately dogfooding tighter automation.

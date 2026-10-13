@@ -74,6 +74,7 @@ def _run_hook(
     cwd=None,
     claude_session_id=None,
     host="claude",
+    hook_payload=None,
 ):
     """Run session-start with a given server URL and return (stdout, tool_calls).
 
@@ -102,6 +103,8 @@ def _run_hook(
         env = {k: v for k, v in env.items() if v is not None}
 
     stdin_payload = {"session_id": claude_session_id} if claude_session_id else {}
+    if hook_payload is not None:
+        stdin_payload = hook_payload
 
     hook = PLUGIN_ROOT / "hooks" / "session-start"
     result = subprocess.run(
