@@ -175,6 +175,12 @@ The raw tool flow is:
 7. `identity(client_session_id=...)` if continuity looks wrong (never with no arguments)
 8. `health_check()` if the system itself may be part of the problem
 
+The automatic onboarding helper never promotes a cached UUID to a parent.
+For a known handoff or dispatch, declare `parent_agent_id` and the actual
+`spawn_reason` through `start_session`/`onboard`. A cache proves neither.
+The startup hint uses the descriptive `new_session` default when a spawner
+provides a parent but no usable reason; it does not guess `subagent`.
+
 On servers with the agent-experience envelope enabled, friendly aliases lift
 `next_action`, `state_summary`, `risk_summary`, `memory_suggestions`, and
 `recovery_hint` when present. Read aliases (`check_working_state`,

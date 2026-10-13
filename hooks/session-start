@@ -368,9 +368,11 @@ fi
 ENV_PARENT_UUID="${UNITARES_PARENT_AGENT_ID:-}"
 if [[ -z "${CODEX_COMPACTION_CONTEXT}" && -n "${ENV_PARENT_UUID}" ]]; then
   if [[ "${ENV_PARENT_UUID}" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
-    ENV_SPAWN_REASON="${UNITARES_SPAWN_REASON:-subagent}"
+    # A parent alone does not establish dispatch. Missing or malformed reasons
+    # keep the descriptive default, which grants no live-parent exemption.
+    ENV_SPAWN_REASON="${UNITARES_SPAWN_REASON:-new_session}"
     if [[ ! "${ENV_SPAWN_REASON}" =~ ^[A-Za-z0-9_-]{1,64}$ ]]; then
-      ENV_SPAWN_REASON="subagent"
+      ENV_SPAWN_REASON="new_session"
     fi
     WORKSPACE_LINEAGE_HINT="Orchestrator-provisioned lineage candidate (spawn-context env). The process that spawned this instance set \`UNITARES_PARENT_AGENT_ID\` — ground truth from the spawner, not an inference from workspace files. Spawn reason: ${ENV_SPAWN_REASON}.
 

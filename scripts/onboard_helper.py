@@ -4,17 +4,18 @@
 Owns the flow:
 
 1. Read the existing slot-scoped session cache (if any).
-2. Call ``onboard(force_new=true, onboard_origin="harness_backstop")``. When
-   the cache has a UUID, pass it as ``parent_agent_id`` with
-   ``spawn_reason="new_session"``. Orchestrated anchor resumes instead report
+2. Call ``onboard(force_new=true, onboard_origin="harness_backstop")`` without
+   inferring a parent from the cache. Deliberate lineage belongs in an explicit
+   ``start_session``/``onboard`` call with ``parent_agent_id`` and ``spawn_reason``.
+   Orchestrated anchor resumes instead report
    ``onboard_origin="orchestrated_resume"``.
 3. If the server reports ``trajectory_required`` (identity exists but lacks
    a verifiable signal), return status=``trajectory_required`` with the
    server's recovery hint. We do NOT auto-retry with ``force_new=true``;
    that is an explicit operator decision, not an automatic one (see commit
    718ccd3 and the identity "never silently substitute" invariant).
-4. ``force_new=true`` is always sent on startup. ``--force-new`` only means
-   "ignore cached lineage".
+4. ``force_new=true`` is sent on fresh startup. ``--force-new`` also overrides
+   orchestrated anchor resume.
 5. Only write the cache when onboard succeeded and produced a usable uuid.
 
 Emits a JSON line on stdout with the resolved fields for the shell hook to
@@ -124,9 +125,8 @@ def _scope_name_by_slot(agent_name: str, slot: str | None) -> str:
 
     Scoping the name by slot defeats the name-claim at the client. Each
     conversation (slot) gets its own label, its own UUID, its own
-    trajectory. Existing slot caches keep working as lineage anchors:
-    ``run_onboard`` passes the cached UUID as ``parent_agent_id`` on a
-    forced fresh onboard.
+    trajectory. Cached UUIDs are not causal evidence, so ``run_onboard`` does
+    not turn them into parent declarations.
 
     Unslotted callers (Codex stdio, single-process flows) keep the legacy
     naming — this only scopes when a slot is actually provided.
@@ -415,10 +415,6 @@ def run_onboard(
     anchor = (client_session_id or "").strip()
     resume = bool(anchor) and orchestrated and not force_new
 
-    parent_agent_id = ""
-    if not resume and not force_new:
-        parent_agent_id = (cache.get("uuid") or cache.get("agent_uuid") or "").strip()
-
     if resume:
         # Stable name (NOT slot-scoped): one identity per anchor across turns.
         # The server resolves by the anchor, so name-claim can't cross-bind.
@@ -441,9 +437,6 @@ def run_onboard(
             "force_new": True,
             "onboard_origin": HARNESS_BACKSTOP_ORIGIN,
         }
-        if parent_agent_id:
-            arguments["parent_agent_id"] = parent_agent_id
-            arguments["spawn_reason"] = "new_session"
 
         # Optional genesis anchor (OFF by default — see BOOTSTRAP_* above; it is
         # NOT a fix for the "uninitialized" symptom). An explicit caller-supplied
@@ -495,9 +488,6 @@ def run_onboard(
         reported_origin_basis = parsed.get("onboard_origin_basis")
         if isinstance(reported_origin_basis, str) and reported_origin_basis.strip():
             new_cache["onboard_origin_basis"] = reported_origin_basis.strip()
-    if parent_agent_id:
-        new_cache["parent_agent_id"] = parent_agent_id
-        new_cache["spawn_reason"] = "new_session"
 
     committed_fresh_identity = True
     if native_cache_io:
@@ -564,7 +554,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--model-type", default="claude-code")
     parser.add_argument("--workspace", default=os.getcwd())
     parser.add_argument("--force-new", action="store_true",
-                        help="Create a fresh identity without declaring cached lineage")
+                        help="Create a fresh identity even with an orchestrated resume anchor")
     parser.add_argument("--bootstrap", action="store_true",
                         help="Attach an optional trajectory genesis seed "
                              "(initial_state) at onboard. OFF by default. This "

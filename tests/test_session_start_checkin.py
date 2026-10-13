@@ -1209,13 +1209,14 @@ class TestOrchestratorProvisionedLineage:
         assert "resume=true" not in ctx
         assert "identity(agent_uuid=" not in ctx
 
-    def test_spawn_reason_defaults_to_subagent(self, tmp_path):
+    def test_missing_spawn_reason_does_not_claim_dispatch(self, tmp_path):
         stdout, _ = _serve_and_run(
             tmp_path,
             extra_env={"UNITARES_PARENT_AGENT_ID": self.ENV_UUID},
         )
         ctx = _context(stdout)
-        assert 'spawn_reason="subagent"' in ctx
+        assert 'spawn_reason="new_session"' in ctx
+        assert 'spawn_reason="subagent"' not in ctx
 
     def test_env_lineage_outranks_slot_scoped_cache(self, tmp_path):
         """Spawn-context ground truth wins over workspace-file inference."""
@@ -1272,7 +1273,7 @@ class TestOrchestratorProvisionedLineage:
         # Falls through to the slot-scoped source.
         assert "ffffffff-1111-2222-3333-444444444444" in ctx
 
-    def test_malformed_spawn_reason_falls_back_to_subagent(self, tmp_path):
+    def test_malformed_spawn_reason_does_not_claim_dispatch(self, tmp_path):
         """spawn_reason is embedded in a quoted template — no breakout."""
         stdout, _ = _serve_and_run(
             tmp_path,
@@ -1284,7 +1285,8 @@ class TestOrchestratorProvisionedLineage:
         ctx = _context(stdout)
 
         assert "rm -rf" not in ctx
-        assert 'spawn_reason="subagent"' in ctx
+        assert 'spawn_reason="new_session"' in ctx
+        assert 'spawn_reason="subagent"' not in ctx
 
     def test_env_lineage_makes_no_state_mutations(self, tmp_path):
         """The new source keeps the load-bearing no-mutation invariant."""
