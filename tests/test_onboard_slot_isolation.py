@@ -451,15 +451,14 @@ def test_two_slots_receive_distinct_server_calls(tmp_path: Path) -> None:
     assert name_b.startswith("cirwel#")
 
 
-def test_cached_uuid_declares_lineage_on_fresh_onboard(tmp_path: Path) -> None:
-    """When the slot cache already has a UUID, startup must mint a fresh
-    process identity and declare the cached UUID as lineage. It must not
-    resume the UUID via ``identity()``."""
+def test_cached_uuid_does_not_declare_lineage_on_fresh_onboard(tmp_path: Path) -> None:
+    """A matching cache does not establish either ancestry or startup resume."""
     # Seed the slot cache with an existing UUID, as if a prior run onboarded.
     cache_dir = tmp_path / ".unitares"
     cache_dir.mkdir()
     (cache_dir / "session-existing.json").write_text(
-        json.dumps({"uuid": "cccc3333-0000-0000-0000-000000000000"}),
+        json.dumps({"uuid": "cccc3333-0000-0000-0000-000000000000",
+                    "parent_agent_id": "stale-parent", "spawn_reason": "subagent"}),
         encoding="utf-8",
     )
 
@@ -492,15 +491,17 @@ def test_cached_uuid_declares_lineage_on_fresh_onboard(tmp_path: Path) -> None:
     assert sent["name"] == "onboard"
     assert sent["arguments"]["force_new"] is True
     assert sent["arguments"]["name"] == "cirwel#f4e0ac58"
-    assert sent["arguments"]["parent_agent_id"] == "cccc3333-0000-0000-0000-000000000000"
-    assert sent["arguments"]["spawn_reason"] == "new_session"
+    assert "parent_agent_id" not in sent["arguments"]
+    assert "spawn_reason" not in sent["arguments"]
     assert "agent_uuid" not in sent["arguments"]
+    written = json.loads((cache_dir / "session-existing.json").read_text())
+    assert "parent_agent_id" not in written
+    assert "spawn_reason" not in written
 
 
 def test_cached_token_is_not_sent_on_startup(tmp_path: Path) -> None:
-    """S1-b: startup lineage comes from UUID, not cached token/session
-    material. Tokens may still be used for in-process proof-owned calls
-    outside this helper."""
+    """Cached UUID and proof material establish no startup lineage or resume.
+    Tokens may still be used for in-process proof-owned calls outside this helper."""
     cache_dir = tmp_path / ".unitares"
     cache_dir.mkdir()
     (cache_dir / "session-existing.json").write_text(
@@ -535,14 +536,15 @@ def test_cached_token_is_not_sent_on_startup(tmp_path: Path) -> None:
     )
 
     sent_args = transport.calls[0]["payload"]["arguments"]
-    assert sent_args["parent_agent_id"] == "dddd4444-0000-0000-0000-000000000000"
+    assert "parent_agent_id" not in sent_args
+    assert "spawn_reason" not in sent_args
     assert sent_args["force_new"] is True
     assert "continuity_token" not in sent_args
     assert "client_session_id" not in sent_args
 
 
-def test_force_new_flag_ignores_cached_lineage(tmp_path: Path) -> None:
-    """The legacy --force-new flag remains a way to ignore cached lineage."""
+def test_force_new_flag_never_declares_cached_lineage(tmp_path: Path) -> None:
+    """Explicit --force-new also leaves ancestry undeclared."""
     cache_dir = tmp_path / ".unitares"
     cache_dir.mkdir()
     (cache_dir / "session-existing.json").write_text(
