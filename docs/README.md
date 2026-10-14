@@ -9,7 +9,8 @@ configuration, and the day-to-day workflow, start with the
 
 | Surface | Where | Read it for |
 |---|---|---|
-| Project overview, install, config | [`README.md`](../README.md) | What this repo is, server bring-up, env vars, workflow |
+| Project overview and install | [`README.md`](../README.md) | What the plugin adds, host setup, and the core workflow |
+| Configuration reference | [`configuration.md`](./configuration.md) | Remote servers, authentication, environment variables, and kill switches |
 | Codex/ChatGPT quickstart | [`CODEX_START.md`](../CODEX_START.md) | The preferred entry path — modes, recommended flow, continuity cache |
 | Adapter reference | [`adapters.md`](./adapters.md) | Claude hooks, Codex/ChatGPT, and the local sidecar — full detail and endpoints |
 | Check-in reference | [`check-ins.md`](./check-ins.md) | Claude check-in triggers, kill switch, diagnostic log, protective audit, upgrade steps |
