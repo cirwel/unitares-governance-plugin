@@ -109,7 +109,10 @@ def deliver(number: int, *, apply: bool) -> str:
     if any(label["name"] in ("automerge-hold", "do-not-merge", "governance-sensitive")
            for label in pr.get("labels", [])):
         raise Hold("A maintainer hold label is present")
-    head, base = pr["head"]["sha"], pr["base"]["sha"]
+    head = pr["head"]["sha"]
+    # A pull's base.sha can remain at its original snapshot after master moves.
+    # Read the actual branch for ancestry, fetch validation and race checks.
+    base = api("branches/master")["commit"]["sha"]
     runs = api(f"actions/runs?event=pull_request&head_sha={head}&per_page=100")
     require_checks(runs["workflow_runs"], head)
     # Fixed remotes/refspecs only. Fetch data, never check out or import PR code.
@@ -125,7 +128,9 @@ def deliver(number: int, *, apply: bool) -> str:
     # Re-read holds and both refs immediately before a write. GitHub's merge
     # SHA and strict required-check rules are the final concurrent-write guards.
     fresh = api(f"pulls/{number}")
-    if (not candidate(fresh) or fresh["head"]["sha"] != head or fresh["base"]["sha"] != base
+    if (not candidate(fresh) or fresh["head"]["sha"] != head
+            or fresh["base"]["sha"] != pr["base"]["sha"]
+            or api("branches/master")["commit"]["sha"] != base
             or fresh.get("labels") != pr.get("labels")):
         raise Hold("PR state changed during verification")
     behind = subprocess.run(["git", "merge-base", "--is-ancestor", base, head]).returncode

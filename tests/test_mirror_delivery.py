@@ -108,14 +108,16 @@ def test_candidate_rejects_drafts_forks_and_other_branches(mutate):
     assert not delivery.candidate(p)
 
 
-def setup_api(monkeypatch, trees, *, mutate=None):
+def setup_api(monkeypatch, trees, *, mutate=None, pr_base=None, moved_base=None):
     _, head, base = trees
-    snapshot = pr(head, base)
+    snapshot = pr(head, pr_base or base)
     calls = []
     reads = 0
     def api(path, method="GET", body=None):
         nonlocal reads
         calls.append((path, method, body))
+        if path == "branches/master":
+            return {"commit": {"sha": moved_base if moved_base and reads == 2 else base}}
         if path.startswith("actions/runs"):
             return {"workflow_runs": [ci(head)]}
         if method == "PUT":
@@ -168,10 +170,17 @@ def test_behind_base_updates_then_requires_another_ci_event(monkeypatch, trees):
     run("add", "."); run("commit", "-qm", "new base")
     base = run("rev-parse", "HEAD")
     run("update-ref", "refs/mirror/base", base)
-    calls = setup_api(monkeypatch, (trees[0], trees[1], base))
+    calls = setup_api(monkeypatch, (trees[0], trees[1], base), pr_base=trees[2])
     assert "waiting for new CI" in delivery.deliver(12, apply=True)
     assert [c for c in calls if c[1] == "PUT"] == [
         ("pulls/12/update-branch", "PUT", {"expected_head_sha": trees[1]})]
+
+
+def test_current_base_race_never_writes(monkeypatch, trees):
+    calls = setup_api(monkeypatch, trees, moved_base="new-master")
+    with pytest.raises(delivery.Hold, match="state changed"):
+        delivery.deliver(12, apply=True)
+    assert not [c for c in calls if c[1] != "GET"]
 
 
 def test_privileged_workflow_uses_only_trusted_code_and_scoped_token():
