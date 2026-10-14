@@ -654,14 +654,28 @@ fi
 # A resumed host session is a new process holding the previous process's
 # cache. Mark that cache as inherited so the pre-governance-call guard does not
 # treat it as this process's own binding: a fresh mint (declaring the
-# predecessor as parent, per the ontology) stays allowed. Only an existing
-# workspace cache is marked; merging into a missing file would shadow a HOME
-# mirror with an identity-less cache.
-if [[ "${EAGER_SOURCE}" == "resume" && -n "${EAGER_EXISTING}" \
-      && -n "${WORKSPACE_CACHE}" && -f "${WORKSPACE_CACHE}" ]]; then
-  python3 "${PLUGIN_ROOT}/scripts/session_cache.py" set session \
-    --workspace "${PWD}" --slot "${HOST_SESSION_ID}" --merge \
-    --json '{"prior_process": true}' >/dev/null 2>&1 || true
+# predecessor as parent, per the ontology) stays allowed. The whole resolved
+# binding is merged with the marker, so a binding found only in the HOME
+# mirror is written out complete rather than shadowed by an identity-less file.
+if [[ "${EAGER_SOURCE}" == "resume" && -n "${EAGER_EXISTING}" ]]; then
+  EAGER_INHERITED=$(python3 - "${PLUGIN_ROOT}/scripts" "${SESSION_START_STDIN}" <<'PY' 2>/dev/null || true
+import json
+import sys
+
+sys.path.insert(0, sys.argv[1])
+from _session_lookup import load_session_for_hook
+
+data = load_session_for_hook(".", sys.argv[2]) or {}
+if data.get("uuid") and data.get("client_session_id"):
+    data["prior_process"] = True
+    print(json.dumps(data))
+PY
+)
+  if [[ -n "${EAGER_INHERITED}" ]]; then
+    python3 "${PLUGIN_ROOT}/scripts/session_cache.py" set session \
+      --workspace "${PWD}" --slot "${HOST_SESSION_ID}" --merge \
+      --json "${EAGER_INHERITED}" >/dev/null 2>&1 || true
+  fi
 fi
 if [[ ( "${EAGER_SOURCE}" == "startup" || "${EAGER_SOURCE}" == "clear" ) \
       && -n "${EAGER_EXISTING}" ]]; then

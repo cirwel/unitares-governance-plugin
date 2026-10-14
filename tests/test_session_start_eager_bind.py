@@ -187,3 +187,17 @@ def test_resume_marks_the_inherited_cache(tmp_path):
     data = json.loads(cache.read_text())
     assert data["prior_process"] is True
     assert data["uuid"] == UUID and data["client_session_id"] == CSID
+
+
+def test_resume_with_home_only_binding_writes_a_complete_marked_cache(tmp_path):
+    workspace = tmp_path / "elsewhere"
+    workspace.mkdir()
+    mirror = tmp_path / ".unitares" / _slot_filename(SLOT)
+    mirror.parent.mkdir(parents=True)
+    mirror.write_text(json.dumps({"uuid": UUID, "client_session_id": CSID, "slot": SLOT}))
+    _, onboards = _serve(tmp_path, cwd=workspace,
+                         hook_payload={"session_id": SLOT, "source": "resume"})
+    assert onboards == []
+    data = json.loads((workspace / ".unitares" / _slot_filename(SLOT)).read_text())
+    assert data["prior_process"] is True
+    assert data["uuid"] == UUID and data["client_session_id"] == CSID
