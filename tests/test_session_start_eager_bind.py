@@ -201,3 +201,56 @@ def test_resume_with_home_only_binding_writes_a_complete_marked_cache(tmp_path):
     data = json.loads((workspace / ".unitares" / _slot_filename(SLOT)).read_text())
     assert data["prior_process"] is True
     assert data["uuid"] == UUID and data["client_session_id"] == CSID
+
+
+def _exported_pointer(env_file):
+    text = env_file.read_text()
+    assert text.startswith("export UNITARES_SESSION_CACHE=") and text.count("\n") == 1
+    return text.split("=", 1)[1].strip()
+
+
+def test_pointer_names_the_home_mirror_even_from_another_workspace(tmp_path):
+    workspace = tmp_path / "elsewhere"
+    workspace.mkdir()
+    env_file = tmp_path / "claude-env.sh"
+    env_file.write_text("")
+    _, onboards = _serve(tmp_path, claude_session_id=SLOT, cwd=workspace,
+                         extra_env={"CLAUDE_ENV_FILE": str(env_file)})
+    assert len(onboards) == 1
+    pointer = Path(_exported_pointer(env_file))
+    assert pointer == (tmp_path / ".unitares" / _slot_filename(SLOT)).resolve()
+    # The bind writes the mirror the pointer names, not only the workspace cache.
+    assert json.loads(pointer.read_text())["uuid"] == UUID
+
+
+def test_unbound_session_still_exports_its_own_pointer(tmp_path):
+    # A child process must not keep a parent's pointer just because it is not
+    # bound yet: its own slot path replaces the inherited value.
+    env_file = tmp_path / "claude-env.sh"
+    env_file.write_text("")
+    _serve(tmp_path, claude_session_id=SLOT,
+           extra_env={"CLAUDE_ENV_FILE": str(env_file), "UNITARES_AUTO_ONBOARD": "off",
+                      "UNITARES_SESSION_CACHE": "/parent/session-parent.json"})
+    pointer = Path(_exported_pointer(env_file))
+    assert pointer.name == _slot_filename(SLOT)
+
+
+def test_no_slot_still_overrides_an_inherited_pointer(tmp_path):
+    env_file = tmp_path / "claude-env.sh"
+    env_file.write_text("")
+    _serve(tmp_path, extra_env={"CLAUDE_ENV_FILE": str(env_file),
+                                "UNITARES_SESSION_CACHE": "/parent/session-parent.json"})
+    assert env_file.read_text() == "export UNITARES_SESSION_CACHE=''\n"
+
+
+def test_fork_is_a_new_host_session(tmp_path):
+    _, onboards = _serve(tmp_path, hook_payload={"session_id": SLOT, "source": "fork"})
+    assert len(onboards) == 1
+
+
+def test_codex_host_does_not_write_a_claude_env_file(tmp_path):
+    env_file = tmp_path / "claude-env.sh"
+    env_file.write_text("")
+    _serve(tmp_path, claude_session_id=SLOT, host="codex",
+           extra_env={"CLAUDE_ENV_FILE": str(env_file)})
+    assert env_file.read_text() == ""

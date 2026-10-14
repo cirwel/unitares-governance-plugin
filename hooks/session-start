@@ -636,7 +636,7 @@ if re.fullmatch(r"[0-9a-fA-F-]{36}", uuid) and re.fullmatch(r"[A-Za-z0-9:/._-]{1
     print(csid)
 PY
 }
-# Only on a brand-new host session (startup or /clear): no Stop hook can still
+# Only on a brand-new host session (startup, /clear or fork): no Stop hook can still
 # be minting for that slot, so the two paths cannot both mint. A resume or
 # compact without a cache keeps the lazy Stop path.
 EAGER_SOURCE=$(printf '%s' "${SESSION_START_STDIN}" | python3 -c '
@@ -677,7 +677,7 @@ PY
       --json "${EAGER_INHERITED}" >/dev/null 2>&1 || true
   fi
 fi
-if [[ ( "${EAGER_SOURCE}" == "startup" || "${EAGER_SOURCE}" == "clear" ) \
+if [[ ( "${EAGER_SOURCE}" == "startup" || "${EAGER_SOURCE}" == "clear" || "${EAGER_SOURCE}" == "fork" ) \
       && -n "${EAGER_EXISTING}" ]]; then
   # A brand-new host session that already has a binding (for example a HOME
   # mirror for this slot): show it rather than advising a mint the guard
@@ -689,7 +689,7 @@ elif [[ -n "${HEALTH_STATUS}" \
       && -z "${CODEX_COMPACTION_CONTEXT}" \
       && -z "${ENV_PARENT_UUID}" \
       && -n "${HOST_SESSION_ID}" \
-      && ( "${EAGER_SOURCE}" == "startup" || "${EAGER_SOURCE}" == "clear" ) \
+      && ( "${EAGER_SOURCE}" == "startup" || "${EAGER_SOURCE}" == "clear" || "${EAGER_SOURCE}" == "fork" ) \
       && "$(printf '%s' "${UNITARES_CHECKINS:-on}" | tr '[:upper:]' '[:lower:]')" != "off" ]] \
    && ! _eager_truthy "${UNITARES_DISABLE_AUTO_ONBOARD:-0}" \
    && _eager_truthy "${UNITARES_AUTO_ONBOARD:-off}" \
@@ -719,6 +719,34 @@ if [[ -n "${EAGER_BOUND_UUID}" ]]; then
   # unusable cache) may hide the identity this session is bound to.
   NUDGE_ALREADY_SHOWN=0
   COMPACT_MODE=0
+fi
+
+# Claude Code applies CLAUDE_ENV_FILE to the session's later Bash commands.
+# unitares-github stamps the PR ownership footer (`UNITARES agent: <uuid>`, KG
+# decision 2026-10-13) from the uuid in the cache this points to, read when it
+# stamps. It points at the slot's HOME mirror, which every cache writer keeps
+# current whatever directory it runs in (a workspace cache goes stale after a
+# cwd change); the runner honours the mirror's authority record. A pointer
+# rather than the uuid: a later mint is followed, and every session, bound or
+# not, writes its own line, so a child Claude process never keeps its parent's
+# pointer. An unresolvable path writes an empty pointer for the same reason.
+if [[ "${HOOK_HOST}" == "claude" && -n "${CLAUDE_ENV_FILE:-}" ]]; then
+  SESSION_CACHE_POINTER=""
+  if [[ -n "${HOST_SESSION_ID}" ]]; then
+    SESSION_CACHE_POINTER=$(python3 - "${PLUGIN_ROOT}/scripts" "${HOST_SESSION_ID}" <<'PY' 2>/dev/null || true
+import sys
+from pathlib import Path
+
+sys.path.insert(0, sys.argv[1])
+from _session_lookup import _slot_filename
+
+path = str(Path.home().resolve() / ".unitares" / _slot_filename(sys.argv[2]))
+if "\n" not in path:
+    print(path)
+PY
+)
+  fi
+  printf 'export UNITARES_SESSION_CACHE=%q\n' "${SESSION_CACHE_POINTER}" >> "${CLAUDE_ENV_FILE}" 2>/dev/null || true
 fi
 
 # Lazy onboarding is opt-in (config/defaults.env). Describe what the Stop hook
