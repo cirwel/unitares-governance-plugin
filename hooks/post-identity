@@ -215,6 +215,7 @@ if not uuid_val:
 # self-heals on the next onboard. Minting tools (onboard, start_session)
 # stay on the spawn_reason guard: a fresh mint by this session IS the
 # session's identity.
+_identity_status = str(_response_field("identity_status") or "").strip().lower()
 if suffix in ("identity", "bind_session"):
     _existing = {}
     try:
@@ -224,7 +225,20 @@ if suffix in ("identity", "bind_session"):
     except Exception:
         _existing = {}
     _cached_uuid = str(_existing.get("uuid") or "")
-    if _cached_uuid and _cached_uuid != str(uuid_val):
+    # A new process may inherit the predecessor's lineage anchor and make one
+    # proofless identity() call to establish its own identity. The server marks
+    # that response as created. Accept that one transition even though its UUID
+    # necessarily differs; all other resume-shaped mismatches remain rejected.
+    _inherited_identity_creation = (
+        suffix == "identity"
+        and _identity_status == "created"
+        and _existing.get("prior_process") is True
+    )
+    if (
+        _cached_uuid
+        and _cached_uuid != str(uuid_val)
+        and not _inherited_identity_creation
+    ):
         _skip("resume_uuid_mismatch_not_cached")
 
 # Identity ontology (, §S11): the
@@ -276,6 +290,11 @@ if suffix in ("onboard", "start_session"):
             _summary.get("onboard_origin_basis") or _canon_summary.get("onboard_origin_basis")
             or _response_field("onboard_origin_basis") or ""
         )
+elif suffix == "identity" and _identity_status == "created":
+    # Positive server evidence that this process minted the returned UUID.
+    # Consume the inherited-slot exemption so a second bare identity() is
+    # denied by pre-governance-call instead of minting again.
+    payload["prior_process"] = False
 # Emit session_id on stdout line 1, JSON payload on line 2 — the shell
 # splits them to pass --slot and --json separately.
 print(session_id)
