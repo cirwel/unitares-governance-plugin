@@ -35,6 +35,9 @@ Contract:
   an identity and the call declares neither parent_agent_id nor a deliberate
   spawn_reason: that mint would give one process two identities. The deny
   reason names the bound identity and the explicit opt-in.
+- Denies proofless identity() in an already-bound current-process slot. The
+  server promotes that apparently read-shaped call to force_new=true, so
+  letting it through would silently replace the slot's working identity.
 - Skips when the call already carries any identity proof field
   (client_session_id, continuity_token, agent_uuid, agent_id) — explicit
   caller intent always wins.
@@ -126,6 +129,7 @@ CODEX_REWRITE_SUFFIXES = frozenset({
 })
 
 ANCHORED_MINT_SUFFIXES = frozenset({"onboard", "start_session"})
+IDENTITY_ASSERT_SUFFIXES = frozenset({"identity"})
 PROOF_FIELDS = ("client_session_id", "continuity_token", "agent_uuid", "agent_id")
 # spawn_reason values that declare a deliberate new identity inside an already
 # bound slot. "new_session" and an absent reason do not: a process that is
@@ -139,6 +143,20 @@ def _truthy(value: object) -> bool:
     if isinstance(value, bool):
         return value
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _current_slot_binding(raw: str) -> dict:
+    """Return a usable binding owned by this process, or an empty dict."""
+    try:
+        from _session_lookup import load_session_for_hook
+        sess = load_session_for_hook(Path.cwd(), raw) or {}
+    except Exception:
+        return {}
+    uuid = str(sess.get("uuid") or "").strip()
+    csid = str(sess.get("client_session_id") or "").strip()
+    if not uuid or not csid or sess.get("prior_process") is True:
+        return {}
+    return sess
 
 
 def _duplicate_mint_reason(tool_input: dict, raw: str) -> str:
@@ -159,20 +177,12 @@ def _duplicate_mint_reason(tool_input: dict, raw: str) -> str:
     reason = str(tool_input.get("spawn_reason") or "").strip().lower()
     if reason in DELIBERATE_SPAWN_REASONS:
         return ""
-    try:
-        from _session_lookup import load_session_for_hook
-        sess = load_session_for_hook(Path.cwd(), raw) or {}
-    except Exception:
-        return ""
+    sess = _current_slot_binding(raw)
     uuid = str(sess.get("uuid") or "").strip()
     csid = str(sess.get("client_session_id") or "").strip()
     # Deny only over a usable binding: the advice to keep using it depends on
     # the injected client_session_id, so a cache without one is no binding.
     if not uuid or not csid:
-        return ""
-    # SessionStart marks a cache inherited by a resumed process: that process
-    # may mint its own identity (declaring the predecessor as parent).
-    if sess.get("prior_process") is True:
         return ""
     origin = str(sess.get("onboard_origin") or "").strip() or "unknown"
     return (
@@ -183,6 +193,29 @@ def _duplicate_mint_reason(tool_input: dict, raw: str) -> str:
         "check_working_state or sync_state directly. If you deliberately need "
         "a new identity here (a real spawn or handoff), call again with "
         "parent_agent_id or spawn_reason=\"explicit\"."
+    )
+
+
+def _proofless_identity_reason(tool_input: dict, raw: str) -> str:
+    """Why bare identity() would silently replace this process's binding."""
+    if _has_proof_field(tool_input):
+        return ""
+    name = tool_input.get("name")
+    if isinstance(name, str) and name.strip():
+        return ""
+    if _truthy(tool_input.get("force_new")):
+        return ""
+    sess = _current_slot_binding(raw)
+    uuid = str(sess.get("uuid") or "").strip()
+    csid = str(sess.get("client_session_id") or "").strip()
+    if not uuid or not csid:
+        return ""
+    return (
+        f"This process is already bound to governance as agent_uuid {uuid}. "
+        "Bare identity() has no read-only meaning: the server treats it as "
+        "force_new=true and would replace this process's working identity. "
+        f"Inspect the binding with identity(client_session_id=...) using {csid}, "
+        "or call check_working_state directly."
     )
 
 
@@ -243,12 +276,17 @@ def main(argv: list[str] | None = None) -> int:
     suffix = governance_tool_suffix(data.get("tool_name"), host=args.host)
     if suffix is None:
         return 0
-    if suffix not in INJECT_SUFFIXES and suffix not in ANCHORED_MINT_SUFFIXES:
+    if (
+        suffix not in INJECT_SUFFIXES
+        and suffix not in ANCHORED_MINT_SUFFIXES
+        and suffix not in IDENTITY_ASSERT_SUFFIXES
+    ):
         return 0
     if (
         args.host == "codex"
         and suffix not in CODEX_REWRITE_SUFFIXES
         and suffix not in ANCHORED_MINT_SUFFIXES
+        and suffix not in IDENTITY_ASSERT_SUFFIXES
     ):
         return 0
 
@@ -256,6 +294,12 @@ def main(argv: list[str] | None = None) -> int:
     if tool_input is None:
         tool_input = {}
     if not isinstance(tool_input, dict):
+        return 0
+
+    if suffix in IDENTITY_ASSERT_SUFFIXES:
+        duplicate = _proofless_identity_reason(tool_input, raw)
+        if duplicate:
+            print(json.dumps(_deny_output(duplicate)))
         return 0
 
     updated = dict(tool_input)

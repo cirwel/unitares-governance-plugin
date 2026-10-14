@@ -97,7 +97,8 @@ def _read_session_cache(workspace: Path, slot: str | None = None) -> dict:
 
 
 def _mcp_response(uuid="u-123", agent_id="Test_Agent", sid="agent-abc",
-                  token="v1.tok", display_name="TestAgent"):
+                  token="v1.tok", display_name="TestAgent",
+                  identity_status=None):
     """Build a realistic MCP tool response envelope (legacy dict-wrapped shape)."""
     inner = {
         "success": True,
@@ -108,6 +109,8 @@ def _mcp_response(uuid="u-123", agent_id="Test_Agent", sid="agent-abc",
         "display_name": display_name,
         "continuity_token_supported": True,
     }
+    if identity_status is not None:
+        inner["identity_status"] = identity_status
     return {"content": [{"type": "text", "text": json.dumps(inner)}]}
 
 
@@ -872,3 +875,72 @@ class TestMintRecordsItsOwnOrigin:
         cache = _read_session_cache(tmp_path, self.SLOT)
         assert cache["onboard_origin"] == "harness_backstop"
         assert cache["onboard_origin_basis"] == "harness"
+
+
+class TestInheritedIdentityTransition:
+    """A new process gets one bare identity mint, then becomes bound."""
+
+    SLOT = "slot-inherited-identity"
+
+    def _seed(self, workspace: Path) -> None:
+        path = workspace / ".unitares" / f"session-{self.SLOT}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({
+            "uuid": "u-predecessor",
+            "client_session_id": "agent-predecessor",
+            "prior_process": True,
+            "slot": self.SLOT,
+            "schema_version": 2,
+        }))
+
+    def test_created_identity_consumes_inherited_exemption(self, tmp_path):
+        self._seed(tmp_path)
+        created = {
+            "session_id": self.SLOT,
+            "tool_use_id": "toolu_inherited_created",
+            "tool_name": "mcp__unitares-governance__identity",
+            "tool_input": {},
+            "tool_response": _mcp_response(
+                uuid="u-current",
+                sid="agent-current",
+                identity_status="created",
+            ),
+        }
+
+        first_pre = _run_pre_hook(created, tmp_path)
+        assert first_pre.returncode == 0
+        assert first_pre.stdout.strip() == ""
+        assert _run_post_hook(created, tmp_path).returncode == 0
+
+        cache = _read_session_cache(tmp_path, self.SLOT)
+        assert cache["uuid"] == "u-current"
+        assert cache["client_session_id"] == "agent-current"
+        assert cache["prior_process"] is False
+
+        second_pre = _run_pre_hook({
+            "session_id": self.SLOT,
+            "tool_use_id": "toolu_inherited_second_bare",
+            "tool_name": "mcp__unitares-governance__identity",
+            "tool_input": {},
+        }, tmp_path)
+        decision = json.loads(second_pre.stdout)["hookSpecificOutput"]
+        assert decision["permissionDecision"] == "deny"
+        assert "u-current" in decision["permissionDecisionReason"]
+
+    def test_resumed_identity_preserves_inherited_marker(self, tmp_path):
+        self._seed(tmp_path)
+        resumed = {
+            "session_id": self.SLOT,
+            "tool_name": "mcp__unitares-governance__identity",
+            "tool_input": {"client_session_id": "agent-predecessor"},
+            "tool_response": _mcp_response(
+                uuid="u-predecessor",
+                sid="agent-predecessor",
+                identity_status="resumed",
+            ),
+        }
+
+        assert _run_hook(resumed, tmp_path).returncode == 0
+        cache = _read_session_cache(tmp_path, self.SLOT)
+        assert cache["uuid"] == "u-predecessor"
+        assert cache["prior_process"] is True
