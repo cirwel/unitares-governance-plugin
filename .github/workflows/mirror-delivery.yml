@@ -1,0 +1,52 @@
+name: Verified mirror delivery
+
+# This privileged workflow runs trusted default-branch code only. The PR's
+# files are inspected as Git objects; no artifact or PR script is executed.
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+  workflow_dispatch:
+  # Recover missed events and transient API/base races without an operator click.
+  schedule:
+    - cron: '17 * * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verified-mirror-delivery
+  cancel-in-progress: false
+
+jobs:
+  deliver:
+    if: >-
+      github.repository == 'cirwel/unitares-governance-plugin' &&
+      github.ref == 'refs/heads/master' &&
+      (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' ||
+       (github.event.workflow_run.event == 'pull_request' &&
+        github.event.workflow_run.head_branch == 'auto/plugin-skill-sync'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # No human reviewer required. The environment restricts secrets to master.
+    environment: mirror-delivery
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: master
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3
+        id: app
+        with:
+          client-id: ${{ vars.UNITARES_AGENT_APP_CLIENT_ID }}
+          private-key: ${{ secrets.UNITARES_AGENT_APP_PRIVATE_KEY }}
+          owner: cirwel
+          repositories: unitares-governance-plugin
+          permission-contents: write
+          permission-pull-requests: write
+          permission-actions: read
+      - name: Verify mirror and finish delivery
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: python3 scripts/dev/merge-skill-mirror.py --apply
