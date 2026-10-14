@@ -719,6 +719,14 @@ if [[ -n "${EAGER_BOUND_UUID}" ]]; then
   # unusable cache) may hide the identity this session is bound to.
   NUDGE_ALREADY_SHOWN=0
   COMPACT_MODE=0
+  # Claude Code applies CLAUDE_ENV_FILE to the session's later Bash commands.
+  # unitares-github stamps the PR ownership footer (`UNITARES agent: <uuid>`,
+  # KG decision 2026-10-13) from UNITARES_AGENT_UUID, so attribution no longer
+  # depends on the agent remembering it. EAGER_BOUND_UUID is already validated
+  # as a plain uuid.
+  if [[ "${HOOK_HOST}" == "claude" && -n "${CLAUDE_ENV_FILE:-}" ]]; then
+    printf 'export UNITARES_AGENT_UUID=%s\n' "${EAGER_BOUND_UUID}" >> "${CLAUDE_ENV_FILE}" 2>/dev/null || true
+  fi
 fi
 
 # Lazy onboarding is opt-in (config/defaults.env). Describe what the Stop hook

@@ -201,3 +201,28 @@ def test_resume_with_home_only_binding_writes_a_complete_marked_cache(tmp_path):
     data = json.loads((workspace / ".unitares" / _slot_filename(SLOT)).read_text())
     assert data["prior_process"] is True
     assert data["uuid"] == UUID and data["client_session_id"] == CSID
+
+
+def test_bound_uuid_is_exported_for_later_commands(tmp_path):
+    env_file = tmp_path / "claude-env.sh"
+    env_file.write_text("")
+    _, onboards = _serve(tmp_path, claude_session_id=SLOT,
+                         extra_env={"CLAUDE_ENV_FILE": str(env_file)})
+    assert len(onboards) == 1
+    assert env_file.read_text() == f"export UNITARES_AGENT_UUID={UUID}\n"
+
+
+def test_unbound_session_exports_nothing(tmp_path):
+    env_file = tmp_path / "claude-env.sh"
+    env_file.write_text("")
+    _serve(tmp_path, claude_session_id=SLOT,
+           extra_env={"CLAUDE_ENV_FILE": str(env_file), "UNITARES_AUTO_ONBOARD": "off"})
+    assert env_file.read_text() == ""
+
+
+def test_codex_host_does_not_write_a_claude_env_file(tmp_path):
+    env_file = tmp_path / "claude-env.sh"
+    env_file.write_text("")
+    _serve(tmp_path, claude_session_id=SLOT, host="codex",
+           extra_env={"CLAUDE_ENV_FILE": str(env_file)})
+    assert env_file.read_text() == ""
