@@ -336,13 +336,15 @@ class TestExclusions:
         # minting tool has an anchored-session exception for bare calls.
         _write_cache(tmp_path)
         result = _run(_hook_input(
-            "mcp__unitares-governance__onboard", {"force_new": True}), tmp_path)
+            "mcp__unitares-governance__onboard",
+            {"force_new": True, "spawn_reason": "explicit"}), tmp_path)
         assert result.stdout.strip() == ""
 
     def test_never_injects_into_start_session(self, tmp_path):
         _write_cache(tmp_path)
         result = _run(_hook_input(
-            "mcp__unitares-governance__start_session", {"force_new": True}), tmp_path)
+            "mcp__unitares-governance__start_session",
+            {"force_new": True, "spawn_reason": "explicit"}), tmp_path)
         assert result.stdout.strip() == ""
 
     def test_never_injects_into_bind_session(self, tmp_path):
@@ -555,3 +557,81 @@ class TestWorkflowAliasCoverage:
             )
         )
         assert unrouted == [], f"{relative} matcher does not route: {unrouted}"
+
+
+class TestDuplicateMintGuard:
+    """A force_new mint in a slot that is already bound would give one process
+    two identities (live 2026-10-14). The hook denies it unless the call
+    declares lineage or a deliberate spawn_reason; it never rewrites it."""
+
+    @staticmethod
+    def _decision(result):
+        out = json.loads(result.stdout)["hookSpecificOutput"]
+        assert "updatedInput" not in out
+        return out
+
+    @pytest.mark.parametrize("tool", ["start_session", "onboard"])
+    @pytest.mark.parametrize("extra", [{}, {"spawn_reason": "new_session"}])
+    def test_denies_second_mint_in_bound_slot(self, tmp_path, tool, extra):
+        _write_cache(tmp_path)
+        result = _run(_hook_input(
+            f"mcp__unitares-governance__{tool}", {"force_new": True, **extra}), tmp_path)
+        out = self._decision(result)
+        assert out["permissionDecision"] == "deny"
+        assert "already bound" in out["permissionDecisionReason"]
+        assert SID in out["permissionDecisionReason"]
+        assert 'spawn_reason="explicit"' in out["permissionDecisionReason"]
+
+    @pytest.mark.parametrize("extra", [
+        {"parent_agent_id": "11111111-2222-3333-4444-555555555555"},
+        {"spawn_reason": "explicit"},
+        {"spawn_reason": "subagent"},
+        {"spawn_reason": "compaction"},
+    ])
+    def test_declared_lineage_or_deliberate_spawn_passes(self, tmp_path, extra):
+        _write_cache(tmp_path)
+        result = _run(_hook_input(
+            "mcp__unitares-governance__start_session", {"force_new": True, **extra}), tmp_path)
+        assert result.stdout.strip() == ""
+
+    def test_unbound_slot_mints_freely(self, tmp_path):
+        result = _run(_hook_input(
+            "mcp__unitares-governance__start_session", {"force_new": True}), tmp_path)
+        assert result.stdout.strip() == ""
+
+    def test_without_force_new_nothing_is_denied(self, tmp_path):
+        _write_cache(tmp_path)
+        result = _run(_hook_input("mcp__unitares-governance__start_session", {}), tmp_path)
+        assert result.stdout.strip() == ""
+
+    def test_explicit_proof_field_passes(self, tmp_path):
+        _write_cache(tmp_path)
+        result = _run(_hook_input(
+            "mcp__unitares-governance__start_session",
+            {"force_new": True, "client_session_id": "agent-other"}), tmp_path)
+        assert result.stdout.strip() == ""
+
+    def test_codex_host_denies_too(self, tmp_path):
+        _write_cache(tmp_path)
+        result = _run(_hook_input(
+            "mcp__unitares-governance__start_session", {"force_new": True}), tmp_path, host="codex")
+        assert self._decision(result)["permissionDecision"] == "deny"
+
+
+def test_cache_without_a_binding_does_not_deny(tmp_path):
+    cache = tmp_path / ".unitares" / f"session-{SLOT}.json"
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_text(json.dumps({"uuid": "cafe1234-0000-0000-0000-000000000000"}))
+    result = _run(_hook_input(
+        "mcp__unitares-governance__start_session", {"force_new": True}), tmp_path)
+    assert result.stdout.strip() == ""
+
+
+def test_cache_inherited_by_a_resumed_process_does_not_deny(tmp_path):
+    cache = tmp_path / ".unitares" / f"session-{SLOT}.json"
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_text(json.dumps({"uuid": "cafe1234-0000-0000-0000-000000000000",
+                                 "client_session_id": SID, "prior_process": True}))
+    result = _run(_hook_input(
+        "mcp__unitares-governance__start_session", {"force_new": True}), tmp_path)
+    assert result.stdout.strip() == ""

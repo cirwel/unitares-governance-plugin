@@ -53,6 +53,8 @@ including `0` and `off` kill switches:
 | `UNITARES_AGENT_PREFIX` | host-specific | Prefix for generated client-side names (`claude` or `codex` unless overridden) |
 | `UNITARES_CHECKINS` | `on` | `off` suppresses plugin-emitted check-ins and the host-observation bridge; manual MCP calls remain available |
 | `UNITARES_AUTO_ONBOARD` | `off` | Set to `on` to let the host Stop hook create a slot-scoped identity before its first turn summary when the agent has not onboarded; off leaves un-onboarded sessions as identity-free floor observations |
+| `UNITARES_EAGER_BIND` | `on` | With `UNITARES_AUTO_ONBOARD=on`, SessionStart mints that identity at startup instead of at the first Stop and names its `agent_uuid` and `client_session_id` in the session context, so the agent does not mint a second one. Skipped for orchestrated anchors, spawned children with a declared parent candidate, and slots that already have a cache. `off` restores the lazy Stop-only path |
+| `UNITARES_EAGER_BIND_TIMEOUT` | `5` | Seconds the SessionStart mint may take before it gives up silently (the Stop hook's lazy path stays as the fallback) |
 | `UNITARES_HOOK_FUNDAMENTALS_EXCERPT` | `off` | SessionStart points both hosts at the `governance-fundamentals` and `governance-lifecycle` skills; `on` inlines the ~4 KB Fundamentals excerpt instead, for a host build that does not load plugin skills |
 | `UNITARES_FILE_LEASES_ENABLED` | `1` | Enable host edit leases (Claude Edit/Write/MultiEdit; Codex apply_patch) |
 | `UNITARES_FILE_LEASES_REQUIRED` | `0` | Block edits when lease infrastructure is missing/unreachable; truthy values take precedence over `UNITARES_FILE_LEASES_ENABLED=0` |

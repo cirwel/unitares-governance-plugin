@@ -255,6 +255,27 @@ payload = {
     "slot": session_id,
     "schema_version": 2,
 }
+# A mint replaces the slot's identity, so it also replaces the record of who
+# minted it. Without this, --merge kept the previous identity's
+# onboard_origin: an agent-minted uuid read "harness_backstop" (seen live
+# 2026-10-14). Resume-shaped tools keep the cached value; they do not mint.
+# onboard/start_session can also RESUME (is_new=false); that is no mint, so the
+# cached provenance stays (a resume's state_summary describes the call, not
+# the identity's birth).
+_resumed = resp.get("is_new") is False or canonical.get("is_new") is False
+if suffix in ("onboard", "start_session"):
+    _summary = resp.get("state_summary") if isinstance(resp.get("state_summary"), dict) else {}
+    _canon_summary = canonical.get("state_summary") if isinstance(canonical.get("state_summary"), dict) else {}
+    _origin = (_summary.get("onboard_origin") or _canon_summary.get("onboard_origin")
+               or _response_field("onboard_origin"))
+    if not _resumed:
+        # A mint belongs to the process that made it, not to a predecessor.
+        payload["prior_process"] = False
+        payload["onboard_origin"] = str(_origin or "agent")
+        payload["onboard_origin_basis"] = str(
+            _summary.get("onboard_origin_basis") or _canon_summary.get("onboard_origin_basis")
+            or _response_field("onboard_origin_basis") or ""
+        )
 # Emit session_id on stdout line 1, JSON payload on line 2 — the shell
 # splits them to pass --slot and --json separately.
 print(session_id)
