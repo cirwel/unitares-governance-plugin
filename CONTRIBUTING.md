@@ -69,6 +69,28 @@ If a change touches both behavior and docs, keep them together only if the docs 
 
 ## Practical Review Standard
 
+### Routine delivery and the canonical skill mirror
+
+The owning agent completes ordinary validated PRs through merge; a manual
+GitHub operation does not require the operator to click it. The operator
+decides reserved policy and authority changes once. Approved content may then
+propagate without another approval of the same decision.
+
+Operator-delegated on 2026-10-14: `Verified mirror delivery` owns completion
+of `auto/plugin-skill-sync` PRs. After CI it independently compares every skill
+file and attestation with canonical `cirwel/unitares` master, recomputes the
+manifest, and rejects any change outside `skills/`. It checks the current PR
+head and honors `automerge-hold`, `do-not-merge`, and `governance-sensitive`.
+It updates a behind branch and waits for fresh CI, or merges the verified head
+using GitHub's normal protections. It never executes code from the PR.
+
+The `mirror-delivery` environment allows only `master`, with no required human
+reviewers. Its `UNITARES_AGENT_APP_PRIVATE_KEY` secret and
+`UNITARES_AGENT_APP_CLIENT_ID` variable mint a short-lived token for this repo
+only. The App authenticates delivery; the canonical commit, PR head and CI
+establish what was checked. A blocked run explains the failed condition in its
+Actions summary so an agent can investigate. No general merge bypass is added.
+
 Before opening or merging a PR, check:
 
 - the README still matches the runtime story
