@@ -31,6 +31,10 @@ Contract:
   UNITARES_ORCHESTRATED marker must both be present, and force_new must be
   absent. Explicit force_new and explicit proof fields still win. Never
   injects into bind_session/identity.
+- Denies a force_new onboard/start_session when the slot cache already names
+  an identity and the call declares neither parent_agent_id nor a deliberate
+  spawn_reason: that mint would give one process two identities. The deny
+  reason names the bound identity and the explicit opt-in.
 - Skips when the call already carries any identity proof field
   (client_session_id, continuity_token, agent_uuid, agent_id) — explicit
   caller intent always wins.
@@ -123,6 +127,65 @@ CODEX_REWRITE_SUFFIXES = frozenset({
 
 ANCHORED_MINT_SUFFIXES = frozenset({"onboard", "start_session"})
 PROOF_FIELDS = ("client_session_id", "continuity_token", "agent_uuid", "agent_id")
+# spawn_reason values that declare a deliberate new identity inside an already
+# bound slot. "new_session" and an absent reason do not: a process that is
+# already bound is not a new session.
+DELIBERATE_SPAWN_REASONS = frozenset({
+    "explicit", "subagent", "dialectic_reviewer", "dispatch", "compaction",
+})
+
+
+def _truthy(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _duplicate_mint_reason(tool_input: dict, raw: str) -> str:
+    """Why a force_new mint would split an already bound process, or "".
+
+    A slot whose cache already names an identity belongs to one process. A
+    second force_new mint there gives that process two identities that the
+    lineage rules can never join (its first identity is still live, so naming
+    it as parent is rejected as coincidental). Seen live 2026-10-14. A call
+    that declares lineage (parent_agent_id) or a deliberate spawn_reason
+    passes through: that is the explicit opt-in the identity invariants keep.
+    """
+    if not _truthy(tool_input.get("force_new")):
+        return ""
+    parent = tool_input.get("parent_agent_id")
+    if isinstance(parent, str) and parent.strip():
+        return ""
+    reason = str(tool_input.get("spawn_reason") or "").strip().lower()
+    if reason in DELIBERATE_SPAWN_REASONS:
+        return ""
+    try:
+        from _session_lookup import load_session_for_hook
+        sess = load_session_for_hook(Path.cwd(), raw) or {}
+    except Exception:
+        return ""
+    uuid = str(sess.get("uuid") or "").strip()
+    if not uuid:
+        return ""
+    csid = str(sess.get("client_session_id") or "").strip()
+    origin = str(sess.get("onboard_origin") or "").strip() or "unknown"
+    return (
+        f"This process is already bound to governance as agent_uuid {uuid} "
+        f"(onboard_origin={origin}). force_new would mint a second identity for "
+        "the same process. Keep using the bound one: the hook adds its "
+        f"client_session_id ({csid or 'cached'}) to governance calls, so call "
+        "check_working_state or sync_state directly. If you deliberately need "
+        "a new identity here (a real spawn or handoff), call again with "
+        "parent_agent_id or spawn_reason=\"explicit\"."
+    )
+
+
+def _deny_output(reason: str) -> dict:
+    return {"hookSpecificOutput": {
+        "hookEventName": "PreToolUse",
+        "permissionDecision": "deny",
+        "permissionDecisionReason": reason,
+    }}
 
 
 def _hook_output(updated: dict, host: str) -> dict:
@@ -199,6 +262,11 @@ def main(argv: list[str] | None = None) -> int:
         # onboarding path. The exception is intentionally narrow: if the agent
         # explicitly names force_new or any proof field, pass the call through.
         anchor = _env_anchor()
+        if not anchor and not _has_proof_field(tool_input):
+            duplicate = _duplicate_mint_reason(tool_input, raw)
+            if duplicate:
+                print(json.dumps(_deny_output(duplicate)))
+                return 0
         if anchor and "force_new" not in tool_input and not _has_proof_field(tool_input):
             updated["client_session_id"] = anchor
             changed = True

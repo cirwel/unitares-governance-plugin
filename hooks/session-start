@@ -597,6 +597,75 @@ if [[ -n "${UNITARES_CLIENT_SESSION_ID:-}" \
   ANCHOR_RESUME_ENABLED=1
 fi
 
+# Eager bind: when harness onboarding is enabled, mint this process's identity
+# now instead of at the first Stop. The lazy path left the agent unaware of an
+# identity minted after its first turn, so an agent that later followed the
+# start_session(force_new=true) advice created a second identity for the same
+# process (seen live 2026-10-14: c1d9c08a minted at the first Stop, b46bcd93
+# by the agent hours later, two strangers in one slot). Binding at startup and
+# naming the identity in the context removes that blind spot. Same mint as the
+# Stop hook (onboard_helper, onboard_origin=harness_backstop, no inferred
+# parent). Skipped for orchestrated anchors (they resume), spawned children
+# with a declared parent candidate (they declare lineage themselves), Codex
+# compaction continuations, and any slot that already has a cache. A failure
+# here is silent: the Stop hook's lazy path stays as the fallback.
+EAGER_BOUND_UUID=""
+EAGER_BOUND_CSID=""
+_eager_on() {
+  case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
+    on|1|true|yes) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+if [[ -n "${HEALTH_STATUS}" \
+      && "${ANCHOR_RESUME_ENABLED}" != "1" \
+      && -z "${CODEX_COMPACTION_CONTEXT}" \
+      && -z "${ENV_PARENT_UUID}" \
+      && -n "${HOST_SESSION_ID}" \
+      && -n "${WORKSPACE_CACHE}" && ! -f "${WORKSPACE_CACHE}" \
+      && "$(printf '%s' "${UNITARES_CHECKINS:-on}" | tr '[:upper:]' '[:lower:]')" != "off" \
+      && "${UNITARES_DISABLE_AUTO_ONBOARD:-0}" != "1" ]] \
+   && _eager_on "${UNITARES_AUTO_ONBOARD:-off}" \
+   && _eager_on "${UNITARES_EAGER_BIND:-on}" \
+   && [[ -f "${PLUGIN_ROOT}/scripts/onboard_helper.py" ]]; then
+  EAGER_WORKSPACE_DIR="${PWD}"
+  if [[ "${HOOK_HOST}" == "claude" && -n "${CLAUDE_PROJECT_DIR:-}" ]]; then
+    EAGER_WORKSPACE_DIR="${CLAUDE_PROJECT_DIR}"
+  fi
+  EAGER_MODEL_TYPE="codex"
+  [[ "${HOOK_HOST}" == "claude" ]] && EAGER_MODEL_TYPE="claude-code"
+  EAGER_AGENT_NAME="${UNITARES_AGENT_NAME:-${UNITARES_AGENT_PREFIX:-${HOOK_HOST}}-$(basename "${EAGER_WORKSPACE_DIR}")}"
+  python3 "${PLUGIN_ROOT}/scripts/onboard_helper.py" \
+    --server-url "${SERVER_URL}" \
+    --name "${EAGER_AGENT_NAME}" \
+    --model-type "${UNITARES_MODEL_TYPE:-${EAGER_MODEL_TYPE}}" \
+    --workspace "${PWD}" \
+    --slot "${HOST_SESSION_ID}" \
+    --timeout "${UNITARES_EAGER_BIND_TIMEOUT:-5}" \
+    >/dev/null 2>&1 || true
+  if [[ -f "${WORKSPACE_CACHE}" ]]; then
+    EAGER_FIELDS=$(python3 - "${WORKSPACE_CACHE}" <<'PY' 2>/dev/null || true
+import json
+import re
+import sys
+
+try:
+    data = json.load(open(sys.argv[1], encoding="utf-8"))
+except Exception:
+    data = {}
+uuid = str(data.get("uuid") or "")
+csid = str(data.get("client_session_id") or "")
+# Both values land in agent context; refuse anything that is not a plain id.
+if re.fullmatch(r"[0-9a-fA-F-]{36}", uuid) and re.fullmatch(r"[A-Za-z0-9:/._-]{1,200}", csid):
+    print(uuid)
+    print(csid)
+PY
+)
+    EAGER_BOUND_UUID=$(printf '%s\n' "${EAGER_FIELDS}" | sed -n 1p)
+    EAGER_BOUND_CSID=$(printf '%s\n' "${EAGER_FIELDS}" | sed -n 2p)
+  fi
+fi
+
 # Lazy onboarding is opt-in (config/defaults.env). Describe what the Stop hook
 # will actually do so the agent is not told an identity will appear when it
 # will not.
@@ -684,16 +753,31 @@ ${RECOVERY_GUIDANCE}"
     if [[ -n "${NUDGE_MARKER}" ]]; then
       SHOULD_WRITE_NUDGE_MARKER=1
     fi
-    CONTEXT="UNITARES Governance: ONLINE
+    if [[ -n "${EAGER_BOUND_UUID}" ]]; then
+      IDENTITY_BLOCK="Identity: this ${HOOK_HOST} process is already bound to governance.
 
-Identity attribution: bind this process to governance before substantive
+    agent_uuid:        ${EAGER_BOUND_UUID}
+    client_session_id: ${EAGER_BOUND_CSID}
+
+SessionStart minted it (onboard_origin=harness_backstop). The
+pre-governance-call hook adds this client_session_id to your governance
+calls, so call check_working_state / sync_state directly. Do NOT call
+start_session(force_new=true): it would mint a second identity for this same
+process. Lineage needs a new mint only for a real spawn or a handoff from an
+exited predecessor; then pass parent_agent_id (or spawn_reason=\"explicit\")."
+    else
+      IDENTITY_BLOCK="Identity attribution: bind this process to governance before substantive
 work when you can. Call:
 
     start_session(force_new=true)          # canonical/raw: onboard(force_new=true)
 
 SessionStart has not created an identity yet. ${AUTO_ONBOARD_NOTE}
 Manual start_session is still preferred when you need governance MCP calls
-during the turn.
+during the turn."
+    fi
+    CONTEXT="UNITARES Governance: ONLINE
+
+${IDENTITY_BLOCK}
 
 Do not manufacture a check-in to satisfy this note. Use \`sync_state(...)\`
 only when there is meaningful state worth reporting:
@@ -724,7 +808,9 @@ ${RECOVERY_GUIDANCE}"
 
   # Suppress the lineage hint on anchored sessions: it nudges force_new /
   # parent declaration, which contradicts resume-one-identity-per-anchor.
-  if [[ "${ANCHOR_RESUME_ENABLED}" != "1" && -n "${WORKSPACE_LINEAGE_HINT}" ]]; then
+  # Also suppressed once SessionStart has bound this process: the hint's
+  # "onboard fresh: start_session(force_new=true)" would mint a second one.
+  if [[ "${ANCHOR_RESUME_ENABLED}" != "1" && -z "${EAGER_BOUND_UUID}" && -n "${WORKSPACE_LINEAGE_HINT}" ]]; then
     CONTEXT="${CONTEXT}
 
 ${WORKSPACE_LINEAGE_HINT}"

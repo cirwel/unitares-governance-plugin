@@ -791,3 +791,64 @@ class TestPostIdentityResilience:
         cache = _read_session_cache(tmp_path, "s-bound")
         assert cache["uuid"] == "u-bound-1"
         assert cache["agent_id"] == "ResumedAgent"
+
+
+class TestMintRecordsItsOwnOrigin:
+    """A mint replaces the slot's identity and the record of who minted it.
+    Live 2026-10-14: an agent-minted uuid inherited the harness identity's
+    onboard_origin=harness_backstop through the --merge write."""
+
+    SLOT = "slot-origin-1234"
+
+    def _seed(self, workspace: Path) -> None:
+        safe = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in self.SLOT)[:64]
+        path = workspace / ".unitares" / f"session-{safe}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({
+            "uuid": "u-harness", "client_session_id": "agent-harness",
+            "onboard_origin": "harness_backstop", "onboard_origin_basis": "harness",
+            "slot": self.SLOT, "schema_version": 2,
+        }))
+
+    def test_agent_mint_overwrites_the_inherited_origin(self, tmp_path):
+        self._seed(tmp_path)
+        response = _start_session_response(uuid="u-agent")
+        inner = json.loads(response["content"][0]["text"])
+        inner["state_summary"] = {"onboard_origin": "agent",
+                                  "onboard_origin_basis": "default_unmarked_call"}
+        response = {"content": [{"type": "text", "text": json.dumps(inner)}]}
+        result = _run_hook({
+            "session_id": self.SLOT,
+            "tool_name": "mcp__unitares-governance__start_session",
+            "tool_input": {"force_new": True, "spawn_reason": "explicit"},
+            "tool_response": response,
+        }, tmp_path, host="claude")
+        assert result.returncode == 0
+        cache = _read_session_cache(tmp_path, self.SLOT)
+        assert cache["uuid"] == "u-agent"
+        assert cache["onboard_origin"] == "agent"
+        assert cache["onboard_origin_basis"] == "default_unmarked_call"
+
+    def test_mint_without_origin_in_response_reads_agent(self, tmp_path):
+        self._seed(tmp_path)
+        result = _run_hook({
+            "session_id": self.SLOT,
+            "tool_name": "mcp__unitares-governance__onboard",
+            "tool_input": {"force_new": True, "spawn_reason": "explicit"},
+            "tool_response": _mcp_response(uuid="u-agent2"),
+        }, tmp_path, host="claude")
+        assert result.returncode == 0
+        cache = _read_session_cache(tmp_path, self.SLOT)
+        assert cache["uuid"] == "u-agent2"
+        assert cache["onboard_origin"] == "agent"
+
+    def test_resume_keeps_the_cached_origin(self, tmp_path):
+        self._seed(tmp_path)
+        result = _run_hook({
+            "session_id": self.SLOT,
+            "tool_name": "mcp__unitares-governance__identity",
+            "tool_input": {},
+            "tool_response": _mcp_response(uuid="u-harness", sid="agent-harness"),
+        }, tmp_path, host="claude")
+        assert result.returncode == 0
+        assert _read_session_cache(tmp_path, self.SLOT)["onboard_origin"] == "harness_backstop"
