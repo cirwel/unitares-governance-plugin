@@ -203,21 +203,46 @@ def test_resume_with_home_only_binding_writes_a_complete_marked_cache(tmp_path):
     assert data["uuid"] == UUID and data["client_session_id"] == CSID
 
 
-def test_bound_uuid_is_exported_for_later_commands(tmp_path):
+def _exported_pointer(env_file):
+    text = env_file.read_text()
+    assert text.startswith("export UNITARES_SESSION_CACHE=") and text.count("\n") == 1
+    return text.split("=", 1)[1].strip()
+
+
+def test_session_exports_a_pointer_to_its_own_cache(tmp_path):
     env_file = tmp_path / "claude-env.sh"
     env_file.write_text("")
     _, onboards = _serve(tmp_path, claude_session_id=SLOT,
                          extra_env={"CLAUDE_ENV_FILE": str(env_file)})
     assert len(onboards) == 1
-    assert env_file.read_text() == f"export UNITARES_AGENT_UUID={UUID}\n"
+    pointer = Path(_exported_pointer(env_file))
+    assert pointer == (tmp_path / ".unitares" / _slot_filename(SLOT)).resolve()
+    assert json.loads(pointer.read_text())["uuid"] == UUID
 
 
-def test_unbound_session_exports_nothing(tmp_path):
+def test_unbound_session_still_exports_its_own_pointer(tmp_path):
+    # A child process must not keep a parent's pointer just because it is not
+    # bound yet: its own (empty) slot path replaces the inherited value.
     env_file = tmp_path / "claude-env.sh"
     env_file.write_text("")
     _serve(tmp_path, claude_session_id=SLOT,
            extra_env={"CLAUDE_ENV_FILE": str(env_file), "UNITARES_AUTO_ONBOARD": "off"})
-    assert env_file.read_text() == ""
+    pointer = Path(_exported_pointer(env_file))
+    assert pointer.name == _slot_filename(SLOT)
+    assert not pointer.exists()
+
+
+def test_pointer_follows_a_home_mirror(tmp_path):
+    workspace = tmp_path / "elsewhere"
+    workspace.mkdir()
+    mirror = tmp_path / ".unitares" / _slot_filename(SLOT)
+    mirror.parent.mkdir(parents=True)
+    mirror.write_text(json.dumps({"uuid": UUID, "client_session_id": CSID, "slot": SLOT}))
+    env_file = tmp_path / "claude-env.sh"
+    env_file.write_text("")
+    _serve(tmp_path, claude_session_id=SLOT, cwd=workspace,
+           extra_env={"CLAUDE_ENV_FILE": str(env_file)})
+    assert Path(_exported_pointer(env_file)) == mirror.resolve()
 
 
 def test_codex_host_does_not_write_a_claude_env_file(tmp_path):
