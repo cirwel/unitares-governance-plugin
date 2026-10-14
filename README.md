@@ -1,4 +1,4 @@
-# UNITARES Governance Plugin
+# UNITARES for Claude Code and Codex
 
 [![CI](https://github.com/cirwel/unitares-governance-plugin/actions/workflows/ci.yml/badge.svg)](https://github.com/cirwel/unitares-governance-plugin/actions/workflows/ci.yml)
 [![Version](https://img.shields.io/badge/version-0.4.20-blue.svg)](.claude-plugin/plugin.json)
