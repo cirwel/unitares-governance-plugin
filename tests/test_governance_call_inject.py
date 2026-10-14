@@ -26,6 +26,7 @@ sys.path.insert(0, str(PLUGIN_ROOT / "scripts"))
 from governance_call_inject import (  # noqa: E402
     ANCHORED_MINT_SUFFIXES,
     CODEX_REWRITE_SUFFIXES,
+    IDENTITY_ASSERT_SUFFIXES,
     INJECT_SUFFIXES,
 )
 from tag_normalize import TAG_BEARING_SUFFIXES  # noqa: E402
@@ -355,13 +356,16 @@ class TestExclusions:
 
     def test_never_injects_into_identity(self, tmp_path):
         # identity() with a client_session_id is a resume/assert signal; a
-        # bare identity() must stay bare or the post-identity hook would
-        # cache the resumed (possibly stale) identity — end-to-end capture
-        # via the pre→post hook chain (council finding 2026-06-12).
+        # bare identity() must never be rewritten to one or the post-identity
+        # hook could cache a resumed (possibly stale) identity. A bound slot
+        # denies the bare call instead because the server otherwise promotes
+        # it to force_new=true.
         _write_cache(tmp_path)
         result = _run(_hook_input(
             "mcp__unitares-governance__identity", {}), tmp_path)
-        assert result.stdout.strip() == ""
+        out = json.loads(result.stdout)["hookSpecificOutput"]
+        assert out["permissionDecision"] == "deny"
+        assert "updatedInput" not in out
 
     def test_skips_non_unitares_server(self, tmp_path):
         _write_cache(tmp_path)
@@ -550,7 +554,11 @@ class TestWorkflowAliasCoverage:
         assert matchers, f"{relative} has no pre-governance-call PreToolUse hook"
         unrouted = sorted(
             tool
-            for tool in INJECT_SUFFIXES | ANCHORED_MINT_SUFFIXES
+            for tool in (
+                INJECT_SUFFIXES
+                | ANCHORED_MINT_SUFFIXES
+                | IDENTITY_ASSERT_SUFFIXES
+            )
             if not any(
                 re.fullmatch(matcher, f"mcp__unitares-governance__{tool}")
                 for matcher in matchers
@@ -616,6 +624,68 @@ class TestDuplicateMintGuard:
         result = _run(_hook_input(
             "mcp__unitares-governance__start_session", {"force_new": True}), tmp_path, host="codex")
         assert self._decision(result)["permissionDecision"] == "deny"
+
+    @pytest.mark.parametrize(
+        "tool_name",
+        [
+            "mcp__unitares-governance__identity",
+            "mcp__unitares_governance__identity",
+        ],
+    )
+    @pytest.mark.parametrize("tool_input", [{}, {"force_new": False}])
+    def test_denies_proofless_identity_in_bound_slot(
+        self, tmp_path, tool_name, tool_input
+    ):
+        _write_cache(tmp_path)
+        result = _run(_hook_input(tool_name, tool_input), tmp_path, host="codex")
+        out = self._decision(result)
+        assert out["permissionDecision"] == "deny"
+        assert "Bare identity()" in out["permissionDecisionReason"]
+        assert SID in out["permissionDecisionReason"]
+        assert "identity(client_session_id=...)" in out["permissionDecisionReason"]
+
+    @pytest.mark.parametrize(
+        "proof",
+        [
+            {"client_session_id": "agent-explicit"},
+            {"continuity_token": "v1.explicit"},
+            {"agent_uuid": "11111111-2222-3333-4444-555555555555"},
+            {"agent_id": "11111111-2222-3333-4444-555555555555"},
+            {"name": "cosmetic-name"},
+        ],
+    )
+    def test_identity_with_explicit_signal_passes(self, tmp_path, proof):
+        _write_cache(tmp_path)
+        result = _run(
+            _hook_input("mcp__unitares-governance__identity", proof),
+            tmp_path,
+            host="codex",
+        )
+        assert result.stdout.strip() == ""
+
+    def test_proofless_identity_in_unbound_slot_passes(self, tmp_path):
+        result = _run(
+            _hook_input("mcp__unitares-governance__identity", {}),
+            tmp_path,
+            host="codex",
+        )
+        assert result.stdout.strip() == ""
+
+    def test_proofless_identity_in_inherited_slot_passes(self, tmp_path):
+        cache = tmp_path / ".unitares" / f"session-{SLOT}.json"
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text(json.dumps({
+            "uuid": "cafe1234-0000-0000-0000-000000000000",
+            "client_session_id": SID,
+            "prior_process": True,
+            "slot": SLOT,
+        }))
+        result = _run(
+            _hook_input("mcp__unitares-governance__identity", {}),
+            tmp_path,
+            host="codex",
+        )
+        assert result.stdout.strip() == ""
 
 
 def test_cache_without_a_binding_does_not_deny(tmp_path):
