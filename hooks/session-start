@@ -611,23 +611,53 @@ fi
 # here is silent: the Stop hook's lazy path stays as the fallback.
 EAGER_BOUND_UUID=""
 EAGER_BOUND_CSID=""
-_eager_on() {
+_eager_truthy() {
   case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
     on|1|true|yes) return 0 ;;
     *) return 1 ;;
   esac
 }
+# Prints "<uuid>\n<client_session_id>" for a usable binding of this slot, from
+# the workspace cache or its HOME mirror (the lookup every other hook uses).
+_eager_binding() {
+  python3 - "${PLUGIN_ROOT}/scripts" "${SESSION_START_STDIN}" <<'PY' 2>/dev/null || true
+import re
+import sys
+
+sys.path.insert(0, sys.argv[1])
+from _session_lookup import load_session_for_hook
+
+data = load_session_for_hook(".", sys.argv[2]) or {}
+uuid = str(data.get("uuid") or "")
+csid = str(data.get("client_session_id") or "")
+# Both values land in agent context; refuse anything that is not a plain id.
+if re.fullmatch(r"[0-9a-fA-F-]{36}", uuid) and re.fullmatch(r"[A-Za-z0-9:/._-]{1,200}", csid):
+    print(uuid)
+    print(csid)
+PY
+}
+# Only on a brand-new host session (startup or /clear): no Stop hook can still
+# be minting for that slot, so the two paths cannot both mint. A resume or
+# compact without a cache keeps the lazy Stop path.
+EAGER_SOURCE=$(printf '%s' "${SESSION_START_STDIN}" | python3 -c '
+import json, sys
+try:
+    event = json.load(sys.stdin)
+except Exception:
+    event = {}
+print(event.get("source") or "startup" if isinstance(event, dict) else "startup")
+' 2>/dev/null || echo startup)
 if [[ -n "${HEALTH_STATUS}" \
       && "${ANCHOR_RESUME_ENABLED}" != "1" \
       && -z "${CODEX_COMPACTION_CONTEXT}" \
       && -z "${ENV_PARENT_UUID}" \
       && -n "${HOST_SESSION_ID}" \
-      && -n "${WORKSPACE_CACHE}" && ! -f "${WORKSPACE_CACHE}" \
-      && "$(printf '%s' "${UNITARES_CHECKINS:-on}" | tr '[:upper:]' '[:lower:]')" != "off" \
-      && "${UNITARES_DISABLE_AUTO_ONBOARD:-0}" != "1" ]] \
-   && _eager_on "${UNITARES_AUTO_ONBOARD:-off}" \
-   && _eager_on "${UNITARES_EAGER_BIND:-on}" \
-   && [[ -f "${PLUGIN_ROOT}/scripts/onboard_helper.py" ]]; then
+      && ( "${EAGER_SOURCE}" == "startup" || "${EAGER_SOURCE}" == "clear" ) \
+      && "$(printf '%s' "${UNITARES_CHECKINS:-on}" | tr '[:upper:]' '[:lower:]')" != "off" ]] \
+   && ! _eager_truthy "${UNITARES_DISABLE_AUTO_ONBOARD:-0}" \
+   && _eager_truthy "${UNITARES_AUTO_ONBOARD:-off}" \
+   && _eager_truthy "${UNITARES_EAGER_BIND:-on}" \
+   && [[ -f "${PLUGIN_ROOT}/scripts/onboard_helper.py" && -z "$(_eager_binding)" ]]; then
   EAGER_WORKSPACE_DIR="${PWD}"
   if [[ "${HOOK_HOST}" == "claude" && -n "${CLAUDE_PROJECT_DIR:-}" ]]; then
     EAGER_WORKSPACE_DIR="${CLAUDE_PROJECT_DIR}"
@@ -643,26 +673,13 @@ if [[ -n "${HEALTH_STATUS}" \
     --slot "${HOST_SESSION_ID}" \
     --timeout "${UNITARES_EAGER_BIND_TIMEOUT:-5}" \
     >/dev/null 2>&1 || true
-  if [[ -f "${WORKSPACE_CACHE}" ]]; then
-    EAGER_FIELDS=$(python3 - "${WORKSPACE_CACHE}" <<'PY' 2>/dev/null || true
-import json
-import re
-import sys
-
-try:
-    data = json.load(open(sys.argv[1], encoding="utf-8"))
-except Exception:
-    data = {}
-uuid = str(data.get("uuid") or "")
-csid = str(data.get("client_session_id") or "")
-# Both values land in agent context; refuse anything that is not a plain id.
-if re.fullmatch(r"[0-9a-fA-F-]{36}", uuid) and re.fullmatch(r"[A-Za-z0-9:/._-]{1,200}", csid):
-    print(uuid)
-    print(csid)
-PY
-)
-    EAGER_BOUND_UUID=$(printf '%s\n' "${EAGER_FIELDS}" | sed -n 1p)
-    EAGER_BOUND_CSID=$(printf '%s\n' "${EAGER_FIELDS}" | sed -n 2p)
+  EAGER_FIELDS=$(_eager_binding)
+  EAGER_BOUND_UUID=$(printf '%s\n' "${EAGER_FIELDS}" | sed -n 1p)
+  EAGER_BOUND_CSID=$(printf '%s\n' "${EAGER_FIELDS}" | sed -n 2p)
+  if [[ -n "${EAGER_BOUND_UUID}" ]]; then
+    # A nudge marker left by an earlier fire (whose onboarding failed) must
+    # not hide the identity this fire just bound.
+    NUDGE_ALREADY_SHOWN=0
   fi
 fi
 

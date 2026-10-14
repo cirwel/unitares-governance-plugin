@@ -14,6 +14,8 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
 PLUGIN_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PLUGIN_ROOT / "scripts"))
 
@@ -79,6 +81,8 @@ def test_bound_session_drops_the_onboard_fresh_lineage_hint(tmp_path):
     assert len(onboards) == 1
     context = _context(stdout)
     assert "99999999-8888-4777-8666-555555555555" not in context
+    # The control run left a nudge marker; it must not hide the new binding.
+    assert UUID in context and "already bound" in context
 
 
 def test_auto_onboard_off_mints_nothing(tmp_path):
@@ -116,3 +120,36 @@ def test_orchestrated_anchor_is_left_to_resume(tmp_path):
         extra_env={"UNITARES_CLIENT_SESSION_ID": "agent:/thread-x",
                    "UNITARES_ORCHESTRATED": "1"})
     assert onboards == []
+
+
+def test_home_mirror_counts_as_bound(tmp_path):
+    home = tmp_path
+    workspace = tmp_path / "elsewhere"
+    workspace.mkdir()
+    mirror = home / ".unitares" / _slot_filename(SLOT)
+    mirror.parent.mkdir(parents=True)
+    mirror.write_text(json.dumps({"uuid": UUID, "client_session_id": CSID, "slot": SLOT}))
+    _, onboards = _serve(tmp_path, claude_session_id=SLOT, cwd=workspace)
+    assert onboards == []
+
+
+@pytest.mark.parametrize("value", ["1", "true", "TRUE", "on", "yes"])
+def test_every_disable_value_is_honoured(tmp_path, value):
+    _, onboards = _serve(
+        tmp_path, claude_session_id=SLOT,
+        extra_env={"UNITARES_DISABLE_AUTO_ONBOARD": value})
+    assert onboards == []
+
+
+@pytest.mark.parametrize("source", ["resume", "compact"])
+def test_resume_and_compact_leave_minting_to_the_stop_hook(tmp_path, source):
+    _, onboards = _serve(
+        tmp_path, hook_payload={"session_id": SLOT, "source": source})
+    assert onboards == []
+
+
+@pytest.mark.parametrize("source", ["startup", "clear"])
+def test_new_host_sessions_bind(tmp_path, source):
+    _, onboards = _serve(
+        tmp_path, hook_payload={"session_id": SLOT, "source": source})
+    assert len(onboards) == 1

@@ -852,3 +852,22 @@ class TestMintRecordsItsOwnOrigin:
         }, tmp_path, host="claude")
         assert result.returncode == 0
         assert _read_session_cache(tmp_path, self.SLOT)["onboard_origin"] == "harness_backstop"
+
+
+    def test_start_session_resume_keeps_the_cached_origin(self, tmp_path):
+        self._seed(tmp_path)
+        response = _start_session_response(uuid="u-harness", sid="agent-harness")
+        inner = json.loads(response["content"][0]["text"])
+        inner["is_new"] = False
+        inner["state_summary"] = {"onboard_origin": "agent"}
+        response = {"content": [{"type": "text", "text": json.dumps(inner)}]}
+        result = _run_hook({
+            "session_id": self.SLOT,
+            "tool_name": "mcp__unitares-governance__start_session",
+            "tool_input": {"agent_uuid": "u-harness", "resume": True},
+            "tool_response": response,
+        }, tmp_path, host="claude")
+        assert result.returncode == 0
+        cache = _read_session_cache(tmp_path, self.SLOT)
+        assert cache["onboard_origin"] == "harness_backstop"
+        assert cache["onboard_origin_basis"] == "harness"

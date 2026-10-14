@@ -165,15 +165,17 @@ def _duplicate_mint_reason(tool_input: dict, raw: str) -> str:
     except Exception:
         return ""
     uuid = str(sess.get("uuid") or "").strip()
-    if not uuid:
-        return ""
     csid = str(sess.get("client_session_id") or "").strip()
+    # Deny only over a usable binding: the advice to keep using it depends on
+    # the injected client_session_id, so a cache without one is no binding.
+    if not uuid or not csid:
+        return ""
     origin = str(sess.get("onboard_origin") or "").strip() or "unknown"
     return (
         f"This process is already bound to governance as agent_uuid {uuid} "
         f"(onboard_origin={origin}). force_new would mint a second identity for "
         "the same process. Keep using the bound one: the hook adds its "
-        f"client_session_id ({csid or 'cached'}) to governance calls, so call "
+        f"client_session_id ({csid}) to governance calls, so call "
         "check_working_state or sync_state directly. If you deliberately need "
         "a new identity here (a real spawn or handoff), call again with "
         "parent_agent_id or spawn_reason=\"explicit\"."
