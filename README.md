@@ -1,333 +1,197 @@
-# UNITARES Governance
+# UNITARES Governance Plugin
 
-[![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![Claude Code Plugin](https://img.shields.io/badge/Claude%20Code-plugin-d97757.svg)](https://docs.claude.com/en/docs/claude-code/plugins)
-[![Codex Plugin](https://img.shields.io/badge/Codex-plugin-10a37f.svg)](./CODEX_START.md)
+[![CI](https://github.com/cirwel/unitares-governance-plugin/actions/workflows/ci.yml/badge.svg)](https://github.com/cirwel/unitares-governance-plugin/actions/workflows/ci.yml)
 [![Version](https://img.shields.io/badge/version-0.4.20-blue.svg)](.claude-plugin/plugin.json)
+[![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
-Claude Code and Codex plugin for **UNITARES**, accountability infrastructure for long-running AI agents. The plugin provides hooks and guidance for accountable identity, meaningful agent-authored check-ins, shared findings, and review across Claude Code and Codex sessions. An enabled Stop hook may add an automatic state interpretation; it is separate from an agent-authored check-in. This repo provides the skills, command guidance, hook scripts, and sidecar tooling that connect coding agents to that server. The runtime itself lives in [`cirwel/unitares`](https://github.com/cirwel/unitares); Hermes-native lifecycle bindings live in [`cirwel/unitares-host-adapter`](https://github.com/cirwel/unitares-host-adapter).
+Connect **Claude Code and Codex** to [UNITARES](https://github.com/cirwel/unitares),
+accountability infrastructure for long-running AI agents. Keep identity,
+findings, reviews, and outcomes in an attributed record that the operator and
+later agents can recover after a session ends.
 
-## Before You Install
+This plugin supplies the MCP connection, lifecycle hooks, skills, and client
+helpers. It connects to a **self-hosted, single-operator UNITARES server**;
+the server owns storage, review, and governance policy.
 
-- This is a client for a **self-hosted, single-operator** UNITARES server. Without a reachable server the hooks do nothing and the skills have nothing to talk to. See [Prerequisites](#prerequisites).
-- Hooks run on every Edit/Write (file leases) and on shell pushes (merged-PR guard). Both fail open: an unreachable server or lease plane never blocks you unless you set `UNITARES_FILE_LEASES_REQUIRED=1`.
-- No governance identity is created unasked. Set `UNITARES_AUTO_ONBOARD=on` to let the Stop hook mint one when the agent has not onboarded.
+## What it adds
 
-## Install With Claude Code
+- **Identity and continuity:** bind work to a process, retain its session
+  context locally, and declare lineage for an actual dispatch or handoff.
+- **Shared findings:** search earlier work and preserve evidence, corrections,
+  and uncertainty outside the current conversation.
+- **Review and outcomes:** request structured review and record what actually
+  happened, so later work can recover both the claim and its result.
+- **Host integration:** lifecycle guidance, edit leases, check-in helpers, and
+  diagnostics for Claude Code and Codex. A sidecar supports other runners.
 
-This repository is a Claude Code plugin marketplace. Add the marketplace, then
-install the plugin:
+## Install
+
+### Prerequisites
+
+You need a running UNITARES server and Python 3.12+ available to hook commands
+as `python3`. Windows also requires Git Bash from Git for Windows.
+
+For a new server, follow the [verified-release Docker quickstart](https://github.com/cirwel/unitares/blob/master/docs/manual/02-install.md#21-docker-quickstart).
+The local stack exposes MCP at `http://localhost:8767/mcp/` and the dashboard
+at `http://localhost:8767/dashboard`. Server deployment and updates belong to
+that guide; installing this plugin does not start a server.
+
+The host contracts in this repository were tested with Claude Code 2.1.220
+and Codex CLI 0.146.0. See the [adapter reference](docs/adapters.md#host-hook-contract)
+for the tested payloads and host-specific behavior.
+
+### Claude Code
+
+Run inside Claude Code:
 
 ```text
 /plugin marketplace add cirwel/unitares-governance-plugin
 /plugin install unitares-governance@unitares-governance
 ```
 
-The plugin ships an `.mcp.json` file that registers its governance MCP client.
-No hand-edited `mcpServers` JSON is required. A UNITARES server must still be
-reachable at `http://localhost:8767`, or at the base URL configured through
-`UNITARES_SERVER_URL`; see [Prerequisites](#prerequisites). Codex and ChatGPT
-users should start with [CODEX_START.md](./CODEX_START.md).
+Start a new session. The plugin registers its MCP client through
+[`.mcp.json`](.mcp.json) and loads [Claude hooks](hooks/claude-hooks.json).
+The default server is `http://localhost:8767`; a remote or authenticated
+deployment uses `UNITARES_SERVER_URL` and `UNITARES_HTTP_API_TOKEN`.
 
-Current Claude Code hook payloads scope this plugin-bundled server as
-`plugin_unitares-governance_unitares-governance`, producing tool names such as
-`mcp__plugin_unitares-governance_unitares-governance__sync_state`. Codex uses
-the bare `mcp__unitares-governance__sync_state` form instead.
+### Codex
 
-Host contracts are tested with Claude Code 2.1.220 and Codex CLI 0.146.0;
-these are the minimum tested versions. Add the Codex marketplace with
-`codex plugin marketplace add cirwel/unitares-governance-plugin`, install the
-plugin from `/plugins`, and start a new session. Review the bundled lifecycle
-commands in `/hooks`; Codex does not run untrusted plugin hooks automatically.
-The bundled Codex MCP transport is an unauthenticated localhost default. See
-[Configuration](#configuration) before connecting Codex to a hosted or
-authenticated server.
+Add the marketplace from a terminal:
 
-## Purpose
+```bash
+codex plugin marketplace add cirwel/unitares-governance-plugin
+```
 
-This repo is not the governance engine itself. It is the client and integration layer.
+Open `/plugins` in Codex, install and enable **UNITARES Governance**, then
+start a new session. Open `/hooks` to review and trust the bundled command
+hooks; installing the plugin alone does not authorize them. See the
+[official plugin setup and hook trust documentation](https://developers.openai.com/plugins/build/plugins).
 
-Use it to:
+The bundled [Codex MCP transport](.codex-mcp.json) points to unauthenticated
+`http://localhost:8767/mcp/`. It does **not** read the Claude transport's URL or
+bearer-token settings. For a hosted or authenticated server, follow
+[Server connections](docs/configuration.md#server-connections) to disable the
+bundled transport and register an authenticated `unitares-governance` server.
 
-- onboard agents into UNITARES
-- inspect governance state and operator diagnostics
-- request dialectic review
-- work with the knowledge graph
-- adapt UNITARES workflows to Codex, ChatGPT, Claude, and other clients
+[CODEX_START.md](CODEX_START.md) covers explicit use, hook behavior, and the
+local continuity cache. Hook scripts must exist in the client's execution
+environment; installing a plugin on the web does not deploy local scripts.
 
-## Limits
+## Core workflow
 
-- Verdicts (proceed, guide, pause) are a state estimate for the agent and operator. This repo makes no claim that pausing improves outcomes.
+Use the bundled [lifecycle skill](skills/governance-lifecycle/SKILL.md) for the
+current server contract. A normal session has a few meaningful checkpoints:
 
-## What Lives Elsewhere
+| Need | Tool or action |
+|---|---|
+| Bind a genuinely fresh, unbound process | `start_session(force_new=true)` once; retain the returned `client_session_id` |
+| Continue a bound process | Reuse its `client_session_id`; trusted hooks can inject it |
+| Recover earlier knowledge | `search_shared_memory`, then inspect the relevant findings |
+| Preserve a finding or correction | `store_finding` / `update_finding`; search before adding duplicates |
+| Report meaningful agent state | `sync_state` at a milestone or material change |
+| Inspect current state | `check_working_state` |
+| Request structured review | `request_review` |
+| Record an observed outcome | `record_result` |
 
-- `unitares` contains the runtime, MCP server, storage, health checks, and governance logic
-- `unitares-host-adapter` contains host lifecycle bindings, including the Hermes-native adapter used through a thin Hermes user plugin
-- `unitares-governance-plugin` contains the Claude/Codex-facing plugin package, skills, command guidance, hook scripts, and sidecar tooling
-- optional bridges like Discord can remain separate integrations
+A new user message is not a new process. If your host has already bound this
+session or supplied a governance resume anchor, follow that binding rather
+than minting another identity. A genuinely new process gets its own identity;
+declare `parent_agent_id` only for a real dispatch or handoff. A saved UUID or
+shared workspace alone proves neither ownership nor lineage.
 
-This repo should not duplicate server business logic or become the source of truth for thresholds that already live in the runtime.
+Check in when there is meaningful state to report. Findings, reviews, and
+outcomes have their own records; a turn ending is not evidence that a task is
+complete. Supply confidence only for a genuine forecast. If a response asks
+for recovery, follow its stated next step. For continuity problems, use
+`identity(client_session_id=...)`; for server problems, use `health_check`.
 
-## Current Surfaces in This Repo
+## What runs automatically
 
-- Codex/ChatGPT: plugin packaging, synchronous lifecycle hooks, shared skills, and explicit command guidance
-- Claude: asynchronous-capable hooks, session helpers, command docs, and optional check-in conveniences
-- Sidecar: local proxy/facade for clients without native lifecycle hooks, including local and non-frontier model runners
+With the host hooks enabled and, in Codex, trusted:
 
-Hermes Agent is intentionally not listed here as the native path. For Hermes, use `unitares-host-adapter` and install a thin Hermes user plugin that imports `unitares_host_adapter.bindings.hermes`. Direct Hermes MCP config only exposes tools; it does not provide automatic lifecycle check-ins by itself.
+| Event | Plugin behavior |
+|---|---|
+| Session start | Surface lifecycle guidance and local continuity context |
+| File edit | Acquire and release file leases through the separate lease plane; record local milestones |
+| Completed tool call | Maintain host-specific continuity and observation records; Codex receipts are not check-ins |
+| Turn stop | May emit an automatic `substrate_interpretation`, separately labeled from an agent-authored check-in |
+| Shell push | Guard against pushing more work onto a branch whose PR is already merged or closed |
 
-The shared value in this repo is the workflow guidance and client integration surface, not a second copy of the governance model.
+Claude also supports asynchronous edit check-ins. Codex does not make
+synchronous per-edit governance check-ins. The [check-in reference](docs/check-ins.md)
+documents triggers, provenance, diagnostics, and the `UNITARES_CHECKINS=off`
+kill switch.
 
-## Sidecar Placement
+## Configuration
 
-The sidecar lives in this repo at `scripts/identity_sidecar.py` because it is a
-generic client facade over the UNITARES server. It does not own governance
-policy, storage, EISV scoring, or identity semantics; those stay in
-`cirwel/unitares`.
+Automatic onboarding defaults to **off**. Set `UNITARES_AUTO_ONBOARD=on` if
+you want the Stop hook to create a slot-scoped identity when none is bound.
+Otherwise an unbound session can produce identity-free observations.
 
-It does not need a separate repo while it remains a thin local bridge for
-clients that cannot load lifecycle hooks. Split it out only if it becomes an
-independently versioned host adapter with its own release cycle, packaging, or
-runtime dependencies. For now, keeping it beside the Codex/Claude plugin docs
-keeps the integration contract and conformance tests in one place.
+Edit leases default to enabled. Missing or unreachable lease infrastructure
+fails open unless `UNITARES_FILE_LEASES_REQUIRED=1`; an actual conflicting
+lease can deny an edit. Optional Watcher integration is off by default and
+requires explicit trusted paths. These settings and the full environment
+table live in [Configuration](docs/configuration.md).
 
-For local models and smaller hosted models, prefer the sidecar over raw MCP
-direct unless the runner already manages UNITARES lifecycle state. The model
-should call task-level governance tools; the runner or sidecar should retain
-and inject process identity outside the prompt.
+## Other clients
 
-For a plain CLI that has neither lifecycle hooks nor a sidecar client, use the
-bundled process wrapper:
+For a runner without native lifecycle hooks, the bundled
+[sidecar](docs/adapters.md#sidecar) retains slot identity and injects it into
+governance calls. It supports REST and a minimal JSON-RPC MCP interface; it is
+not a full streamable-MCP/SSE proxy.
+
+For a plain CLI, run the process wrapper from this checkout:
 
 ```bash
 scripts/u-run --class goose -- goose run
 ```
 
-`u-run` reuses a compatible local sidecar or starts one for the lifetime of the
-child, starts one slot-scoped session, exports the sidecar/server context, and
-forwards termination signals. It emits one exit check-in from observed wall
-time and exit status as `substrate_interpretation`, without supplying agent
-confidence. `--class` is never inferred; when omitted its neutral value is
-`u-run`. See [the adapter guide](./docs/adapters.md#plain-cli-wrapper-u-run).
+The wrapper manages a sidecar for the child and records an exit observation
+from wall time and exit status. See [the wrapper guide](docs/adapters.md#plain-cli-wrapper-u-run).
 
-## Start Here
-
-If you are using ChatGPT or Codex, start with [CODEX_START.md](./CODEX_START.md).
-
-That path is now the preferred default. Claude hook automation remains supported, but it is no longer the canonical mental model for UNITARES usage.
+Hermes-native lifecycle bindings live in
+[`unitares-host-adapter`](https://github.com/cirwel/unitares-host-adapter).
+Adding a direct MCP connection to Hermes exposes tools but does not by itself
+install lifecycle automation.
 
 ## Documentation
 
-| Document | What it covers |
+| Guide | Read it for |
 |---|---|
-| [CODEX_START.md](./CODEX_START.md) | Preferred entry path for Codex/ChatGPT — modes, recommended flow, continuity cache |
-| [docs/](./docs/) | Documentation index and design-rationale notes (why the plugin is shaped this way) |
-| [skills/](./skills/) | Agent-facing capability docs — governance fundamentals, lifecycle, dialectic, knowledge graph, Discord bridge |
-| [commands/](./commands/) | Claude Code slash-command guidance — `/governance-start`, `/checkin`, `/diagnose`, `/dialectic` |
-| [CONTRIBUTING.md](./CONTRIBUTING.md) | Branch/PR convention and review standard |
+| [Codex quickstart](CODEX_START.md) | Setup, explicit workflow, and continuity caches |
+| [Configuration](docs/configuration.md) | Authentication, remote servers, environment variables, and kill switches |
+| [Adapter reference](docs/adapters.md) | Host contracts, Claude/Codex differences, sidecar, and wrapper |
+| [Check-ins](docs/check-ins.md) | Automatic versus agent-authored records, triggers, logs, and upgrades |
+| [Skills](skills/) | Lifecycle, state estimation, dialectic review, shared knowledge, and integration guidance |
+| [Claude commands](commands/) | `/governance-start`, `/checkin`, `/diagnose`, and `/dialectic`; these commands are not installed by Codex |
+| [Documentation index](docs/README.md) | Design rationale and the full documentation map |
+| [Contributing](CONTRIBUTING.md) | Validation, branch/PR workflow, and verified canonical skill mirrors |
 
-## Core Workflow
+## Scope and limits
 
-The intended workflow is per **fresh process**, not per user message. Do not
-call `start_session(force_new=true)` just because a new turn starts; that mints
-another process identity. Once a process is bound, continue it with
-`client_session_id`-backed `sync_state()` / `check_working_state()` calls.
+Governance readings estimate state; they do not establish task correctness or
+prove that a pause improves outcomes. See the server's
+[evidence and limits](https://github.com/cirwel/unitares/blob/master/docs/EVIDENCE_AND_LIMITS.md).
+The plugin keeps agent-authored reports, automatic observations, and actual
+outcomes distinguishable. Runtime policy, thresholds, and persistence remain
+in [`cirwel/unitares`](https://github.com/cirwel/unitares).
 
-1. `start_session(force_new=true)` once at process start, to mint a fresh process identity (`onboard(...)` is the canonical equivalent) — until you onboard, this process has no governance identity
-2. if this fresh process is a deliberate handoff from an exited process, pass `parent_agent_id=<prior uuid>` and `spawn_reason="explicit"`; sharing a workspace with an earlier process is not lineage
-3. call `sync_state()` when there is meaningful agent state to report, usually at most once per assistant turn (`process_agent_update(...)` is the canonical equivalent) — automatic Stop interpretations and bootstrap rows remain separately labeled
-4. call `check_working_state()` for read-only state
-5. use `identity(agent_uuid=..., continuity_token=..., resume=true)` only for same-live-owner proof-owned rebinds
-6. call `identity(client_session_id=...)` (never with no arguments; trust it only when `identity_assurance.caller_proven` is true) and `health_check()` when diagnosis is needed
+## Development
 
-`continuity_token` is not a normal check-in argument. Use the returned
-`client_session_id` for ordinary same-process continuity; adapters should inject
-it automatically when hooks are available.
-
-On servers with the agent-experience envelope enabled, friendly alias responses
-lift `next_action`, `state_summary`, `risk_summary`, `memory_suggestions`, and
-`recovery_hint` when present. Read aliases (`check_working_state`,
-`search_shared_memory`) omit the repeated canonical payload and flag
-`raw_governance_available` with a hint. A routine `sync_state` proceed and a
-plain fresh `start_session` omit it too and are marked
-`response_shape: "routine"`. Read a new identity's uuid from `agent_uuid`. Other responses may keep the payload under
-`raw_governance`, and `response_mode="full"` (`verbosity="full"` on
-`check_working_state`) asks for it. Older compatibility surfaces may return the canonical payload directly. Use `memory_suggestions` as retrieval cues, and prefer
-`recovery_hint` before inventing a recovery path. If `low_confidence` or
-`confidence_note` appears with memory suggestions, treat those suggestions as
-exploratory leads until you open the details or re-run a better search.
-
-The principle is simple: prefer regular behavioral baselines over raw activity noise. One real check-in per assistant turn is useful; per-tool or per-edit check-ins are usually not.
-
-## Claude Commands
-
-These custom slash commands are packaged for Claude Code. Codex uses the
-skills and explicit MCP tool flow below; it does not install `commands/`.
-
-| Command | Description |
-|---------|-------------|
-| `/governance-start` | Create or declare lineage for a Claude Code UNITARES session |
-| `/checkin` | Manual turn-baseline check-in, plus meaningful milestones |
-| `/diagnose` | Show current governance state plus identity/health diagnostics when needed |
-| `/dialectic` | Request a dialectic review |
-
-## Skills
-
-| Skill | When to Use |
-|-------|-------------|
-| `unitares-governance:governance-fundamentals` | Understanding EISV, coherence, verdicts, and calibration |
-| `unitares-governance:governance-lifecycle` | Onboarding, continuity, check-ins, and recovery |
-| `unitares-governance:dialectic-reasoning` | Participating in dialectic sessions |
-| `unitares-governance:knowledge-graph` | Searching and contributing to shared memory |
-| `unitares-governance:discord-bridge` | Operating the Discord integration |
-
-## Prerequisites
-
-1. A running UNITARES governance server
-2. Python 3.12+ available to hook shells as `python3`
-3. The governance MCP endpoint reachable by the client
-
-Windows clients additionally need Git Bash from Git for Windows. Marketplace
-installation packages the hook sources but does not install the Python runtime.
-
-This repo is a **client/plugin integration layer only** — it does not include the governance engine. You need a server running before any of these commands or skills do anything useful.
-
-**Easiest server bring-up — Docker Compose:**
+Changes, including documentation, use a fresh branch and PR. Run the required
+checks from this checkout:
 
 ```bash
-git clone https://github.com/cirwel/unitares.git
-cd unitares
-docker compose up
-# server now at http://localhost:8767/mcp/
+./scripts/dev/lint-command-cache-contract.sh
+./scripts/dev/lint-doc-drift.sh
+python3 scripts/dev/lint-doc-command-examples.py
+./scripts/check-skill-freshness.sh
+python3 -m pytest
 ```
 
-That single command brings up Postgres+AGE+pgvector, Redis, and the governance server. The Pi/Lumen embodiment side is optional — governance runs standalone. For bare-metal install (Homebrew Postgres, native AGE compile) see [unitares/README.md](https://github.com/cirwel/unitares#installation).
-
-Once the server is up, **the Claude plugin registers its MCP client
-automatically**. It ships an `.mcp.json` pointing at
-`http://localhost:8767/mcp/`, so there is nothing to hand-edit. Installing the
-plugin and starting Claude Code is enough.
-
-For Claude Code on a different host or port, set `UNITARES_SERVER_URL` to the
-**base** URL (no `/mcp/` suffix; the plugin appends it):
-
-```bash
-export UNITARES_SERVER_URL=https://gov.example.org   # plugin uses .../mcp/
-export UNITARES_HTTP_API_TOKEN='replace-with-client-token'
-```
-
-Claude's bundled transport expands the token into its `Authorization` header.
-Configure that bundled transport through these variables; do not rely on a
-same-named manual Claude server overriding the plugin server.
-
-The bundled Codex `.codex-mcp.json` is deliberately fixed to unauthenticated
-`http://localhost:8767/mcp/` and does not declare a bearer-token environment
-variable. For a hosted or authenticated Codex server, disable that bundled
-transport and register a separate server under the exact
-`unitares-governance` alias:
-
-```toml
-# ~/.codex/config.toml
-[plugins."unitares-governance@unitares-governance".mcp_servers.unitares-governance]
-enabled = false
-```
-
-```bash
-export UNITARES_SERVER_URL=https://gov.example.org
-export UNITARES_HTTP_API_TOKEN='replace-with-client-token'
-codex mcp add unitares-governance \
-  --url "${UNITARES_SERVER_URL%/}/mcp/" \
-  --bearer-token-env-var UNITARES_HTTP_API_TOKEN
-```
-
-Codex hooks trust only the bare `unitares-governance` server alias. Claude's
-plugin-scoped alias is host-specific and is not accepted at the Codex hook
-boundary.
-
-## Configuration
-
-Environment variables. Explicit values take precedence over plugin defaults,
-including `0` and `off` kill switches:
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `UNITARES_SERVER_URL` | `http://localhost:8767` | Governance server base URL |
-| `UNITARES_HTTP_API_TOKEN` | unset | Client bearer token for governance REST calls, Claude's bundled MCP transport, and a separately registered authenticated Codex transport; hosted deployments must use one token accepted by the server |
-| `UNITARES_AGENT_PREFIX` | host-specific | Prefix for generated client-side names (`claude` or `codex` unless overridden) |
-| `UNITARES_AUTO_ONBOARD` | `off` | Set to `on` to let the host Stop hook create a slot-scoped identity before its first turn summary when the agent has not onboarded; off leaves un-onboarded sessions as identity-free floor observations |
-| `UNITARES_HOOK_FUNDAMENTALS_EXCERPT` | `off` | SessionStart points both hosts at the `governance-fundamentals` and `governance-lifecycle` skills; `on` inlines the ~4 KB Fundamentals excerpt instead, for a host build that does not load plugin skills |
-| `UNITARES_FILE_LEASES_ENABLED` | `1` | Enable host edit leases (Claude Edit/Write/MultiEdit; Codex apply_patch) |
-| `UNITARES_FILE_LEASES_REQUIRED` | `0` | Block edits when lease infrastructure is missing/unreachable; truthy values take precedence over `UNITARES_FILE_LEASES_ENABLED=0` |
-| `UNITARES_FILE_LEASE_TTL_S` | `30` | Crash/failure backstop for a lease not released by PostToolUse |
-| `UNITARES_FILE_LEASE_BATCH_TIMEOUT_S` | `3.5` | Total bounded lease work per edit hook (clamped to four seconds) |
-| `UNITARES_MILESTONE_LOCK_TIMEOUT_S` | `2.0` | Maximum wait for the cross-process milestone lock (clamped to four seconds) |
-| `UNITARES_SESSION_CACHE_LOCK_TIMEOUT_S` | `2.0` | Maximum wait for a slot-scoped session-cache transaction (clamped to four seconds) |
-| `UNITARES_AUTO_CHECKIN_CLAIM_TTL_S` | `30` | Crash-recovery expiry for Claude's single in-flight edit check-in claim (clamped to 30-120 seconds) |
-| `UNITARES_WATCHER_ENABLED` | `0` | Opt in to Watcher edit scanning and lifecycle surfacing; workspace-local executables are never auto-run |
-| `UNITARES_WATCHER_AGENT` | unset | Explicit trusted path to Watcher's `agent.py`, used for SessionStart backlog and audience-scoped prompt chimes |
-| `UNITARES_WATCHER_HOOK` | unset | Explicit trusted executable receiving one normalized single-file Edit event per changed path |
-| `UNITARES_CODEX_LIVENESS` | `on` | Record local, slot-scoped completed-tool receipts; these are not check-ins or agent runtime |
-| `UNITARES_CODEX_RUNTIME_OBSERVATIONS` | `on` | Emit bounded completed-tool rollups to the legacy runtime-named audit sink |
-| `UNITARES_CODEX_HOST_HEARTBEATS` | `off` | Opt in to hook-parent PID heartbeats; a shared host PID never proves per-agent runtime |
-| `UNITARES_CODEX_RUNTIME_IDLE_EXIT_S` | `3600` | Stop a detached slot worker after this many seconds without a completed-tool receipt |
-| `LEASE_PLANE_BASE_URL` | `http://127.0.0.1:8788` | BEAM lease-plane HTTP base URL |
-| `LEASE_PLANE_BEARER_TOKEN` | unset | Bearer used for lease-plane acquire, heartbeat, and release calls. Read from the environment, then `UNITARES_SECRETS_ENV`, `~/.config/unitares/secrets.env`, or the older `~/.config/cirwel/secrets.env`. When none is set and the lease plane is on loopback, the hook tries the UNITARES Docker Compose default (`unitares-local-lease-plane`), except in required mode. SessionStart says when leases are enabled but would not work |
-
-## Adapter Notes
-
-Adapters are a convenience layer over the governance server, not the canonical
-policy — the server stays the source of truth and the client stays thin.
-
-- **Claude** — host-native lifecycle hooks, asynchronous edit check-ins, batch-completion cleanup, BEAM file leases, and optional audience-scoped Watcher delivery.
-- **Codex/ChatGPT** — synchronous lifecycle hooks, multi-file apply_patch leases, Stop cleanup, local edit milestones, slot-scoped continuity cache, optional audience-scoped Watcher delivery, and separately labeled completed-tool audit evidence.
-- **Sidecar** — a dependency-free local proxy/facade for clients without lifecycle hooks; recommended for local/non-frontier model runners that should not manage identity proof material in prompt context.
-- **Hermes Agent** — native lifecycle binding lives in `unitares-host-adapter`; this repo is only relevant to Hermes if you deliberately route through the generic sidecar instead.
-
-Full details, endpoints, and configuration are in [docs/adapters.md](./docs/adapters.md).
-The Codex/ChatGPT quickstart is [CODEX_START.md](./CODEX_START.md).
-Windows hook execution requires Git Bash and Python 3.12+ available as
-`python3`; required lease mode fails closed when the wrapper cannot find Bash.
-
-## Non-Goals
-
-This repo should not:
-
-- redefine the governance math
-- duplicate server-side threshold logic
-- auto-checkin every trivial file write by default
-- override runtime verdicts locally
-
-## Check-In Triggers
-
-The Claude adapter emits canonical `process_agent_update` calls at `turn_stop`
-and `auto_edit`. Codex Stop may emit one automatic `turn_stop`
-`substrate_interpretation`; a manual `sync_state()` is the separately labeled
-agent-authored check-in and is usually needed no more than once per turn.
-Synthetic onboarding initialization and PostToolUse receipts are not real
-check-ins. All adapter check-ins use `scripts/checkin.py`, which redacts
-secrets, truncates, logs, and is fire-and-forget. A `UNITARES_CHECKINS=off` kill
-switch suppresses them and the host-observation bridge.
-
-For the trigger table, the diagnostic log format, the protective audit, the
-known token-auth limitation, and plugin-cache upgrade steps, see
-[docs/check-ins.md](./docs/check-ins.md).
-
-## Development Workflow
-
-Every change uses a fresh short-lived branch and pull request:
-
-1. create a short-lived branch
-2. keep the change focused
-3. push the branch
-4. run the pre-PR gate and open a draft PR
-5. merge after review or self-review
-
-Do not push directly to `master`, reuse a branch whose PR is merged or closed,
-or append post-merge fixes to an old PR head. `scripts/dev/ship.sh` creates a
-fresh branch from an up-to-date default branch, refuses delivered PR heads,
-and opens a draft PR for staged, otherwise-clean changes.
-
-See [CONTRIBUTING.md](./CONTRIBUTING.md) for the repo convention.
+Shared skills are mirrored from canonical UNITARES content; use the verified
+mirror workflow described in [Contributing](CONTRIBUTING.md) for those changes.
 
 ## License
 
