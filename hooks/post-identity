@@ -269,6 +269,8 @@ if suffix in ("onboard", "start_session"):
     _origin = (_summary.get("onboard_origin") or _canon_summary.get("onboard_origin")
                or _response_field("onboard_origin"))
     if not _resumed:
+        # A mint belongs to the process that made it, not to a predecessor.
+        payload["prior_process"] = False
         payload["onboard_origin"] = str(_origin or "agent")
         payload["onboard_origin_basis"] = str(
             _summary.get("onboard_origin_basis") or _canon_summary.get("onboard_origin_basis")

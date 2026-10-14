@@ -625,3 +625,13 @@ def test_cache_without_a_binding_does_not_deny(tmp_path):
     result = _run(_hook_input(
         "mcp__unitares-governance__start_session", {"force_new": True}), tmp_path)
     assert result.stdout.strip() == ""
+
+
+def test_cache_inherited_by_a_resumed_process_does_not_deny(tmp_path):
+    cache = tmp_path / ".unitares" / f"session-{SLOT}.json"
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_text(json.dumps({"uuid": "cafe1234-0000-0000-0000-000000000000",
+                                 "client_session_id": SID, "prior_process": True}))
+    result = _run(_hook_input(
+        "mcp__unitares-governance__start_session", {"force_new": True}), tmp_path)
+    assert result.stdout.strip() == ""

@@ -647,7 +647,30 @@ except Exception:
     event = {}
 print(event.get("source") or "startup" if isinstance(event, dict) else "startup")
 ' 2>/dev/null || echo startup)
-if [[ -n "${HEALTH_STATUS}" \
+EAGER_EXISTING=""
+if [[ -n "${HOST_SESSION_ID}" ]]; then
+  EAGER_EXISTING=$(_eager_binding)
+fi
+# A resumed host session is a new process holding the previous process's
+# cache. Mark that cache as inherited so the pre-governance-call guard does not
+# treat it as this process's own binding: a fresh mint (declaring the
+# predecessor as parent, per the ontology) stays allowed. Only an existing
+# workspace cache is marked; merging into a missing file would shadow a HOME
+# mirror with an identity-less cache.
+if [[ "${EAGER_SOURCE}" == "resume" && -n "${EAGER_EXISTING}" \
+      && -n "${WORKSPACE_CACHE}" && -f "${WORKSPACE_CACHE}" ]]; then
+  python3 "${PLUGIN_ROOT}/scripts/session_cache.py" set session \
+    --workspace "${PWD}" --slot "${HOST_SESSION_ID}" --merge \
+    --json '{"prior_process": true}' >/dev/null 2>&1 || true
+fi
+if [[ ( "${EAGER_SOURCE}" == "startup" || "${EAGER_SOURCE}" == "clear" ) \
+      && -n "${EAGER_EXISTING}" ]]; then
+  # A brand-new host session that already has a binding (for example a HOME
+  # mirror for this slot): show it rather than advising a mint the guard
+  # would refuse.
+  EAGER_BOUND_UUID=$(printf '%s\n' "${EAGER_EXISTING}" | sed -n 1p)
+  EAGER_BOUND_CSID=$(printf '%s\n' "${EAGER_EXISTING}" | sed -n 2p)
+elif [[ -n "${HEALTH_STATUS}" \
       && "${ANCHOR_RESUME_ENABLED}" != "1" \
       && -z "${CODEX_COMPACTION_CONTEXT}" \
       && -z "${ENV_PARENT_UUID}" \
@@ -657,7 +680,7 @@ if [[ -n "${HEALTH_STATUS}" \
    && ! _eager_truthy "${UNITARES_DISABLE_AUTO_ONBOARD:-0}" \
    && _eager_truthy "${UNITARES_AUTO_ONBOARD:-off}" \
    && _eager_truthy "${UNITARES_EAGER_BIND:-on}" \
-   && [[ -f "${PLUGIN_ROOT}/scripts/onboard_helper.py" && -z "$(_eager_binding)" ]]; then
+   && [[ -f "${PLUGIN_ROOT}/scripts/onboard_helper.py" ]]; then
   EAGER_WORKSPACE_DIR="${PWD}"
   if [[ "${HOOK_HOST}" == "claude" && -n "${CLAUDE_PROJECT_DIR:-}" ]]; then
     EAGER_WORKSPACE_DIR="${CLAUDE_PROJECT_DIR}"
@@ -676,11 +699,12 @@ if [[ -n "${HEALTH_STATUS}" \
   EAGER_FIELDS=$(_eager_binding)
   EAGER_BOUND_UUID=$(printf '%s\n' "${EAGER_FIELDS}" | sed -n 1p)
   EAGER_BOUND_CSID=$(printf '%s\n' "${EAGER_FIELDS}" | sed -n 2p)
-  if [[ -n "${EAGER_BOUND_UUID}" ]]; then
-    # A nudge marker left by an earlier fire (whose onboarding failed) must
-    # not hide the identity this fire just bound.
-    NUDGE_ALREADY_SHOWN=0
-  fi
+fi
+if [[ -n "${EAGER_BOUND_UUID}" ]]; then
+  # Neither a nudge marker from an earlier fire nor compact mode (a recent but
+  # unusable cache) may hide the identity this session is bound to.
+  NUDGE_ALREADY_SHOWN=0
+  COMPACT_MODE=0
 fi
 
 # Lazy onboarding is opt-in (config/defaults.env). Describe what the Stop hook
@@ -776,7 +800,7 @@ ${RECOVERY_GUIDANCE}"
     agent_uuid:        ${EAGER_BOUND_UUID}
     client_session_id: ${EAGER_BOUND_CSID}
 
-SessionStart minted it (onboard_origin=harness_backstop). The
+The harness bound it to this host session. The
 pre-governance-call hook adds this client_session_id to your governance
 calls, so call check_working_state / sync_state directly. Do NOT call
 start_session(force_new=true): it would mint a second identity for this same

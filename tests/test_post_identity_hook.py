@@ -828,6 +828,7 @@ class TestMintRecordsItsOwnOrigin:
         assert cache["uuid"] == "u-agent"
         assert cache["onboard_origin"] == "agent"
         assert cache["onboard_origin_basis"] == "default_unmarked_call"
+        assert cache["prior_process"] is False
 
     def test_mint_without_origin_in_response_reads_agent(self, tmp_path):
         self._seed(tmp_path)

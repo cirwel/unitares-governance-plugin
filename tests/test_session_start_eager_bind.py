@@ -153,3 +153,37 @@ def test_new_host_sessions_bind(tmp_path, source):
     _, onboards = _serve(
         tmp_path, hook_payload={"session_id": SLOT, "source": source})
     assert len(onboards) == 1
+
+
+def test_home_only_binding_is_shown_not_reminted(tmp_path):
+    workspace = tmp_path / "elsewhere"
+    workspace.mkdir()
+    mirror = tmp_path / ".unitares" / _slot_filename(SLOT)
+    mirror.parent.mkdir(parents=True)
+    mirror.write_text(json.dumps({"uuid": UUID, "client_session_id": CSID, "slot": SLOT}))
+    stdout, onboards = _serve(tmp_path, claude_session_id=SLOT, cwd=workspace)
+    assert onboards == []
+    context = _context(stdout)
+    assert UUID in context and "already bound" in context
+    assert "start_session(force_new=true)          #" not in context
+
+
+def test_bind_overrides_compact_mode_for_an_unusable_recent_cache(tmp_path):
+    cache = tmp_path / ".unitares" / _slot_filename(SLOT)
+    cache.parent.mkdir(parents=True)
+    cache.write_text(json.dumps({"uuid": UUID, "slot": SLOT}))  # no client_session_id
+    stdout, onboards = _serve(tmp_path, claude_session_id=SLOT)
+    assert len(onboards) == 1
+    context = _context(stdout)
+    assert UUID in context and CSID in context and "already bound" in context
+
+
+def test_resume_marks_the_inherited_cache(tmp_path):
+    cache = tmp_path / ".unitares" / _slot_filename(SLOT)
+    cache.parent.mkdir(parents=True)
+    cache.write_text(json.dumps({"uuid": UUID, "client_session_id": CSID, "slot": SLOT}))
+    _, onboards = _serve(tmp_path, hook_payload={"session_id": SLOT, "source": "resume"})
+    assert onboards == []
+    data = json.loads(cache.read_text())
+    assert data["prior_process"] is True
+    assert data["uuid"] == UUID and data["client_session_id"] == CSID

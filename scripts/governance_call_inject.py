@@ -170,6 +170,10 @@ def _duplicate_mint_reason(tool_input: dict, raw: str) -> str:
     # the injected client_session_id, so a cache without one is no binding.
     if not uuid or not csid:
         return ""
+    # SessionStart marks a cache inherited by a resumed process: that process
+    # may mint its own identity (declaring the predecessor as parent).
+    if sess.get("prior_process") is True:
+        return ""
     origin = str(sess.get("onboard_origin") or "").strip() or "unknown"
     return (
         f"This process is already bound to governance as agent_uuid {uuid} "
