@@ -94,6 +94,49 @@ class TestInjection:
         assert updated is not None
         assert updated["client_session_id"] == SID
 
+    @pytest.mark.parametrize("tool,args", [
+        ("consult", {"brief": "question", "host_ids": ["a", "b"]}),
+        ("use_tool", {"tool_name": "update_finding", "arguments": {"discovery_id": "x"}}),
+    ])
+    def test_injects_into_advertised_gateway_tools(self, tmp_path, tool, args):
+        # Uninjected, these fell back to the server's fingerprint guess and could
+        # bind to a neighbouring session (observed 2026-10-20 on consult).
+        _write_cache(tmp_path)
+        result = _run(_hook_input(f"mcp__unitares-governance__{tool}", args), tmp_path)
+        updated = _updated_input(result)
+        assert updated is not None
+        assert updated["client_session_id"] == SID
+        assert {k: updated[k] for k in args} == args
+
+    @pytest.mark.parametrize("target", [
+        "identity", "onboard", "start_session", "bind_session",  # exclusions
+        "use_tool",                                              # recursion
+        "call_model",                                            # not injectable
+    ])
+    def test_gateway_never_carries_the_session_to_an_excluded_target(self, tmp_path, target):
+        # The server forwards an outer client_session_id into the target's
+        # arguments, so injecting here would bypass the direct-call exclusions.
+        _write_cache(tmp_path)
+        result = _run(_hook_input("mcp__unitares-governance__use_tool",
+                                  {"tool_name": target, "arguments": {}}), tmp_path)
+        assert _updated_input(result) is None
+
+    @pytest.mark.parametrize("field", ["agent_id", "client_session_id", "agent_uuid", "continuity_token"])
+    def test_gateway_honours_nested_identity_intent(self, tmp_path, field):
+        _write_cache(tmp_path)
+        result = _run(_hook_input("mcp__unitares-governance__use_tool", {
+            "tool_name": "check_working_state", "arguments": {field: "explicit"}}), tmp_path)
+        assert _updated_input(result) is None
+
+    @pytest.mark.parametrize("tool_input", [
+        {"arguments": {}},                                    # no target named
+        {"tool_name": "sync_state", "arguments": "not-a-dict"},
+    ])
+    def test_gateway_with_malformed_input_is_left_alone(self, tmp_path, tool_input):
+        _write_cache(tmp_path)
+        result = _run(_hook_input("mcp__unitares-governance__use_tool", tool_input), tmp_path)
+        assert _updated_input(result) is None
+
     def test_injects_for_codex_governance_server_alias(self, tmp_path):
         _write_cache(tmp_path)
         result = _run(_hook_input("mcp__governance__sync_state", {}), tmp_path)
@@ -534,6 +577,20 @@ class TestWorkflowAliasCoverage:
         assert missing == [], (
             f"aliases of a tag-bearing tool missing from TAG_BEARING_SUFFIXES: {missing}"
         )
+
+    def test_server_initial_advertisement_is_injectable(self):
+        # The server's initial progressive tools/list (default workflow order in
+        # unitares src/mcp_handlers/introspection/tool_introspection.py) plus the
+        # use_tool gateway. Coverage derived only from the skill table above
+        # missed consult and use_tool, which the server advertises directly.
+        advertised = {
+            "start_session", "sync_state", "check_working_state",
+            "search_shared_memory", "record_result", "consult", "request_review",
+            "list_tools", "describe_tool", "store_finding", "self_recovery",
+            "use_tool",
+        }
+        covered = INJECT_SUFFIXES | ANCHORED_MINT_SUFFIXES
+        assert sorted(advertised - covered) == []
 
     def test_tag_bearing_tools_reach_the_normalizer(self):
         # main() returns before tag normalization for any suffix outside
