@@ -114,6 +114,11 @@ INJECT_SUFFIXES = frozenset({
     "observe", "calibration", "export", "config",
     "agent", "self_recovery", "archive_orphan_agents",
     "list_tools", "describe_tool", "health_check",
+    # The server's initial tool advertisement also carries these two. Both
+    # accept client_session_id; without injection they fell back to the
+    # server's fingerprint guess and could resolve to a neighbouring session
+    # (observed 2026-10-20: a consult attributed to another agent's UUID).
+    "consult", "use_tool",
 })
 
 # Codex can only apply updatedInput by also allowing the tool call. Keep that
