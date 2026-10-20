@@ -133,6 +133,11 @@ CODEX_REWRITE_SUFFIXES = frozenset({
     "list_tools", "describe_tool", "health_check",
 })
 
+# The server forwards an outer client_session_id into the dispatched tool's
+# arguments when they lack one, so a gateway call is injected only when its
+# target would be injected if called directly (see _gateway_target_injectable).
+GATEWAY_SUFFIXES = frozenset({"use_tool"})
+
 ANCHORED_MINT_SUFFIXES = frozenset({"onboard", "start_session"})
 IDENTITY_ASSERT_SUFFIXES = frozenset({"identity"})
 PROOF_FIELDS = ("client_session_id", "continuity_token", "agent_uuid", "agent_id")
@@ -265,6 +270,28 @@ def _env_anchor() -> str:
     return value.strip()
 
 
+def _gateway_target_injectable(tool_input: dict) -> bool:
+    """Whether a use_tool call may carry the cached session to its target.
+
+    Only when the target is itself injectable (never identity, onboard,
+    start_session or bind_session, whose exclusions would otherwise be
+    bypassed through the gateway) and its nested arguments declare no
+    identity of their own.
+    """
+    target = tool_input.get("tool_name")
+    if not isinstance(target, str):
+        return False
+    target = target.strip().casefold()
+    if target not in INJECT_SUFFIXES or target in GATEWAY_SUFFIXES:
+        return False
+    nested = tool_input.get("arguments")
+    if nested is None:
+        nested = {}
+    if not isinstance(nested, dict):
+        return False
+    return not _has_proof_field(nested)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Normalize a governance PreToolUse call")
     parser.add_argument("--host", choices=("claude", "codex"), default="claude")
@@ -299,6 +326,9 @@ def main(argv: list[str] | None = None) -> int:
     if tool_input is None:
         tool_input = {}
     if not isinstance(tool_input, dict):
+        return 0
+
+    if suffix in GATEWAY_SUFFIXES and not _gateway_target_injectable(tool_input):
         return 0
 
     if suffix in IDENTITY_ASSERT_SUFFIXES:

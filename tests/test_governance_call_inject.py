@@ -108,6 +108,35 @@ class TestInjection:
         assert updated["client_session_id"] == SID
         assert {k: updated[k] for k in args} == args
 
+    @pytest.mark.parametrize("target", [
+        "identity", "onboard", "start_session", "bind_session",  # exclusions
+        "use_tool",                                              # recursion
+        "call_model",                                            # not injectable
+    ])
+    def test_gateway_never_carries_the_session_to_an_excluded_target(self, tmp_path, target):
+        # The server forwards an outer client_session_id into the target's
+        # arguments, so injecting here would bypass the direct-call exclusions.
+        _write_cache(tmp_path)
+        result = _run(_hook_input("mcp__unitares-governance__use_tool",
+                                  {"tool_name": target, "arguments": {}}), tmp_path)
+        assert _updated_input(result) is None
+
+    @pytest.mark.parametrize("field", ["agent_id", "client_session_id", "agent_uuid", "continuity_token"])
+    def test_gateway_honours_nested_identity_intent(self, tmp_path, field):
+        _write_cache(tmp_path)
+        result = _run(_hook_input("mcp__unitares-governance__use_tool", {
+            "tool_name": "check_working_state", "arguments": {field: "explicit"}}), tmp_path)
+        assert _updated_input(result) is None
+
+    @pytest.mark.parametrize("tool_input", [
+        {"arguments": {}},                                    # no target named
+        {"tool_name": "sync_state", "arguments": "not-a-dict"},
+    ])
+    def test_gateway_with_malformed_input_is_left_alone(self, tmp_path, tool_input):
+        _write_cache(tmp_path)
+        result = _run(_hook_input("mcp__unitares-governance__use_tool", tool_input), tmp_path)
+        assert _updated_input(result) is None
+
     def test_injects_for_codex_governance_server_alias(self, tmp_path):
         _write_cache(tmp_path)
         result = _run(_hook_input("mcp__governance__sync_state", {}), tmp_path)
