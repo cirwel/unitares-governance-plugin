@@ -14,11 +14,16 @@ Bare `get session` (no `--slot`) returns the legacy flat `session.json`, which u
 If continuity state exists:
 
 - treat `uuid` as a local identity anchor and lineage candidate
-- use `continuity_token` only for proof-owned UUID rebinds
+- ignore any `continuity_token` field in the cache; it is never proof
 
-Do not verify by bare UUID resume. If you need to test ownership of a cached UUID, call `identity(agent_uuid=<uuid>, continuity_token=<token>, resume=true)` only when a matching current live token is available. Do not expect v2 slot caches to persist that token.
+Never take a `continuity_token` from any cache file, whether a legacy v1/flat
+`session.json` or a v2 slot cache: only a token returned to this live process
+counts as proof. v2 slot caches do not persist it, and a token found in a legacy
+file is not a credential.
 
-If no proof-owned UUID rebind is available, call `identity(client_session_id=<your client_session_id>)` to inspect current binding. Never call `identity()` with no arguments: without session proof it can resolve to a neighbour's identity, so read `identity_assurance.caller_proven` before trusting the result. If you have no `client_session_id`, report the identity as unknown and suggest `/governance-start`, which declares the cached uuid as a parent only for a deliberate handoff from an exited process.
+Do not verify by bare UUID resume. If you need to test ownership of a cached UUID, call `identity(agent_uuid=<uuid>, continuity_token=<token>, resume=true)` only when this live process holds a matching token returned to it by the server.
+
+If no proof-owned UUID rebind is available, call `identity(client_session_id=<your client_session_id>)` to inspect current binding. Never call `identity()` with no arguments: with no proof argument the call is gated to a fresh mint and reports on an identity it just created, so read `identity_assurance.caller_proven` before trusting the result. If you have no `client_session_id`, report the identity as unknown and suggest `/governance-start`, which declares the cached uuid as a parent only for a deliberate handoff from an exited process.
 
 Then call `get_governance_metrics` for the current agent using the same continuity data.
 
@@ -48,7 +53,9 @@ If `health_check()` is used, also show:
 - degraded checks
 - first operator action
 
-If the live identity differs from the slot-scoped cache, refresh that slot's cache with the latest continuity data via `scripts/session_cache.py set session --slot=<client_session_id> --merge --stamp`.
+If the live identity differs from the slot-scoped cache, refresh that slot's cache with the latest identity fields as the payload (without `--json` the helper has nothing to write: it refuses a new slot and only bumps `updated_at` on an existing one):
+`scripts/session_cache.py set session --slot=<client_session_id> --merge --stamp --json '{"uuid":"<uuid>","client_session_id":"<client_session_id>","schema_version":2}'`.
+Do not write `continuity_token` to the cache.
 
 For a local contract audit, run
 `python3 scripts/audit_identity_contract.py --workspace "$PWD"`. Treat `error`

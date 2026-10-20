@@ -20,7 +20,7 @@ If a candidate is found:
 Then call UNITARES using the strongest honest posture for the situation:
 
 - fresh process → `onboard(force_new=true)`, **whether or not a prior slot cache exists**. A cache left in the workspace shows co-location, not lineage: the process that wrote it may still be running, and you are not its continuation just because you share a directory.
-- deliberate handoff: declare the cached uuid only when that process has **exited** and the user (or the task) says you are continuing its work → `onboard(force_new=true, parent_agent_id=<cached uuid>, spawn_reason="explicit")`. Declaring a still-live process is rejected (`lineage_coincidental_rejected`). Do not use `spawn_reason="new_session"`: the server treats it as the legacy co-location reason, not intentional lineage.
+- deliberate handoff: declare the cached uuid only when that process has **exited** and the user (or the task) says you are continuing its work → `onboard(force_new=true, parent_agent_id=<cached uuid>, spawn_reason="explicit")`. Declaring a still-live process is rejected (`lineage_coincidental_rejected`), unless `spawn_reason` marks a dispatched child (`subagent`, `dispatch`, `dialectic_reviewer`) or a `compaction` continuation: those relationships expect the parent to still be live, and the dispatcher usually sets them rather than this command. Do not use `spawn_reason="new_session"`: the server treats it as the legacy co-location reason, not intentional lineage.
 - include `model_type` when the current runtime is clear from context
 - do not invent a display name unless the user asked for one
 
@@ -45,9 +45,11 @@ Do not use `identity(agent_uuid=<uuid>, ...)` from a fresh process. Bare-UUID re
 After a successful response:
 
 - record the session in slot-scoped form using the just-returned `client_session_id` as the slot:
-  - `scripts/session_cache.py set session --slot=<client_session_id> --merge --stamp`
+  - `scripts/session_cache.py set session --slot=<client_session_id> --merge --stamp --json '{"schema_version":2,"uuid":"<uuid>","agent_id":"<agent_id>","display_name":"<display_name>","client_session_id":"<client_session_id>"}'`
+  - pass the payload with `--json`: without it the helper has nothing to write and refuses a new slot
 - the helper rejects slotless writes at v2 (S20.1) — passing `--slot` is required
 - include in the JSON payload:
+  - `schema_version: 2`
   - `server_url` when known
   - `uuid`
   - `agent_id`
@@ -55,9 +57,9 @@ After a successful response:
   - `client_session_id`
   - `parent_agent_id` when lineage was declared
   - `session_resolution_source`
-  - `continuity_token_supported` (the boolean flag, not the token)
-  - `updated_at`
+  - `updated_at` (`--stamp` sets it)
 - do **not** persist `continuity_token` itself. The helper rejects payloads containing it at v2 (S20.1). v2 cache schema is lineage-only.
+- do not persist `continuity_token_supported` either (S20.3): the flag stays in the live response and is not part of the v2 cache schema.
 
 When reporting back:
 
