@@ -384,6 +384,17 @@ def main(argv: list[str] | None = None) -> int:
         sid = (sess or {}).get("client_session_id")
         if isinstance(sid, str) and sid.strip():
             updated["client_session_id"] = sid.strip()
+            if suffix in GATEWAY_SUFFIXES:
+                # On a real transport the server hands `arguments` to the
+                # target without the outer session (only its local fallback
+                # forwards it), so the target re-resolved by IP:UA fingerprint.
+                # On 2026-10-20 that attributed seven KG promotions to a
+                # neighbouring Claude session. _gateway_target_injectable
+                # already checked the target and that `arguments` names no
+                # identity of its own.
+                nested = dict(updated.get("arguments") or {})
+                nested["client_session_id"] = sid.strip()
+                updated["arguments"] = nested
             changed = True
 
     if not changed:

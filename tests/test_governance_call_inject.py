@@ -106,7 +106,29 @@ class TestInjection:
         updated = _updated_input(result)
         assert updated is not None
         assert updated["client_session_id"] == SID
-        assert {k: updated[k] for k in args} == args
+        for key, value in args.items():
+            if key == "arguments":
+                assert updated[key] == {**value, "client_session_id": SID}
+            else:
+                assert updated[key] == value
+
+    def test_gateway_carries_the_session_into_the_target_arguments(self, tmp_path):
+        # A real transport invokes the target with `arguments` only, so an
+        # outer session alone left the target to the fingerprint pin, which
+        # attributed seven writes to a neighbouring session on 2026-10-20.
+        _write_cache(tmp_path)
+        result = _run(_hook_input("mcp__unitares-governance__use_tool", {
+            "tool_name": "knowledge",
+            "arguments": {"action": "promote", "discovery_id": "x", "summary": "s"}}), tmp_path)
+        updated = _updated_input(result)
+        assert updated["arguments"] == {"action": "promote", "discovery_id": "x",
+                                        "summary": "s", "client_session_id": SID}
+
+    def test_gateway_with_no_arguments_gets_them(self, tmp_path):
+        _write_cache(tmp_path)
+        result = _run(_hook_input("mcp__unitares-governance__use_tool",
+                                  {"tool_name": "check_working_state"}), tmp_path)
+        assert _updated_input(result)["arguments"] == {"client_session_id": SID}
 
     @pytest.mark.parametrize("target", [
         "identity", "onboard", "start_session", "bind_session",  # exclusions
