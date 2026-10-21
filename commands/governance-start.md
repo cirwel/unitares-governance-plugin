@@ -59,7 +59,7 @@ After a successful response:
   - `session_resolution_source`
   - `updated_at` (`--stamp` sets it)
 - do **not** persist `continuity_token` itself. The helper rejects payloads containing it at v2 (S20.1). v2 cache schema is lineage-only.
-- do not persist `continuity_token_supported` from this command (S20.3): read it from the live response. `scripts/onboard_helper.py` does not cache it either. (The Claude `hooks/post-identity` slot write still includes it; aligning that hook is a separate change.)
+- do not persist `continuity_token_supported` from this command (S20.3): read it from the live response. `scripts/onboard_helper.py` does not cache it either. The Claude `hooks/post-identity` slot write leaves it out too.
 
 When reporting back:
 

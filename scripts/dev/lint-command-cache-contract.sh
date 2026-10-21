@@ -70,7 +70,7 @@ for file in "${FILES[@]}"; do
         content=${match#*:}
         echo "[lint] ${file}:${line_no} — persists \`continuity_token\` in cache write payload"
         echo "       offending: ${content}"
-        echo "       fix: drop the field. v2 cache schema is lineage-only (S11/S20). Keep \`continuity_token_supported\` (the bool flag) if you want."
+        echo "       fix: drop the field. v2 cache schema is lineage-only (S11/S20). Do not cache \`continuity_token_supported\` either (S20.3); read it from the live response."
         FAIL=1
     done < <(grep -nE '^\s*-\s+\`continuity_token\`\s*$' "$file" 2>/dev/null || true)
 done
