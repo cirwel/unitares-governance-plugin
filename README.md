@@ -164,7 +164,7 @@ install lifecycle automation.
 | [Adapter reference](docs/adapters.md) | Host contracts, Claude/Codex differences, sidecar, and wrapper |
 | [Check-ins](docs/check-ins.md) | Automatic versus agent-authored records, triggers, logs, and upgrades |
 | [Skills](skills/) | Lifecycle, state estimation, dialectic review, shared knowledge, and integration guidance |
-| [Claude commands](commands/) | `/governance-start`, `/checkin`, `/diagnose`, and `/dialectic`; these commands are not installed by Codex |
+| [Claude commands](commands/) | `/governance-start`, `/checkin`, `/diagnose`, `/dialectic`, and `/dialectic-respond`; these commands are not installed by Codex |
 | [Documentation index](docs/README.md) | Design rationale and the full documentation map |
 | [Contributing](CONTRIBUTING.md) | Validation, branch/PR workflow, and verified canonical skill mirrors |
 
