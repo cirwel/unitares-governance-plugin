@@ -17,7 +17,7 @@ configuration, and the day-to-day workflow, start with the
 | Contributing | [`CONTRIBUTING.md`](../CONTRIBUTING.md) | Branch/PR convention and review standard |
 | Design notes | this directory | Why the plugin is shaped the way it is, and what it deliberately does not build |
 | Skills | [`../skills/`](../skills/) | Agent-facing capability docs (governance fundamentals, lifecycle, dialectic, knowledge graph, Discord bridge) |
-| Claude commands | [`../commands/`](../commands/) | Claude Code-only `/governance-start`, `/checkin`, `/diagnose`, `/dialectic` |
+| Claude commands | [`../commands/`](../commands/) | Claude Code-only `/governance-start`, `/checkin`, `/diagnose`, `/dialectic`, `/dialectic-respond` |
 
 ## Design notes
 
