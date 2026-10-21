@@ -219,7 +219,8 @@ class TestPostIdentityRecordsResponse:
         assert cache["agent_id"] == "Test_Agent"
         assert cache["client_session_id"] == "agent-abc"
         assert cache["display_name"] == "TestAgent"
-        assert cache["continuity_token_supported"] is True
+        # S20.3: the flag is read from the live response, never cached.
+        assert "continuity_token_supported" not in cache
         assert cache["session_resolution_source"] == "force_new"
 
     def test_codex_start_session_envelope_writes_slotted_cache(self, tmp_path):

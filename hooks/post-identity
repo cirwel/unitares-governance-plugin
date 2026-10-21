@@ -264,7 +264,6 @@ payload = {
         or bound_identity.get("display_name", "")
         or canonical_bound_identity.get("display_name", "")
     ),
-    "continuity_token_supported": _response_field("continuity_token_supported", False),
     "session_resolution_source": _response_field("session_resolution_source"),
     "slot": session_id,
     "schema_version": 2,
