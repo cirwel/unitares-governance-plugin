@@ -222,13 +222,16 @@ if [[ ! -t 0 ]]; then
   fi
 fi
 
-# Codex emits source=compact for the immediate continuation, including
-# mid-turn compaction. It does not establish a new process or a lineage edge.
-# Restore guidance from exactly the cache used by later tool hooks, including
-# its validated HOME mirror when cwd changed. Never expose proof in context.
-CODEX_COMPACTION_CONTEXT=""
-if [[ "${HOOK_HOST}" == "codex" && -n "${SESSION_START_STDIN}" ]]; then
-  CODEX_COMPACTION_CONTEXT=$(python3 - "${SESSION_START_STDIN}" "${PLUGIN_ROOT}/scripts" <<'PY' 2>/dev/null || true
+# Codex and Claude Code both emit source=compact for the immediate
+# continuation, including mid-turn compaction. It does not establish a new
+# process or a lineage edge. Restore guidance from exactly the cache used by
+# later tool hooks, including its validated HOME mirror when cwd changed (the
+# workspace-cache check below misses it then). Never expose proof in context.
+COMPACTION_CONTEXT=""
+if [[ -n "${SESSION_START_STDIN}" ]]; then
+  COMPACTION_HOST_NAME="Codex"
+  [[ "${HOOK_HOST}" == "claude" ]] && COMPACTION_HOST_NAME="Claude Code"
+  COMPACTION_CONTEXT=$(python3 - "${SESSION_START_STDIN}" "${PLUGIN_ROOT}/scripts" "${COMPACTION_HOST_NAME}" <<'PY' 2>/dev/null || true
 import json, os, re, sys
 sys.path.insert(0, sys.argv[2])
 from _session_lookup import _extract_slot, resolve_session_file
@@ -250,7 +253,7 @@ usable = (
     and re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", uuid)
     and isinstance(binding, str) and binding.strip()
 )
-print("Codex reported context compaction for this session. Compaction alone does not "
+print(f"{sys.argv[3]} reported context compaction for this session. Compaction alone does not "
       "establish a new driver process. Do not mint a new identity or declare lineage "
       "just because this hook ran.")
 if usable:
@@ -366,7 +369,7 @@ fi
 # (spawn reason).
 # ---------------------------------------------------------------------------
 ENV_PARENT_UUID="${UNITARES_PARENT_AGENT_ID:-}"
-if [[ -z "${CODEX_COMPACTION_CONTEXT}" && -n "${ENV_PARENT_UUID}" ]]; then
+if [[ -z "${COMPACTION_CONTEXT}" && -n "${ENV_PARENT_UUID}" ]]; then
   if [[ "${ENV_PARENT_UUID}" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
     # A parent alone does not establish dispatch. Missing or malformed reasons
     # keep the descriptive default, which grants no live-parent exemption.
@@ -382,7 +385,7 @@ This is a candidate, not an obligation — if it does not match how this process
   fi
 fi
 
-if [[ -z "${CODEX_COMPACTION_CONTEXT}" && -z "${WORKSPACE_LINEAGE_HINT}" && -n "${WORKSPACE_CACHE}" && -f "${WORKSPACE_CACHE}" ]]; then
+if [[ -z "${COMPACTION_CONTEXT}" && -z "${WORKSPACE_LINEAGE_HINT}" && -n "${WORKSPACE_CACHE}" && -f "${WORKSPACE_CACHE}" ]]; then
   WORKSPACE_LINEAGE_HINT=$(python3 - "${WORKSPACE_CACHE}" <<'PY' 2>/dev/null || true
 import json, re, sys
 from pathlib import Path
@@ -451,7 +454,7 @@ fi
 #     conversation) from a workspace match (this workspace's most recent
 #     prior session, but possibly a different harness invocation).
 # ---------------------------------------------------------------------------
-if [[ -z "${CODEX_COMPACTION_CONTEXT}" && -n "${HOST_SESSION_ID}" && -z "${WORKSPACE_LINEAGE_HINT}" ]]; then
+if [[ -z "${COMPACTION_CONTEXT}" && -n "${HOST_SESSION_ID}" && -z "${WORKSPACE_LINEAGE_HINT}" ]]; then
   SESSION_CACHE_HELPER=""
   for candidate in \
     "${PLUGIN_ROOT}/scripts/session_cache.py" \
@@ -606,7 +609,7 @@ fi
 # naming the identity in the context removes that blind spot. Same mint as the
 # Stop hook (onboard_helper, onboard_origin=harness_backstop, no inferred
 # parent). Skipped for orchestrated anchors (they resume), spawned children
-# with a declared parent candidate (they declare lineage themselves), Codex
+# with a declared parent candidate (they declare lineage themselves),
 # compaction continuations, and any slot that already has a cache. A failure
 # here is silent: the Stop hook's lazy path stays as the fallback.
 EAGER_BOUND_UUID=""
@@ -686,7 +689,7 @@ if [[ ( "${EAGER_SOURCE}" == "startup" || "${EAGER_SOURCE}" == "clear" || "${EAG
   EAGER_BOUND_CSID=$(printf '%s\n' "${EAGER_EXISTING}" | sed -n 2p)
 elif [[ -n "${HEALTH_STATUS}" \
       && "${ANCHOR_RESUME_ENABLED}" != "1" \
-      && -z "${CODEX_COMPACTION_CONTEXT}" \
+      && -z "${COMPACTION_CONTEXT}" \
       && -z "${ENV_PARENT_UUID}" \
       && -n "${HOST_SESSION_ID}" \
       && ( "${EAGER_SOURCE}" == "startup" || "${EAGER_SOURCE}" == "clear" || "${EAGER_SOURCE}" == "fork" ) \
@@ -772,10 +775,10 @@ fi
 
 if [[ -z "${HEALTH_STATUS}" ]]; then
   CONTEXT="UNITARES Governance: OFFLINE (${SERVER_URL} unreachable). No governance identity is currently bound for this session. Governance tools may be unavailable."
-  if [[ -n "${CODEX_COMPACTION_CONTEXT}" ]]; then
+  if [[ -n "${COMPACTION_CONTEXT}" ]]; then
     CONTEXT="UNITARES Governance: OFFLINE (${SERVER_URL} unreachable). Governance tools may be unavailable.
 
-${CODEX_COMPACTION_CONTEXT}"
+${COMPACTION_CONTEXT}"
   fi
   if [[ -n "${SKILL_CONTENT}" ]]; then
     CONTEXT="${CONTEXT}
@@ -811,10 +814,10 @@ for the turn-to-turn flow of this conversation.
 Use \`sync_state(...)\` only for meaningful state worth reporting; do not
 manufacture a check-in to satisfy this note.
 ${RECOVERY_GUIDANCE}"
-  elif [[ -n "${CODEX_COMPACTION_CONTEXT}" ]]; then
+  elif [[ -n "${COMPACTION_CONTEXT}" ]]; then
     CONTEXT="UNITARES Governance: ONLINE
 
-${CODEX_COMPACTION_CONTEXT}"
+${COMPACTION_CONTEXT}"
   elif [[ "${COMPACT_MODE}" == "1" ]]; then
     # Compact prose: assumes the agent saw the full note + Fundamentals
     # block earlier this hour (workspace cache mtime < TTL). Keep
@@ -902,7 +905,7 @@ ${WORKSPACE_LINEAGE_HINT}"
   # Skip the Fundamentals block in compact mode. A freshness warning, when
   # the excerpt path produces one, injects on the next fresh-workspace fire
   # when the full block returns.
-  if [[ "${ANCHOR_RESUME_ENABLED}" != "1" && -z "${CODEX_COMPACTION_CONTEXT}" && "${COMPACT_MODE}" != "1" && "${NUDGE_ALREADY_SHOWN}" != "1" ]]; then
+  if [[ "${ANCHOR_RESUME_ENABLED}" != "1" && -z "${COMPACTION_CONTEXT}" && "${COMPACT_MODE}" != "1" && "${NUDGE_ALREADY_SHOWN}" != "1" ]]; then
     if [[ -n "${SKILL_CONTENT}" ]]; then
       CONTEXT="${CONTEXT}
 
