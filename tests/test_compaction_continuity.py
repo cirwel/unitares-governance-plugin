@@ -126,15 +126,32 @@ def test_compaction_never_substitutes_another_slot_for_missing_proof(tmp_path, c
     assert calls == []
 
 
-def test_offline_compaction_keeps_known_binding_guidance(tmp_path):
+@pytest.mark.parametrize("host", sorted(HOSTS))
+def test_compaction_does_not_adopt_a_resumed_sessions_inherited_binding(tmp_path, host):
+    # A resumed host session marks its inherited cache prior_process; the tool
+    # hooks will not inject it, so compaction must not call it this process's.
+    _cache(tmp_path, prior_process=True)
+    stdout, calls = _serve_and_run(tmp_path, host=host, hook_payload=_event())
+    ctx = _context(stdout)
+    assert f"{HOSTS[host]} reported context compaction" in ctx
+    assert "resumed an earlier host process" in ctx
+    assert "existing governance identity" not in ctx
+    assert "Continue using its client_session_id" not in ctx
+    assert UUID not in ctx
+    assert BINDING not in ctx
+    assert calls == []
+
+
+@pytest.mark.parametrize("host", sorted(HOSTS))
+def test_offline_compaction_keeps_known_binding_guidance(tmp_path, host):
     _cache(tmp_path)
     stdout, calls = _run_hook(
-        tmp_path, "http://127.0.0.1:1", host="codex", hook_payload=_event(),
+        tmp_path, "http://127.0.0.1:1", host=host, hook_payload=_event(),
     )
     ctx = _context(stdout)
     assert "OFFLINE" in ctx
     assert "No governance identity is currently bound" not in ctx
-    _assert_continuation(ctx)
+    _assert_continuation(ctx, host)
     assert calls == []
 
 
@@ -151,10 +168,11 @@ def test_other_start_events_do_not_assert_same_process_continuity(tmp_path, sour
     assert "spawn_reason=\"explicit\"" in ctx
 
 
-def test_codex_compaction_keeps_orchestrated_anchor_precedence(tmp_path):
+@pytest.mark.parametrize("host", sorted(HOSTS))
+def test_compaction_keeps_orchestrated_anchor_precedence(tmp_path, host):
     _cache(tmp_path)
     stdout, _ = _serve_and_run(
-        tmp_path, host="codex", hook_payload=_event(),
+        tmp_path, host=host, hook_payload=_event(),
         extra_env={"UNITARES_CLIENT_SESSION_ID": "agent-orchestrated",
                    "UNITARES_ORCHESTRATED": "1"},
     )

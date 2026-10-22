@@ -248,10 +248,14 @@ path = resolve_session_file(os.getcwd(), _extract_slot(sys.argv[1]))
 cache = read_json_dict_unlocked(path) if path is not None else {}
 uuid = cache.get("uuid") or cache.get("agent_uuid")
 binding = cache.get("client_session_id")
+# A resumed host session marks the cache it inherited as prior_process until it
+# mints its own identity; the tool hooks then refuse to inject that binding.
+inherited = cache.get("prior_process") is True
 usable = (
     isinstance(uuid, str)
     and re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", uuid)
     and isinstance(binding, str) and binding.strip()
+    and not inherited
 )
 print(f"{sys.argv[3]} reported context compaction for this session. Compaction alone does not "
       "establish a new driver process. Do not mint a new identity or declare lineage "
@@ -261,6 +265,12 @@ if usable:
           "Continue using its client_session_id. Supported governance tool hooks inject "
           "that binding; for calls requiring explicit proof, read only this cache: "
           + json.dumps(str(path)) + ".")
+elif inherited:
+    print("This session resumed an earlier host process and has not minted its own "
+          "identity yet. The session cache still holds the earlier process's identity, "
+          "which is not this process's binding, and compaction does not change that. "
+          "If this process needs governance writes, start_session(force_new=true) creates "
+          "its identity; declare the earlier identity as parent only for a real handoff.")
 else:
     print("No usable binding was found for this exact session. Keep using a "
           "client_session_id retained in your context, if available. If this session "
