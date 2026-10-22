@@ -610,6 +610,21 @@ if [[ -n "${UNITARES_CLIENT_SESSION_ID:-}" \
   ANCHOR_RESUME_ENABLED=1
 fi
 
+# Record the compaction on the identity that was bound when it happened, so
+# whether the identity was kept or a successor minted can be read later
+# (docs/ontology/identity.md, Compaction, in the server repo). Audit plane
+# only: no identity, lineage, check-in or EISV write. Only on a compact start
+# with the server answering and no orchestrated anchor (the anchor, not the
+# slot cache, is then the identity in use); the script itself reports only
+# this exact slot's usable, non-inherited binding.
+if [[ -n "${COMPACTION_CONTEXT}" && -n "${HEALTH_STATUS}" \
+      && "${ANCHOR_RESUME_ENABLED}" != "1" \
+      && -f "${PLUGIN_ROOT}/scripts/compaction_report.py" ]]; then
+  python3 "${PLUGIN_ROOT}/scripts/compaction_report.py" \
+    --host "${HOOK_HOST}" --server-url "${SERVER_URL}" \
+    "${SESSION_START_STDIN}" >/dev/null 2>&1 || true
+fi
+
 # Eager bind: when harness onboarding is enabled, mint this process's identity
 # now instead of at the first Stop. The lazy path left the agent unaware of an
 # identity minted after its first turn, so an agent that later followed the

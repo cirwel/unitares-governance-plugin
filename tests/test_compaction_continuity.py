@@ -13,7 +13,13 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from test_session_start_checkin import PLUGIN_ROOT, _context, _run_hook, _serve_and_run
+from test_session_start_checkin import (
+    PLUGIN_ROOT,
+    RecordingHandler,
+    _context,
+    _run_hook,
+    _serve_and_run,
+)
 
 
 UUID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
@@ -51,6 +57,19 @@ def _assert_continuation(ctx, host="codex"):
     assert "must-never-appear-in-context" not in ctx
 
 
+def _assert_only_compaction_record(calls, host):
+    assert len(calls) == 1, calls
+    record = calls[0]
+    assert record["observation_kind"] == "context_compaction"
+    assert record["agent_uuid"] == UUID
+    assert record["client_session_id"] == BINDING
+    assert record["host_family"] == host
+    assert "continuity_token" not in json.dumps(record)
+    assert "must-never-appear-in-context" not in json.dumps(record)
+    assert "name" not in record and "arguments" not in record  # not a tool call
+    assert RecordingHandler.paths == ["/v1/runtime/observe"]
+
+
 @pytest.mark.parametrize("host", sorted(HOSTS))
 @pytest.mark.parametrize("location", ["workspace", "home"])
 def test_repeated_compaction_preserves_binding_even_after_cache_prose_ttl(tmp_path, location, host):
@@ -66,7 +85,9 @@ def test_repeated_compaction_preserves_binding_even_after_cache_prose_ttl(tmp_pa
         )
         _assert_continuation(_context(stdout), host)
         assert str(path) in _context(stdout)
-        assert calls == []  # No mint, rebind, check-in, or lineage write.
+        # No mint, rebind, check-in or lineage write: only the audit-plane
+        # compaction record, bound to the identity the guidance names.
+        _assert_only_compaction_record(calls, host)
         assert path.read_bytes() == original
 
     # The follow-on tool uses the exact binding described by SessionStart.
@@ -92,6 +113,17 @@ def test_compaction_uses_the_same_codex_fallback_slot_as_tool_hooks(tmp_path, fi
         tmp_path, host="codex", hook_payload={field: value, "source": "compact"},
     )
     _assert_continuation(_context(stdout))
+
+
+@pytest.mark.parametrize("host", sorted(HOSTS))
+def test_compaction_record_respects_the_checkin_kill_switch(tmp_path, host):
+    _cache(tmp_path)
+    stdout, calls = _serve_and_run(
+        tmp_path, host=host, hook_payload=_event(),
+        extra_env={"UNITARES_CHECKINS": "off"},
+    )
+    _assert_continuation(_context(stdout), host)
+    assert calls == []
 
 
 @pytest.mark.parametrize("host", sorted(HOSTS))
@@ -171,7 +203,7 @@ def test_other_start_events_do_not_assert_same_process_continuity(tmp_path, sour
 @pytest.mark.parametrize("host", sorted(HOSTS))
 def test_compaction_keeps_orchestrated_anchor_precedence(tmp_path, host):
     _cache(tmp_path)
-    stdout, _ = _serve_and_run(
+    stdout, calls = _serve_and_run(
         tmp_path, host=host, hook_payload=_event(),
         extra_env={"UNITARES_CLIENT_SESSION_ID": "agent-orchestrated",
                    "UNITARES_ORCHESTRATED": "1"},
@@ -180,3 +212,5 @@ def test_compaction_keeps_orchestrated_anchor_precedence(tmp_path, host):
     assert "ONLINE (anchored session)" in ctx
     assert "ONE identity per conversation" in ctx
     assert UUID not in ctx
+    # The anchor, not the slot cache, is the identity in use: no record.
+    assert calls == []

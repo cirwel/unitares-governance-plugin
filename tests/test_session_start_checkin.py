@@ -39,8 +39,10 @@ class RecordingHandler(http.server.BaseHTTPRequestHandler):
     """HTTP test double that records every POST (tool call) for inspection."""
 
     calls: list[dict] = []
+    paths: list[str] = []
 
     def do_POST(self):
+        RecordingHandler.paths.append(self.path)
         length = int(self.headers.get("content-length", 0))
         body = self.rfile.read(length)
         try:
@@ -84,6 +86,7 @@ def _run_hook(
     the slot-scoped workspace cache.
     """
     RecordingHandler.calls = []
+    RecordingHandler.paths = []
     workdir = cwd if cwd is not None else tmp_path
     env = {
         "PATH": "/usr/bin:/bin:/usr/local/bin",
@@ -141,6 +144,12 @@ def _context(stdout: str) -> str:
 class TestSessionStartMakesNoToolCalls:
     """The hook's load-bearing invariant: no governance state-mutation on start.
 
+    One audit-plane write is allowed, and only on ``source=compact`` with a
+    usable binding for this exact slot: a ``context_compaction`` host
+    observation posted to ``/v1/runtime/observe`` (no identity, lineage,
+    check-in or EISV effect). ``test_compaction_writes_only_its_audit_observation``
+    pins that it is the only POST.
+
     S15-c (2026-04-27) added a single read-only, identity-blind introspection
     call to the `skills` tool to fetch canonical skill content from the server
     (with offline fallback to the bundled mirror). `skills` is in the
@@ -186,6 +195,21 @@ class TestSessionStartMakesNoToolCalls:
             f"SessionStart must not invoke identity-mutating governance tools; "
             f"saw forbidden: {forbidden} (full call list: {tool_calls})"
         )
+
+    def test_compaction_writes_only_its_audit_observation(self, tmp_path):
+        cache = tmp_path / ".unitares" / "session-invariant-slot.json"
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text(json.dumps({
+            "uuid": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            "client_session_id": "agent-invariant-binding",
+            "slot": "invariant-slot", "schema_version": 2,
+        }))
+        _, calls = _serve_and_run(
+            tmp_path, hook_payload={"session_id": "invariant-slot", "source": "compact"},
+        )
+        self._assert_no_state_mutations(calls)
+        assert RecordingHandler.paths == ["/v1/runtime/observe"]
+        assert [call.get("observation_kind") for call in calls] == ["context_compaction"]
 
     def test_online_path_makes_no_state_mutations(self, tmp_path):
         _, calls = _serve_and_run(tmp_path)
