@@ -13,7 +13,13 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from test_session_start_checkin import PLUGIN_ROOT, _context, _run_hook, _serve_and_run
+from test_session_start_checkin import (
+    PLUGIN_ROOT,
+    RecordingHandler,
+    _context,
+    _run_hook,
+    _serve_and_run,
+)
 
 
 UUID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
@@ -61,6 +67,7 @@ def _assert_only_compaction_record(calls, host):
     assert "continuity_token" not in json.dumps(record)
     assert "must-never-appear-in-context" not in json.dumps(record)
     assert "name" not in record and "arguments" not in record  # not a tool call
+    assert RecordingHandler.paths == ["/v1/runtime/observe"]
 
 
 @pytest.mark.parametrize("host", sorted(HOSTS))
@@ -196,7 +203,7 @@ def test_other_start_events_do_not_assert_same_process_continuity(tmp_path, sour
 @pytest.mark.parametrize("host", sorted(HOSTS))
 def test_compaction_keeps_orchestrated_anchor_precedence(tmp_path, host):
     _cache(tmp_path)
-    stdout, _ = _serve_and_run(
+    stdout, calls = _serve_and_run(
         tmp_path, host=host, hook_payload=_event(),
         extra_env={"UNITARES_CLIENT_SESSION_ID": "agent-orchestrated",
                    "UNITARES_ORCHESTRATED": "1"},
@@ -205,3 +212,5 @@ def test_compaction_keeps_orchestrated_anchor_precedence(tmp_path, host):
     assert "ONLINE (anchored session)" in ctx
     assert "ONE identity per conversation" in ctx
     assert UUID not in ctx
+    # The anchor, not the slot cache, is the identity in use: no record.
+    assert calls == []

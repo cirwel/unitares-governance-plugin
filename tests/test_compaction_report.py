@@ -77,7 +77,7 @@ def test_missing_cache_reports_nothing(home):
     assert compaction_report.build_payload(_event(), host="claude", cwd=str(home)) is None
 
 
-def test_kill_switch_and_unreachable_server_are_silent(home, monkeypatch, capsys):
+def test_kill_switch_posts_nothing(home, monkeypatch):
     _cache(home)
     monkeypatch.chdir(home)
     posted = []
@@ -85,11 +85,42 @@ def test_kill_switch_and_unreachable_server_are_silent(home, monkeypatch, capsys
     monkeypatch.setenv("UNITARES_CHECKINS", "off")
     assert compaction_report.main(["--host", "claude", "--server-url", "http://x", _event()]) == 0
     assert posted == []
-    monkeypatch.delenv("UNITARES_CHECKINS")
-    monkeypatch.undo()
-    monkeypatch.setenv("HOME", str(home))
+
+
+def test_main_posts_this_slots_observation_once(home, monkeypatch):
+    _cache(home)
+    monkeypatch.chdir(home)
+    posted = []
+    monkeypatch.setattr(
+        compaction_report, "post", lambda url, payload, **k: posted.append((url, payload))
+    )
+    assert compaction_report.main(["--host", "codex", "--server-url", "http://srv", _event()]) == 0
+    assert [(url, payload["observation_kind"]) for url, payload in posted] == [
+        ("http://srv", "context_compaction")
+    ]
+
+
+@pytest.mark.parametrize("body", [b"not json", b"[]", b'{"success": false}'])
+def test_post_is_false_and_silent_for_odd_responses(monkeypatch, body):
+    class _Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return body
+
+    monkeypatch.setattr(compaction_report, "authorization_safe_urlopen", lambda *a, **k: _Response())
+    assert compaction_report.post("http://srv", {"a": 1}, timeout=0.1) is False
+
+
+def test_unreachable_server_is_silent(home, monkeypatch, capsys):
+    _cache(home)
     monkeypatch.chdir(home)
     assert compaction_report.main(
         ["--host", "claude", "--server-url", "http://127.0.0.1:1", "--timeout", "0.5", _event()]
     ) == 0
-    assert capsys.readouterr().out == ""
+    captured = capsys.readouterr()
+    assert captured.out == "" and captured.err == ""

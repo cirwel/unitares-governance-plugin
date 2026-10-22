@@ -600,18 +600,6 @@ HEALTH_EXIT=0
 HEALTH_STATUS=$(curl -sS --max-time 3 "${SERVER_URL}/health" 2>>"${HEALTH_LOG}") || HEALTH_EXIT=$?
 printf '[%s] curl exit=%d len=%d url=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${HEALTH_EXIT}" "${#HEALTH_STATUS}" "${SERVER_URL}/health" >> "${HEALTH_LOG}" 2>/dev/null || true
 
-# Record the compaction on the identity that was bound when it happened, so
-# whether the identity was kept or a successor minted can be read later
-# (docs/ontology/identity.md, Compaction, in the server repo). Audit plane
-# only: no identity, lineage, check-in or EISV write. Only when the server
-# answered and the guidance above found a usable binding for this exact slot.
-if [[ -n "${COMPACTION_CONTEXT}" && -n "${HEALTH_STATUS}" \
-      && -f "${PLUGIN_ROOT}/scripts/compaction_report.py" ]]; then
-  python3 "${PLUGIN_ROOT}/scripts/compaction_report.py" \
-    --host "${HOOK_HOST}" --server-url "${SERVER_URL}" \
-    "${SESSION_START_STDIN}" >/dev/null 2>&1 || true
-fi
-
 ORCHESTRATED_MODE="$(printf '%s' "${UNITARES_ORCHESTRATED:-0}" | tr '[:upper:]' '[:lower:]')"
 ANCHOR_RESUME_ENABLED=0
 if [[ -n "${UNITARES_CLIENT_SESSION_ID:-}" \
@@ -620,6 +608,21 @@ if [[ -n "${UNITARES_CLIENT_SESSION_ID:-}" \
            || "${ORCHESTRATED_MODE}" == "yes" \
            || "${ORCHESTRATED_MODE}" == "on" ) ]]; then
   ANCHOR_RESUME_ENABLED=1
+fi
+
+# Record the compaction on the identity that was bound when it happened, so
+# whether the identity was kept or a successor minted can be read later
+# (docs/ontology/identity.md, Compaction, in the server repo). Audit plane
+# only: no identity, lineage, check-in or EISV write. Only on a compact start
+# with the server answering and no orchestrated anchor (the anchor, not the
+# slot cache, is then the identity in use); the script itself reports only
+# this exact slot's usable, non-inherited binding.
+if [[ -n "${COMPACTION_CONTEXT}" && -n "${HEALTH_STATUS}" \
+      && "${ANCHOR_RESUME_ENABLED}" != "1" \
+      && -f "${PLUGIN_ROOT}/scripts/compaction_report.py" ]]; then
+  python3 "${PLUGIN_ROOT}/scripts/compaction_report.py" \
+    --host "${HOOK_HOST}" --server-url "${SERVER_URL}" \
+    "${SESSION_START_STDIN}" >/dev/null 2>&1 || true
 fi
 
 # Eager bind: when harness onboarding is enabled, mint this process's identity

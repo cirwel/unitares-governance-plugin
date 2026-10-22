@@ -22,6 +22,7 @@ import hashlib
 import json
 import os
 import re
+import signal
 import sys
 import urllib.error
 import urllib.request
@@ -40,7 +41,10 @@ _UUID_RE = re.compile(
     r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 )
 HOSTS = {"claude", "codex"}
-DEFAULT_TIMEOUT_S = 2.0
+DEFAULT_TIMEOUT_S = 1.5
+# urllib's timeout is per socket operation, so a slow-trickling server could
+# hold SessionStart longer; this caps the whole report where SIGALRM exists.
+WALL_CLOCK_LIMIT_S = 3
 
 
 def build_payload(event_text: str, *, host: str, cwd: str) -> dict[str, Any] | None:
@@ -89,7 +93,7 @@ def post(server_url: str, payload: dict[str, Any], *, timeout: float) -> bool:
     try:
         with authorization_safe_urlopen(request, timeout=timeout) as response:
             body = json.loads(response.read().decode("utf-8"))
-        return bool(body.get("success"))
+        return isinstance(body, dict) and body.get("success") is True
     except (urllib.error.URLError, UnicodeDecodeError, json.JSONDecodeError, OSError, ValueError):
         return False
 
@@ -113,4 +117,9 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    # The wall-clock cap belongs to the hook's own process only; installing it
+    # inside main() would leave a pending alarm in any process that imports it.
+    if hasattr(signal, "SIGALRM"):
+        signal.signal(signal.SIGALRM, lambda *_: os._exit(0))
+        signal.alarm(WALL_CLOCK_LIMIT_S)
     raise SystemExit(main())
