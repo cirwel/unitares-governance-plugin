@@ -19,13 +19,14 @@ configured otherwise.
 binding gets its activity stamp refreshed, an idle one is marked
 ``prior_process`` (the resume the host did not report), so the next turn does
 not mistake it for fresh again. Nothing here mints, rebinds or writes to the
-server, and the stamp holds no proof value.
+server. The stamp holds the identity's uuid, which is not a proof value, and
+the binding is rewritten in-process under the cache lock, never through a
+process argument list.
 """
 
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import sys
 import time
@@ -44,36 +45,60 @@ def idle_hours() -> float:
     return value if value > 0 else DEFAULT_IDLE_HOURS
 
 
-def activity_path(cache_path: Path) -> Path:
-    return cache_path.with_suffix(".active")
+def activity_path(slot: str) -> Path:
+    """The slot's stamp, under HOME whichever cache copy a hook resolved.
+
+    A hook's working directory decides whether it reads the workspace cache or
+    the HOME mirror; the stamp must not split with them.
+    """
+    from _session_lookup import _slot_filename
+
+    return Path.home() / ".unitares" / Path(_slot_filename(slot)).with_suffix(".active").name
 
 
-def last_active(cache_path: Path) -> float | None:
-    """The later of the cache's own write and the last bound turn end."""
-    times = []
-    for path in (cache_path, activity_path(cache_path)):
-        try:
-            times.append(path.stat().st_mtime)
-        except OSError:
-            continue
-    return max(times) if times else None
+def last_active(cache_path: Path, slot: str, uuid: str) -> float | None:
+    """When this binding last ended a bound turn, else when it was written.
+
+    The stamp names the identity it was refreshed for, so other hooks' cache
+    writes (post-edit, post-checkin) are not activity, and a binding minted
+    after the stamp is never judged by its predecessor's. Without a stamp for
+    this identity (a cache written before stamps existed, or a binding that
+    has not ended a turn yet), the cache file's own write time is used.
+    """
+    stamp = activity_path(slot)
+    try:
+        if stamp.read_text(encoding="ascii").strip() == uuid:
+            return stamp.stat().st_mtime
+    except (OSError, UnicodeDecodeError):
+        pass
+    try:
+        return cache_path.stat().st_mtime
+    except OSError:
+        return None
 
 
-def is_idle(cache_path: Path, *, now: float | None = None) -> bool:
-    seen = last_active(cache_path)
+def is_idle(cache_path: Path, slot: str, uuid: str, *, now: float | None = None) -> bool:
+    seen = last_active(cache_path, slot, uuid)
     if seen is None:
         return False
     current = time.time() if now is None else now
     return current - seen > idle_hours() * 3600
 
 
-def touch(cache_path: Path) -> None:
-    stamp = activity_path(cache_path)
+def touch(slot: str, uuid: str) -> None:
+    """Record a bound turn end for ``uuid`` (an identifier, not a proof)."""
+    stamp = activity_path(slot)
+    tmp = stamp.with_name(stamp.name + ".tmp")
     try:
-        stamp.touch(mode=0o600, exist_ok=True)
-        os.utime(stamp, None)
+        stamp.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(uuid, encoding="ascii")
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, stamp)
     except OSError:
-        pass
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
 
 
 def mark(workspace: str, stdin_payload: str, *, now: float | None = None) -> str:
@@ -81,33 +106,51 @@ def mark(workspace: str, stdin_payload: str, *, now: float | None = None) -> str
 
     Returns what it did: ``touched``, ``marked_prior_process`` or ``none``.
     """
+    from _session_cache_io import update_session_cache
     from _session_lookup import _extract_slot, load_session_for_hook, resolve_session_file
+    from session_cache import _cache_path
 
     slot = _extract_slot(stdin_payload)
     path = resolve_session_file(workspace, slot) if slot else None
     if path is None:
         return "none"
     data = load_session_for_hook(workspace, stdin_payload) or {}
-    if not (data.get("uuid") and data.get("client_session_id")):
+    uuid = str(data.get("uuid") or "")
+    binding = str(data.get("client_session_id") or "")
+    if not (uuid and binding) or data.get("prior_process") is True:
         return "none"
-    if data.get("prior_process") is True:
-        return "none"
-    if not is_idle(path, now=now):
-        touch(path)
+    if not is_idle(path, slot, uuid, now=now):
+        touch(slot, uuid)
         return "touched"
-    import subprocess
 
-    # The whole resolved binding is merged with the marker, as SessionStart's
-    # resume path does, so a binding found only in the HOME mirror is written
-    # out complete rather than shadowed by an identity-less file. It goes on
-    # stdin: the proof value never reaches a process argument list.
-    data["prior_process"] = True
-    result = subprocess.run(
-        [sys.executable, str(Path(__file__).resolve().parent / "session_cache.py"),
-         "set", "session", "--workspace", workspace, "--slot", slot, "--merge"],
-        input=json.dumps(data), capture_output=True, text=True, timeout=10, check=False,
-    )
-    return "marked_prior_process" if result.returncode == 0 else "none"
+    def inherit(current: dict) -> dict | None:
+        # Under the cache lock: a mint that committed since the read above
+        # replaced this binding, and must not be overwritten with the old one.
+        if (
+            current.get("uuid") != uuid
+            or current.get("client_session_id") != binding
+            or current.get("prior_process") is True
+        ):
+            return None
+        # A legacy v1 token at rest would make the write refuse every time.
+        if current.get("continuity_token"):
+            current["continuity_token"] = ""
+        current["prior_process"] = True
+        return current
+
+    # The whole resolved binding stays in the write, as SessionStart's resume
+    # path does, so a binding found only in the HOME mirror is written out
+    # complete rather than shadowed. It never leaves this process.
+    workspace_path = Path(workspace)
+    try:
+        _, committed = update_session_cache(
+            _cache_path("session", workspace_path, slot),
+            inherit,
+            home_path=_cache_path("session", Path.home(), slot),
+        )
+    except Exception:
+        return "none"
+    return "marked_prior_process" if committed else "none"
 
 
 def main(argv: list[str] | None = None) -> int:

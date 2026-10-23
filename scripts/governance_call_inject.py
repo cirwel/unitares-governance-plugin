@@ -155,12 +155,15 @@ def _truthy(value: object) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _current_slot_binding(raw: str) -> dict:
+def _current_slot_binding(raw: str, *, idle_is_inherited: bool = False) -> dict:
     """Return a usable binding owned by this process, or an empty dict.
 
-    A binding idle past the server's session lifetime belongs to an earlier
-    process whose resume the host did not report (``binding_activity.py``),
-    the same as one marked ``prior_process``.
+    With ``idle_is_inherited``, a binding idle past the server's session
+    lifetime is treated like one marked ``prior_process``: an earlier process
+    whose resume the host did not report (``binding_activity.py``). Only the
+    force_new guard uses it. A mint through start_session or onboard always
+    replaces the cache; a bare identity() over an unmarked binding is
+    discarded by post-identity, so that guard keeps refusing.
     """
     try:
         from _session_lookup import _extract_slot, load_session_for_hook, resolve_session_file
@@ -171,14 +174,15 @@ def _current_slot_binding(raw: str) -> dict:
     csid = str(sess.get("client_session_id") or "").strip()
     if not uuid or not csid or sess.get("prior_process") is True:
         return {}
-    try:
-        from binding_activity import is_idle
-        slot = _extract_slot(raw)
-        path = resolve_session_file(Path.cwd(), slot) if slot else None
-        if path is not None and is_idle(path):
-            return {}
-    except Exception:
-        pass
+    if idle_is_inherited:
+        try:
+            from binding_activity import is_idle
+            slot = _extract_slot(raw)
+            path = resolve_session_file(Path.cwd(), slot) if slot else None
+            if path is not None and is_idle(path, slot, uuid):
+                return {}
+        except Exception:
+            pass
     return sess
 
 
@@ -200,7 +204,7 @@ def _duplicate_mint_reason(tool_input: dict, raw: str) -> str:
     reason = str(tool_input.get("spawn_reason") or "").strip().lower()
     if reason in DELIBERATE_SPAWN_REASONS:
         return ""
-    sess = _current_slot_binding(raw)
+    sess = _current_slot_binding(raw, idle_is_inherited=True)
     uuid = str(sess.get("uuid") or "").strip()
     csid = str(sess.get("client_session_id") or "").strip()
     # Deny only over a usable binding: the advice to keep using it depends on
