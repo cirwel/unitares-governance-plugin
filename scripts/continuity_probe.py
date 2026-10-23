@@ -3,10 +3,11 @@
 
 Opt-in with ``UNITARES_CONTINUITY_PROBE=on``. Two halves:
 
-- ``ask`` runs inside ``compaction_report.py`` once the compaction itself was
-  recorded. It writes a marker beside the slot's session cache and returns the
-  question, which ``hooks/session-start`` places ahead of the compaction
-  guidance.
+- ``compaction_report.py`` asks, once the compaction itself was recorded: it
+  prints the question, which ``hooks/session-start`` places ahead of the
+  compaction guidance, and only then writes the slot's marker
+  (``record_asked``), so a cut-off loses an answer rather than inventing a
+  ``no_answer`` for a question never shown.
 - ``collect`` (this script's command line) runs from ``hooks/post-stop`` at the
   end of that turn. It reads the agent's last message for one
   ``continuity-probe:`` line and posts the answer, or ``no_answer``, as a
@@ -39,7 +40,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _session_cache_io import read_json_dict_unlocked  # noqa: E402
-from _session_lookup import _extract_slot, resolve_session_file  # noqa: E402
+from _session_lookup import _extract_slot, _slot_filename, resolve_session_file  # noqa: E402
 from checkin import _plugin_version  # noqa: E402
 from compaction_report import DEFAULT_TIMEOUT_S, HOSTS, WALL_CLOCK_LIMIT_S, post  # noqa: E402
 
@@ -55,9 +56,10 @@ continuity-probe: same
 continuity-probe: new
 continuity-probe: cannot-tell"""
 _ANSWER_RE = re.compile(
-    r"^[\s`*_>-]*continuity-probe\s*:\s*(same|new|cannot-tell)\b", re.IGNORECASE | re.MULTILINE
+    r"^[\s`*_>-]*continuity-probe\s*:\s*(same|new|cannot[- ]tell)\b", re.IGNORECASE | re.MULTILINE
 )
-_ANSWERS = {"same": "same_process", "new": "new_process", "cannot-tell": "cannot_tell"}
+_ANSWERS = {"same": "same_process", "new": "new_process", "cannot-tell": "cannot_tell",
+            "cannot tell": "cannot_tell"}
 _UUID_RE = re.compile(
     r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 )
@@ -71,22 +73,25 @@ def enabled() -> bool:
     }
 
 
-def marker_path(session_path: Path) -> Path:
-    return session_path.with_name(session_path.name + MARKER_SUFFIX)
+def marker_path(slot: str) -> Path:
+    """The slot's marker, under HOME whatever the working directory.
+
+    SessionStart and Stop can run in different directories (the agent may
+    ``cd``), and the session cache they resolve can differ with them; the
+    marker must not.
+    """
+    return Path.home() / ".unitares" / (_slot_filename(slot) + MARKER_SUFFIX)
 
 
-def _session_path(event_text: str, cwd: str) -> Path | None:
-    slot = _extract_slot(event_text)
-    return resolve_session_file(cwd, slot) if slot else None
-
-
-def ask(event_text: str, *, cwd: str, host: str, compaction: dict[str, Any]) -> str | None:
-    """Write the marker for a recorded compaction and return the question."""
+def should_ask(event_text: str) -> str | None:
+    """Return the slot to ask for when the probe is on, else None."""
     if not enabled():
         return None
-    path = _session_path(event_text, cwd)
-    if path is None:
-        return None
+    return _extract_slot(event_text) or None
+
+
+def record_asked(slot: str, *, host: str, compaction: dict[str, Any]) -> bool:
+    """Write the marker for a compaction whose question was just shown."""
     marker = {
         "compaction_agent_uuid": compaction["agent_uuid"],
         "compaction_observed_at": compaction["observed_at"],
@@ -95,8 +100,12 @@ def ask(event_text: str, *, cwd: str, host: str, compaction: dict[str, Any]) -> 
         "guidance_present": True,
         "asked_at": time.time(),
     }
-    target = marker_path(path)
-    fd, tmp = tempfile.mkstemp(dir=str(target.parent), prefix=target.name + ".")
+    target = marker_path(slot)
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=str(target.parent), prefix=target.name + ".")
+    except OSError:
+        return False
     try:
         with os.fdopen(fd, "w") as handle:
             json.dump(marker, handle)
@@ -107,8 +116,8 @@ def ask(event_text: str, *, cwd: str, host: str, compaction: dict[str, Any]) -> 
             os.unlink(tmp)
         except OSError:
             pass
-        return None
-    return QUESTION
+        return False
+    return True
 
 
 def parse_answer(message: str) -> str:
@@ -134,10 +143,10 @@ def build_payload(
         return None
     if not isinstance(stop_payload, dict):
         return None
-    path = _session_path(stop_text, cwd)
-    if path is None:
+    slot = _extract_slot(stop_text)
+    if not slot:
         return None
-    target = marker_path(path)
+    target = marker_path(slot)
     marker = read_json_dict_unlocked(target)
     if not marker:
         return None
@@ -155,7 +164,8 @@ def build_payload(
         return None
     if not (isinstance(compacted_at, str) and compacted_at):
         return None
-    cache = read_json_dict_unlocked(path)
+    path = resolve_session_file(cwd, slot)
+    cache = read_json_dict_unlocked(path) if path is not None else {}
     if cache.get("prior_process") is True:
         return None
     agent_uuid = cache.get("uuid") or cache.get("agent_uuid")
@@ -164,7 +174,6 @@ def build_payload(
         return None
     if not (isinstance(binding, str) and binding.strip()):
         return None
-    slot = _extract_slot(stop_text) or ""
     return {
         "agent_uuid": agent_uuid,
         "client_session_id": binding.strip(),

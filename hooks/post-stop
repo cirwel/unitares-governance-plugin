@@ -32,7 +32,8 @@ HOST_MODEL_TYPE="codex"
 
 # Codex Stop has a 30-second outer timeout. Keep network work at or below
 # 20 seconds so payload normalization, cache I/O, and process startup retain
-# a meaningful margin. Operator overrides may lower these caps, never raise
+# a meaningful margin. A pending continuity answer (only after an opted-in
+# compaction) adds at most 3 seconds, capped by its own wall clock. Operator overrides may lower these caps, never raise
 # them for Codex. Claude's asynchronous hook keeps the configured defaults.
 CODEX_ONBOARD_TIMEOUT_CAP="5"
 CODEX_CHECKIN_TIMEOUT_CAP="15"
@@ -229,8 +230,9 @@ fi
 # of that turn: the script reads the agent's last message for its answer line
 # and records it beside the compaction (scripts/continuity_probe.py). It
 # consumes this slot's marker whatever happens, and does nothing without one.
+# A shell glob first, so a Stop with no pending question starts no Python.
 PROBE_HELPER="${PLUGIN_ROOT}/scripts/continuity_probe.py"
-if [[ -f "${PROBE_HELPER}" ]]; then
+if [[ -f "${PROBE_HELPER}" ]] && compgen -G "${HOME}/.unitares/*.continuity-probe" >/dev/null; then
   printf '%s' "${PAYLOAD}" | python3 "${PROBE_HELPER}" \
     --host "${HOOK_HOST}" --server-url "${SERVER_URL}" >/dev/null 2>&1 || true
 fi

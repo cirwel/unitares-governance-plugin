@@ -114,11 +114,14 @@ def main(argv: list[str] | None = None) -> int:
         if payload is not None and post(args.server_url, payload, timeout=args.timeout):
             # The opt-in continuity question, asked only about a compaction
             # that was recorded, so its answer has something to sit beside.
-            from continuity_probe import ask
+            # Shown first, marked second: a cut-off loses the answer rather
+            # than recording no_answer for a question never shown.
+            import continuity_probe
 
-            question = ask(args.event, cwd=os.getcwd(), host=args.host, compaction=payload)
-            if question:
-                print(question, flush=True)
+            slot = continuity_probe.should_ask(args.event)
+            if slot:
+                print(continuity_probe.QUESTION, flush=True)
+                continuity_probe.record_asked(slot, host=args.host, compaction=payload)
     except Exception:
         pass
     return 0
