@@ -101,8 +101,12 @@ def is_idle(
     return current - seen > idle_hours() * 3600
 
 
-def touch(slot: str, uuid: str, binding: str) -> None:
-    """Record a bound turn end for this binding (no proof value is stored)."""
+def touch(slot: str, uuid: str, binding: str, *, at: float | None = None) -> None:
+    """Record a bound turn end for this binding (no proof value is stored).
+
+    ``at`` back-dates the stamp: marking an idle binding inherited records
+    when it was last active, so a later cache write cannot make it look fresh.
+    """
     stamp = activity_path(slot)
     tmp = None
     try:
@@ -111,6 +115,8 @@ def touch(slot: str, uuid: str, binding: str) -> None:
         with os.fdopen(fd, "w", encoding="ascii") as handle:
             handle.write(_incarnation(uuid, binding))
         os.chmod(tmp, 0o600)
+        if at is not None:
+            os.utime(tmp, (at, at))
         os.replace(tmp, stamp)
     except OSError:
         if tmp is not None:
@@ -125,7 +131,11 @@ def mark(workspace: str, stdin_payload: str, *, now: float | None = None) -> str
 
     Returns what it did: ``touched``, ``marked_prior_process`` or ``none``.
     """
-    from _session_cache_io import read_json_dict_unlocked, update_session_cache
+    from _session_cache_io import (
+        home_session_mirror_is_valid,
+        read_json_dict_unlocked,
+        update_session_cache,
+    )
     from _session_lookup import _extract_slot, load_session_for_hook, resolve_session_file
     from session_cache import _cache_path
 
@@ -141,6 +151,10 @@ def mark(workspace: str, stdin_payload: str, *, now: float | None = None) -> str
     if not is_idle(path, slot, uuid, binding, now=now):
         touch(slot, uuid, binding)
         return "touched"
+    # Keep the idle evidence with the binding itself: another workspace's
+    # unmarked copy may later be written back over the marked one, and its
+    # fresh mtime must not count as activity.
+    touch(slot, uuid, binding, at=last_active(path, slot, uuid, binding))
 
     home_cache = _cache_path("session", Path.home(), slot)
 
@@ -154,9 +168,11 @@ def mark(workspace: str, stdin_payload: str, *, now: float | None = None) -> str
         # HOME mirror and leaves this workspace's copy stale.
         if not same_binding(current) or current.get("prior_process") is True:
             return None
-        mirror = read_json_dict_unlocked(home_cache)
-        if mirror.get("uuid") and not same_binding(mirror):
-            return None
+        # A mirror a failed write invalidated is no evidence of a newer mint.
+        if home_session_mirror_is_valid(home_cache):
+            mirror = read_json_dict_unlocked(home_cache)
+            if mirror.get("uuid") and not same_binding(mirror):
+                return None
         # A legacy v1 token at rest would make the write refuse every time.
         if current.get("continuity_token"):
             current["continuity_token"] = ""

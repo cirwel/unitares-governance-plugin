@@ -182,6 +182,35 @@ def test_mark_never_overwrites_a_mint_made_from_another_workspace(tmp_path):
     assert json.loads(home_copy.read_text())["uuid"] == "11111111-2222-4333-8444-555555555555"
 
 
+def test_an_invalidated_home_mirror_does_not_veto_the_marking(tmp_path):
+    workspace = tmp_path / "x"
+    workspace.mkdir()
+    path = _cache(workspace, age_s=2 * DAY)
+    _cache(tmp_path, uuid="11111111-2222-4333-8444-555555555555",
+           client_session_id="agent-stale-mirror")
+    from _session_cache_io import cache_authority_path
+
+    authority = cache_authority_path(tmp_path / ".unitares" / f"session-{SLOT}.json")
+    authority.parent.mkdir(parents=True, exist_ok=True)
+    authority.write_text(json.dumps({"schema_version": 1, "mirror_valid": False}))
+    assert binding_activity.mark(str(workspace), _payload()) == "marked_prior_process"
+    assert json.loads(path.read_text())["prior_process"] is True
+
+
+def test_a_marked_binding_stays_idle_after_another_copy_is_written_back(tmp_path):
+    # Marked in HOME from workspace Y; workspace X still holds the unmarked
+    # copy, whose next metadata write lands back on HOME with a fresh mtime.
+    home_copy = _cache(tmp_path, age_s=2 * DAY)
+    elsewhere = tmp_path / "y"
+    elsewhere.mkdir()
+    assert binding_activity.mark(str(elsewhere), _payload()) == "marked_prior_process"
+    home_copy.write_text(json.dumps({
+        "uuid": UUID, "client_session_id": CSID, "schema_version": 2, "slot": SLOT,
+    }))
+    assert binding_activity.is_idle(home_copy, SLOT, UUID, CSID)
+    assert not _denied(_mint(elsewhere, _env(tmp_path), "codex"))
+
+
 def test_mark_clears_a_legacy_token_rather_than_failing_every_stop(tmp_path):
     path = _cache(tmp_path, age_s=2 * DAY, continuity_token="v1.legacy-at-rest")
     assert binding_activity.mark(str(tmp_path), _payload()) == "marked_prior_process"
