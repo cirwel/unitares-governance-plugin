@@ -225,6 +225,16 @@ if [[ -n "${CSID:-}" && -f "${PLUGIN_ROOT}/scripts/binding_activity.py" ]]; then
     --workspace "${PWD}" >/dev/null 2>&1 || true
 fi
 
+# The opt-in continuity question asked at a compaction is answered at the end
+# of that turn: the script reads the agent's last message for its answer line
+# and records it beside the compaction (scripts/continuity_probe.py). It
+# consumes this slot's marker whatever happens, and does nothing without one.
+PROBE_HELPER="${PLUGIN_ROOT}/scripts/continuity_probe.py"
+if [[ -f "${PROBE_HELPER}" ]]; then
+  printf '%s' "${PAYLOAD}" | python3 "${PROBE_HELPER}" \
+    --host "${HOOK_HOST}" --server-url "${SERVER_URL}" >/dev/null 2>&1 || true
+fi
+
 # No onboarded identity (no CSID) after lazy onboarding → don't go dark. Emit
 # one identity-free substrate FLOOR observation: a measurement that this
 # session ran, NOT an identity claim. It writes to core.substrate_observations
