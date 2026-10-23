@@ -616,13 +616,16 @@ fi
 # only: no identity, lineage, check-in or EISV write. Only on a compact start
 # with the server answering and no orchestrated anchor (the anchor, not the
 # slot cache, is then the identity in use); the script itself reports only
-# this exact slot's usable, non-inherited binding.
+# this exact slot's usable, non-inherited binding. Its only output is the
+# opt-in continuity question (UNITARES_CONTINUITY_PROBE=on), printed once the
+# compaction was recorded; it goes ahead of the compaction guidance below.
+PROBE_QUESTION=""
 if [[ -n "${COMPACTION_CONTEXT}" && -n "${HEALTH_STATUS}" \
       && "${ANCHOR_RESUME_ENABLED}" != "1" \
       && -f "${PLUGIN_ROOT}/scripts/compaction_report.py" ]]; then
-  python3 "${PLUGIN_ROOT}/scripts/compaction_report.py" \
+  PROBE_QUESTION=$(python3 "${PLUGIN_ROOT}/scripts/compaction_report.py" \
     --host "${HOOK_HOST}" --server-url "${SERVER_URL}" \
-    "${SESSION_START_STDIN}" >/dev/null 2>&1 || true
+    "${SESSION_START_STDIN}" 2>/dev/null) || PROBE_QUESTION=""
 fi
 
 # Eager bind: when harness onboarding is enabled, mint this process's identity
@@ -843,6 +846,13 @@ ${RECOVERY_GUIDANCE}"
     CONTEXT="UNITARES Governance: ONLINE
 
 ${COMPACTION_CONTEXT}"
+    if [[ -n "${PROBE_QUESTION}" ]]; then
+      CONTEXT="UNITARES Governance: ONLINE
+
+${PROBE_QUESTION}
+
+${COMPACTION_CONTEXT}"
+    fi
   elif [[ "${COMPACT_MODE}" == "1" ]]; then
     # Compact prose: assumes the agent saw the full note + Fundamentals
     # block earlier this hour (workspace cache mtime < TTL). Keep

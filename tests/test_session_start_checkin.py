@@ -53,7 +53,11 @@ class RecordingHandler(http.server.BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
-        self.wfile.write(json.dumps({"result": {"success": True}}).encode())
+        # /v1/runtime/observe answers with a top-level success, like the server.
+        body = {"result": {"success": True}}
+        if self.path == "/v1/runtime/observe":
+            body = {"success": True}
+        self.wfile.write(json.dumps(body).encode())
 
     def do_GET(self):
         self.send_response(200)
