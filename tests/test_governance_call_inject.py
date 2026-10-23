@@ -627,7 +627,9 @@ class TestWorkflowAliasCoverage:
 class TestDuplicateMintGuard:
     """A force_new mint in a slot that is already bound would give one process
     two identities (live 2026-10-14). The hook denies it unless the call
-    declares lineage or a deliberate spawn_reason; it never rewrites it."""
+    declares lineage or a deliberate spawn_reason; it never rewrites it. A
+    binding idle past the session lifetime is not this process's
+    (tests/test_binding_activity.py)."""
 
     @staticmethod
     def _decision(result):
