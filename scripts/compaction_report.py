@@ -11,8 +11,10 @@ a ``spawn_reason="compaction"`` child minted).
 It reports only for the exact slot's usable binding, the same one the
 compaction guidance names. A resumed session's inherited ``prior_process``
 cache is not this process's binding and is never reported. Proof values are
-sent to the server and nowhere else; the script prints nothing. Every failure
-is silent, and ``UNITARES_CHECKINS=off`` disables it.
+sent to the server and nowhere else. The script prints only the opt-in
+continuity question (``continuity_probe.py``), and only once the compaction
+was recorded. Every failure is silent, and ``UNITARES_CHECKINS=off`` disables
+it.
 """
 
 from __future__ import annotations
@@ -109,8 +111,17 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     try:
         payload = build_payload(args.event, host=args.host, cwd=os.getcwd())
-        if payload is not None:
-            post(args.server_url, payload, timeout=args.timeout)
+        if payload is not None and post(args.server_url, payload, timeout=args.timeout):
+            # The opt-in continuity question, asked only about a compaction
+            # that was recorded, so its answer has something to sit beside.
+            # Shown first, marked second: a cut-off loses the answer rather
+            # than recording no_answer for a question never shown.
+            import continuity_probe
+
+            slot = continuity_probe.should_ask(args.event)
+            if slot:
+                print(continuity_probe.QUESTION, flush=True)
+                continuity_probe.record_asked(slot, host=args.host, compaction=payload)
     except Exception:
         pass
     return 0
