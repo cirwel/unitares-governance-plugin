@@ -179,7 +179,7 @@ def _current_slot_binding(raw: str, *, idle_is_inherited: bool = False) -> dict:
             from binding_activity import is_idle
             slot = _extract_slot(raw)
             path = resolve_session_file(Path.cwd(), slot) if slot else None
-            if path is not None and is_idle(path, slot, uuid):
+            if path is not None and is_idle(path, slot, uuid, csid):
                 return {}
         except Exception:
             pass

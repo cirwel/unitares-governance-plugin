@@ -86,7 +86,7 @@ def test_an_idle_binding_does_not_block_the_new_processs_mint(tmp_path, host):
 @pytest.mark.parametrize("host", ["claude", "codex"])
 def test_a_binding_with_a_recent_turn_still_blocks_a_second_mint(tmp_path, host):
     _cache(tmp_path, age_s=2 * DAY)
-    binding_activity.touch(SLOT, UUID)
+    binding_activity.touch(SLOT, UUID, CSID)
     assert _denied(_mint(tmp_path, _env(tmp_path), host))
 
 
@@ -112,7 +112,8 @@ def test_mark_refreshes_a_fresh_binding(tmp_path):
     assert binding_activity.mark(str(tmp_path), _payload()) == "touched"
     stamp = binding_activity.activity_path(SLOT)
     assert stamp.parent == tmp_path / ".unitares"
-    assert stamp.read_text() == UUID
+    assert stamp.read_text().startswith(UUID + " ")
+    assert CSID not in stamp.read_text()
     assert json.loads(path.read_text()).get("prior_process") is not True
 
 
@@ -148,6 +149,39 @@ def test_mark_never_overwrites_a_mint_that_landed_after_its_read(tmp_path, monke
     assert data.get("prior_process") is not True
 
 
+def test_mark_marks_a_binding_that_exists_only_in_the_home_mirror(tmp_path):
+    # Bound from another directory: this workspace has no cache, the HOME
+    # mirror is two days old. The marking must land on the HOME copy.
+    home_copy = _cache(tmp_path, age_s=2 * DAY)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    assert binding_activity.mark(str(workspace), _payload()) == "marked_prior_process"
+    data = json.loads(home_copy.read_text())
+    assert data["prior_process"] is True and data["uuid"] == UUID
+    assert not (workspace / ".unitares" / f"session-{SLOT}.json").exists()
+
+
+def test_a_rebind_under_a_new_proof_is_not_judged_by_the_old_stamp(tmp_path):
+    binding_activity.touch(SLOT, UUID, CSID)
+    stale = time.time() - 2 * DAY
+    os.utime(binding_activity.activity_path(SLOT), (stale, stale))
+    path = _cache(tmp_path, client_session_id="agent-727c452e-522-rebound")
+    assert not binding_activity.is_idle(path, SLOT, UUID, "agent-727c452e-522-rebound")
+    assert binding_activity.mark(str(tmp_path), _payload()) == "touched"
+
+
+def test_mark_never_overwrites_a_mint_made_from_another_workspace(tmp_path):
+    # Workspace X still holds A; a mint of B from workspace Y reached only the
+    # HOME mirror. X's delayed Stop must not write A back over HOME's B.
+    workspace = tmp_path / "x"
+    workspace.mkdir()
+    _cache(workspace, age_s=2 * DAY)
+    home_copy = _cache(tmp_path, uuid="11111111-2222-4333-8444-555555555555",
+                       client_session_id="agent-minted-in-y")
+    assert binding_activity.mark(str(workspace), _payload()) == "none"
+    assert json.loads(home_copy.read_text())["uuid"] == "11111111-2222-4333-8444-555555555555"
+
+
 def test_mark_clears_a_legacy_token_rather_than_failing_every_stop(tmp_path):
     path = _cache(tmp_path, age_s=2 * DAY, continuity_token="v1.legacy-at-rest")
     assert binding_activity.mark(str(tmp_path), _payload()) == "marked_prior_process"
@@ -157,18 +191,18 @@ def test_mark_clears_a_legacy_token_rather_than_failing_every_stop(tmp_path):
 
 def test_another_identitys_stamp_does_not_count(tmp_path):
     path = _cache(tmp_path, age_s=2 * DAY)
-    binding_activity.touch(SLOT, "11111111-2222-4333-8444-555555555555")
-    assert binding_activity.is_idle(path, SLOT, UUID)
+    binding_activity.touch(SLOT, "11111111-2222-4333-8444-555555555555", CSID)
+    assert binding_activity.is_idle(path, SLOT, UUID, CSID)
 
 
 def test_other_hooks_cache_writes_are_not_activity(tmp_path):
     # post-edit and post-checkin rewrite the cache; only a bound turn end
     # (the stamp, once this identity has one) counts.
     path = _cache(tmp_path)
-    binding_activity.touch(SLOT, UUID)
+    binding_activity.touch(SLOT, UUID, CSID)
     stale = time.time() - 2 * DAY
     os.utime(binding_activity.activity_path(SLOT), (stale, stale))
-    assert binding_activity.is_idle(path, SLOT, UUID)
+    assert binding_activity.is_idle(path, SLOT, UUID, CSID)
 
 
 def test_activity_follows_the_binding_across_workspace_and_home(tmp_path):
@@ -178,7 +212,7 @@ def test_activity_follows_the_binding_across_workspace_and_home(tmp_path):
     workspace.mkdir()
     _cache(workspace)
     _cache(tmp_path, age_s=2 * DAY)
-    binding_activity.touch(SLOT, UUID)
+    binding_activity.touch(SLOT, UUID, CSID)
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()
     assert _denied(_mint(elsewhere, _env(tmp_path), "codex"))
@@ -229,5 +263,5 @@ def test_a_live_threads_turn_end_keeps_the_guard(tmp_path, host):
     env = _env(tmp_path)
     _post_stop(tmp_path, env, host)
     assert json.loads(path.read_text()).get("prior_process") is not True
-    assert binding_activity.activity_path(SLOT).read_text() == UUID
+    assert binding_activity.activity_path(SLOT).read_text().startswith(UUID + " ")
     assert _denied(_mint(tmp_path, env, host))
