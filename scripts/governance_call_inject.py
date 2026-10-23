@@ -156,9 +156,14 @@ def _truthy(value: object) -> bool:
 
 
 def _current_slot_binding(raw: str) -> dict:
-    """Return a usable binding owned by this process, or an empty dict."""
+    """Return a usable binding owned by this process, or an empty dict.
+
+    A binding idle past the server's session lifetime belongs to an earlier
+    process whose resume the host did not report (``binding_activity.py``),
+    the same as one marked ``prior_process``.
+    """
     try:
-        from _session_lookup import load_session_for_hook
+        from _session_lookup import _extract_slot, load_session_for_hook, resolve_session_file
         sess = load_session_for_hook(Path.cwd(), raw) or {}
     except Exception:
         return {}
@@ -166,6 +171,14 @@ def _current_slot_binding(raw: str) -> dict:
     csid = str(sess.get("client_session_id") or "").strip()
     if not uuid or not csid or sess.get("prior_process") is True:
         return {}
+    try:
+        from binding_activity import is_idle
+        slot = _extract_slot(raw)
+        path = resolve_session_file(Path.cwd(), slot) if slot else None
+        if path is not None and is_idle(path):
+            return {}
+    except Exception:
+        pass
     return sess
 
 

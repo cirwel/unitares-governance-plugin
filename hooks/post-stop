@@ -216,6 +216,15 @@ if [[ -z "${CSID:-}" && -n "${RAW_SLOT:-}" \
   fi
 fi
 
+# Record that this bound slot ended a turn. A binding idle past the server's
+# session lifetime is instead marked prior_process: the host resumed an earlier
+# session without SessionStart (Codex often does), so this process has not
+# minted its own identity yet (scripts/binding_activity.py).
+if [[ -n "${CSID:-}" && -f "${PLUGIN_ROOT}/scripts/binding_activity.py" ]]; then
+  printf '%s' "${PAYLOAD}" | python3 "${PLUGIN_ROOT}/scripts/binding_activity.py" mark \
+    --workspace "${PWD}" >/dev/null 2>&1 || true
+fi
+
 # No onboarded identity (no CSID) after lazy onboarding → don't go dark. Emit
 # one identity-free substrate FLOOR observation: a measurement that this
 # session ran, NOT an identity claim. It writes to core.substrate_observations
