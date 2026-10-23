@@ -9,6 +9,7 @@
             "type": "command",
             "command": "_unitares_runner=\"${PLUGIN_ROOT}/hooks/run-hook.cmd\"; if [ ! -f \"$_unitares_runner\" ]; then for _unitares_candidate in \"${PLUGIN_ROOT%/*}\"/*/hooks/run-hook.cmd; do [ -f \"$_unitares_candidate\" ] && _unitares_runner=\"$_unitares_candidate\"; done; fi; \"$_unitares_runner\" pre-edit --host codex",
             "commandWindows": "\"%PLUGIN_ROOT%\\hooks\\run-hook.cmd\" pre-edit --host codex",
+            "statusMessage": "Checking edit coordination",
             "timeout": 6
           }
         ]
@@ -20,6 +21,7 @@
             "type": "command",
             "command": "_unitares_runner=\"${PLUGIN_ROOT}/hooks/run-hook.cmd\"; if [ ! -f \"$_unitares_runner\" ]; then for _unitares_candidate in \"${PLUGIN_ROOT%/*}\"/*/hooks/run-hook.cmd; do [ -f \"$_unitares_candidate\" ] && _unitares_runner=\"$_unitares_candidate\"; done; fi; \"$_unitares_runner\" pre-governance-call --host codex",
             "commandWindows": "\"%PLUGIN_ROOT%\\hooks\\run-hook.cmd\" pre-governance-call --host codex",
+            "statusMessage": "Preparing governance context",
             "timeout": 5
           }
         ]
@@ -33,6 +35,7 @@
             "type": "command",
             "command": "_unitares_runner=\"${PLUGIN_ROOT}/hooks/run-hook.cmd\"; if [ ! -f \"$_unitares_runner\" ]; then for _unitares_candidate in \"${PLUGIN_ROOT%/*}\"/*/hooks/run-hook.cmd; do [ -f \"$_unitares_candidate\" ] && _unitares_runner=\"$_unitares_candidate\"; done; fi; \"$_unitares_runner\" session-start --host codex",
             "commandWindows": "\"%PLUGIN_ROOT%\\hooks\\run-hook.cmd\" session-start --host codex",
+            "statusMessage": "Loading governance context",
             "timeout": 15,
             "additionalContextLimit": 12000
           },
@@ -40,6 +43,7 @@
             "type": "command",
             "command": "_unitares_runner=\"${PLUGIN_ROOT}/hooks/run-hook.cmd\"; if [ ! -f \"$_unitares_runner\" ]; then for _unitares_candidate in \"${PLUGIN_ROOT%/*}\"/*/hooks/run-hook.cmd; do [ -f \"$_unitares_candidate\" ] && _unitares_runner=\"$_unitares_candidate\"; done; fi; \"$_unitares_runner\" watcher-context --event session-start --host codex",
             "commandWindows": "\"%PLUGIN_ROOT%\\hooks\\run-hook.cmd\" watcher-context --event session-start --host codex",
+            "statusMessage": "Checking Watcher findings",
             "timeout": 12,
             "additionalContextLimit": 12000
           }
@@ -53,6 +57,7 @@
             "type": "command",
             "command": "_unitares_runner=\"${PLUGIN_ROOT}/hooks/run-hook.cmd\"; if [ ! -f \"$_unitares_runner\" ]; then for _unitares_candidate in \"${PLUGIN_ROOT%/*}\"/*/hooks/run-hook.cmd; do [ -f \"$_unitares_candidate\" ] && _unitares_runner=\"$_unitares_candidate\"; done; fi; \"$_unitares_runner\" watcher-context --event user-prompt-submit --host codex",
             "commandWindows": "\"%PLUGIN_ROOT%\\hooks\\run-hook.cmd\" watcher-context --event user-prompt-submit --host codex",
+            "statusMessage": "Checking Watcher findings",
             "timeout": 12,
             "additionalContextLimit": 12000
           }
@@ -67,12 +72,14 @@
             "type": "command",
             "command": "_unitares_runner=\"${PLUGIN_ROOT}/hooks/run-hook.cmd\"; if [ ! -f \"$_unitares_runner\" ]; then for _unitares_candidate in \"${PLUGIN_ROOT%/*}\"/*/hooks/run-hook.cmd; do [ -f \"$_unitares_candidate\" ] && _unitares_runner=\"$_unitares_candidate\"; done; fi; \"$_unitares_runner\" session-end --host codex",
             "commandWindows": "\"%PLUGIN_ROOT%\\hooks\\run-hook.cmd\" session-end --host codex",
+            "statusMessage": "Closing governance session",
             "timeout": 3
           },
           {
             "type": "command",
             "command": "_unitares_runner=\"${PLUGIN_ROOT}/hooks/run-hook.cmd\"; if [ ! -f \"$_unitares_runner\" ]; then for _unitares_candidate in \"${PLUGIN_ROOT%/*}\"/*/hooks/run-hook.cmd; do [ -f \"$_unitares_candidate\" ] && _unitares_runner=\"$_unitares_candidate\"; done; fi; \"$_unitares_runner\" runtime-stop --host codex",
             "commandWindows": "\"%PLUGIN_ROOT%\\hooks\\run-hook.cmd\" runtime-stop --host codex",
+            "statusMessage": "Stopping session heartbeat",
             "timeout": 2
           }
         ]
@@ -85,6 +92,7 @@
             "type": "command",
             "command": "_unitares_runner=\"${PLUGIN_ROOT}/hooks/run-hook.cmd\"; if [ ! -f \"$_unitares_runner\" ]; then for _unitares_candidate in \"${PLUGIN_ROOT%/*}\"/*/hooks/run-hook.cmd; do [ -f \"$_unitares_candidate\" ] && _unitares_runner=\"$_unitares_candidate\"; done; fi; \"$_unitares_runner\" post-stop --host codex",
             "commandWindows": "\"%PLUGIN_ROOT%\\hooks\\run-hook.cmd\" post-stop --host codex",
+            "statusMessage": "Recording turn observation",
             "timeout": 30
           }
         ]
@@ -98,6 +106,7 @@
             "type": "command",
             "command": "_unitares_runner=\"${PLUGIN_ROOT}/hooks/run-hook.cmd\"; if [ ! -f \"$_unitares_runner\" ]; then for _unitares_candidate in \"${PLUGIN_ROOT%/*}\"/*/hooks/run-hook.cmd; do [ -f \"$_unitares_candidate\" ] && _unitares_runner=\"$_unitares_candidate\"; done; fi; \"$_unitares_runner\" post-activity --host codex",
             "commandWindows": "\"%PLUGIN_ROOT%\\hooks\\run-hook.cmd\" post-activity --host codex",
+            "statusMessage": "Recording tool activity",
             "timeout": 3
           }
         ]
@@ -109,12 +118,14 @@
             "type": "command",
             "command": "_unitares_runner=\"${PLUGIN_ROOT}/hooks/run-hook.cmd\"; if [ ! -f \"$_unitares_runner\" ]; then for _unitares_candidate in \"${PLUGIN_ROOT%/*}\"/*/hooks/run-hook.cmd; do [ -f \"$_unitares_candidate\" ] && _unitares_runner=\"$_unitares_candidate\"; done; fi; \"$_unitares_runner\" post-edit-release --host codex",
             "commandWindows": "\"%PLUGIN_ROOT%\\hooks\\run-hook.cmd\" post-edit-release --host codex",
+            "statusMessage": "Releasing edit coordination",
             "timeout": 6
           },
           {
             "type": "command",
             "command": "_unitares_runner=\"${PLUGIN_ROOT}/hooks/run-hook.cmd\"; if [ ! -f \"$_unitares_runner\" ]; then for _unitares_candidate in \"${PLUGIN_ROOT%/*}\"/*/hooks/run-hook.cmd; do [ -f \"$_unitares_candidate\" ] && _unitares_runner=\"$_unitares_candidate\"; done; fi; \"$_unitares_runner\" post-edit --host codex",
             "commandWindows": "\"%PLUGIN_ROOT%\\hooks\\run-hook.cmd\" post-edit --host codex",
+            "statusMessage": "Recording edit observation",
             "timeout": 6
           }
         ]
@@ -126,6 +137,7 @@
             "type": "command",
             "command": "_unitares_runner=\"${PLUGIN_ROOT}/hooks/run-hook.cmd\"; if [ ! -f \"$_unitares_runner\" ]; then for _unitares_candidate in \"${PLUGIN_ROOT%/*}\"/*/hooks/run-hook.cmd; do [ -f \"$_unitares_candidate\" ] && _unitares_runner=\"$_unitares_candidate\"; done; fi; \"$_unitares_runner\" post-checkin --host codex",
             "commandWindows": "\"%PLUGIN_ROOT%\\hooks\\run-hook.cmd\" post-checkin --host codex",
+            "statusMessage": "Updating check-in cache",
             "timeout": 5
           }
         ]
@@ -137,6 +149,7 @@
             "type": "command",
             "command": "_unitares_runner=\"${PLUGIN_ROOT}/hooks/run-hook.cmd\"; if [ ! -f \"$_unitares_runner\" ]; then for _unitares_candidate in \"${PLUGIN_ROOT%/*}\"/*/hooks/run-hook.cmd; do [ -f \"$_unitares_candidate\" ] && _unitares_runner=\"$_unitares_candidate\"; done; fi; \"$_unitares_runner\" post-identity --host codex",
             "commandWindows": "\"%PLUGIN_ROOT%\\hooks\\run-hook.cmd\" post-identity --host codex",
+            "statusMessage": "Saving session identity",
             "timeout": 5
           }
         ]
