@@ -178,13 +178,13 @@ SESSION_LOOKUP="${PLUGIN_ROOT}/scripts/_session_lookup.py"
 if [[ -f "${SESSION_LOOKUP}" ]]; then
   # Load the full slotted session JSON for auto_checkin_decision, which needs
   # client_session_id and last_checkin_ts from the cache.
-  SESSION_PAYLOAD=$(printf '%s' "${HOOK_INPUT}" | python3 -c "
+  SESSION_PAYLOAD=$(printf '%s' "${HOOK_INPUT}" | python3 -c '
 import json, sys
-sys.path.insert(0, '${PLUGIN_ROOT}/scripts')
+sys.path.insert(0, sys.argv[1])
 from _session_lookup import load_usable_session_for_hook
-data = load_usable_session_for_hook('${PWD}', sys.stdin.read())
+data = load_usable_session_for_hook(sys.argv[2], sys.stdin.read())
 print(json.dumps(data))
-" 2>/dev/null || echo "{}")
+' "${PLUGIN_ROOT}/scripts" "${PWD}" 2>/dev/null || echo "{}")
   # Also eval shell vars for UUID_HINT and SLOT (needed by checkin.py call).
   eval "$(printf '%s' "${HOOK_INPUT}" | python3 "${SESSION_LOOKUP}" --workspace "${PWD}" 2>/dev/null || true)"
 else
