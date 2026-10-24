@@ -59,7 +59,14 @@ def decide(
 
     fire = False
     reason = ""
-    if edit_count >= edit_threshold:
+    usable_binding = (
+        isinstance(session.get("client_session_id"), str)
+        and bool(session.get("client_session_id", "").strip())
+        and session.get("prior_process") is not True
+    )
+    if not usable_binding:
+        reason = "no_usable_binding"
+    elif edit_count >= edit_threshold:
         fire = True
         reason = f"edits>={edit_threshold}"
     elif edit_count >= 1 and elapsed >= secs_threshold:

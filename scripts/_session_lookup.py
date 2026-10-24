@@ -10,6 +10,8 @@ reads the same file the onboard helper wrote.
 Public API:
     resolve_session_file(workspace, slot) -> Path | None
     load_session_for_hook(workspace, stdin_payload) -> dict
+    resolve_proof_session_file(slot) -> Path | None
+    load_usable_session_for_hook(workspace, stdin_payload) -> dict
 
 ``load_session_for_hook`` is the one-liner most hooks want: pass the
 current working directory plus whatever came in on stdin, get back
@@ -18,12 +20,17 @@ a dict with ``uuid``, ``client_session_id``, ``continuity_token``,
 if nothing matches. Claude supplies ``session_id``. Codex may expose only
 stable conversation/transcript fields, so those are hashed into a slot key
 rather than collapsing onto the retired flat cache.
+
+Governance proof consumers must instead use ``load_usable_session_for_hook``;
+the older lookup remains available only for non-authoritative lineage hints.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import os
+import stat
 from pathlib import Path
 from typing import Any, Optional
 
@@ -113,6 +120,34 @@ def resolve_session_file(workspace: str | Path, slot: Optional[str]) -> Optional
     return None
 
 
+def resolve_proof_session_file(slot: Optional[str]) -> Optional[Path]:
+    """Return a protected HOME binding suitable for governance proof use.
+
+    Workspace caches remain useful lineage hints, but they are not an
+    authority boundary: another workspace writer may replace them.  Proof
+    consumers therefore accept only the slotted HOME primary written by the
+    transactional cache helper, with a regular-file/owner/mode check and a
+    valid cache-authority record.
+    """
+    if not slot:
+        return None
+    path = Path.home() / ".unitares" / _slot_filename(slot)
+    if path.is_symlink() or not home_session_mirror_is_valid(path):
+        return None
+    try:
+        # os.lstat is available on the older system Python used by macOS hook
+        # subprocesses; pathlib's follow_symlinks parameter is newer.
+        info = os.lstat(path)
+    except OSError:
+        return None
+    if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077:
+        return None
+    getuid = getattr(os, "getuid", None)
+    if callable(getuid) and info.st_uid != getuid():
+        return None
+    return path
+
+
 def _extract_slot(stdin_payload: str) -> Optional[str]:
     """Extract the slot identifier from hook stdin JSON.
 
@@ -150,6 +185,52 @@ def load_session_for_hook(workspace: str | Path, stdin_payload: str) -> dict[str
         return {}
 
 
+def load_authoritative_session_for_hook(
+    workspace: str | Path,
+    stdin_payload: str,
+) -> dict[str, Any]:
+    """Return the protected binding for this exact slot, including lineage state.
+
+    ``workspace`` is retained in the signature so callers can switch from
+    ``load_session_for_hook`` without changing their invocation shape.  It is
+    deliberately not used to select proof: only the protected HOME primary is
+    authoritative.  Records whose embedded slot does not exactly match the
+    hook slot fail closed.
+    """
+    del workspace
+    slot = _extract_slot(stdin_payload)
+    path = resolve_proof_session_file(slot)
+    if path is None or slot is None:
+        return {}
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    if data.get("slot") != slot or data.get("schema_version") != 2:
+        return {}
+    return data
+
+
+def load_usable_session_for_hook(
+    workspace: str | Path,
+    stdin_payload: str,
+) -> dict[str, Any]:
+    """Return a current-process binding safe to attach to governance writes."""
+    data = load_authoritative_session_for_hook(workspace, stdin_payload)
+    if data.get("prior_process") is True:
+        return {}
+    uuid = data.get("uuid")
+    client_session_id = data.get("client_session_id")
+    if not isinstance(uuid, str) or not uuid.strip():
+        return {}
+    if not isinstance(client_session_id, str) or not client_session_id.strip():
+        return {}
+    return data
+
+
 def _cli() -> int:
     """Emit resolved session fields as shell-sourceable vars on stdout.
 
@@ -169,7 +250,7 @@ def _cli() -> int:
     args = ap.parse_args()
 
     payload = _sys.stdin.read()
-    data = load_session_for_hook(args.workspace, payload)
+    data = load_usable_session_for_hook(args.workspace, payload)
 
     def _esc(value: str) -> str:
         # Escape for double-quoted bash string: backslash, double-quote, dollar, backtick

@@ -65,12 +65,14 @@ def test_post_stop_emits_turn_stop_checkin(tmp_path):
     session_dir = tmp_path / ".unitares"
     session_dir.mkdir()
     slot = "test-slot"
-    (session_dir / _slot_filename(slot)).write_text(json.dumps({
+    cache = session_dir / _slot_filename(slot)
+    cache.write_text(json.dumps({
         "uuid": "86ae619f-87e0-4040-8f29-eacece0c7904",
         "client_session_id": "agent-test1234",
-        "continuity_token": "v1.faketoken",
+        "schema_version": 2,
         "slot": slot,
     }))
+    cache.chmod(0o600)
 
     # Current Claude Stop payload: the tool count is not included.
     stop_payload = json.dumps({

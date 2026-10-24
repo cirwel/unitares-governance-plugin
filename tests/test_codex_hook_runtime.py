@@ -36,10 +36,12 @@ def _seed_session(workspace: Path, slot: str) -> None:
             {
                 "uuid": "86ae619f-87e0-4040-8f29-eacece0c7904",
                 "client_session_id": "agent-codex-test",
+                "schema_version": 2,
                 "slot": slot,
             }
         )
     )
+    (state / f"session-{slot}.json").chmod(0o600)
 
 
 def test_codex_post_edit_is_local_only_and_records_all_patch_paths(tmp_path: Path):

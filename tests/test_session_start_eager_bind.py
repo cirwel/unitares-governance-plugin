@@ -32,6 +32,19 @@ CSID = "agent-11111111-222"
 SLOT = "eager-slot-1234"
 
 
+def _seed_cache(path: Path, **overrides) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "uuid": UUID,
+        "client_session_id": CSID,
+        "slot": SLOT,
+        "schema_version": 2,
+        **overrides,
+    }))
+    path.chmod(0o600)
+    return path
+
+
 def _serve(tmp_path, **kwargs):
     LazyOnboardHandler.calls = []
     srv = _ReusableTCPServer(("127.0.0.1", 0), LazyOnboardHandler)
@@ -108,8 +121,7 @@ def test_spawned_child_with_parent_candidate_declares_its_own_lineage(tmp_path):
 
 def test_existing_slot_cache_is_not_reminted(tmp_path):
     cache = tmp_path / ".unitares" / _slot_filename(SLOT)
-    cache.parent.mkdir(parents=True)
-    cache.write_text(json.dumps({"uuid": UUID, "client_session_id": CSID}))
+    _seed_cache(cache)
     _, onboards = _serve(tmp_path, claude_session_id=SLOT)
     assert onboards == []
 
@@ -127,8 +139,7 @@ def test_home_mirror_counts_as_bound(tmp_path):
     workspace = tmp_path / "elsewhere"
     workspace.mkdir()
     mirror = home / ".unitares" / _slot_filename(SLOT)
-    mirror.parent.mkdir(parents=True)
-    mirror.write_text(json.dumps({"uuid": UUID, "client_session_id": CSID, "slot": SLOT}))
+    _seed_cache(mirror)
     _, onboards = _serve(tmp_path, claude_session_id=SLOT, cwd=workspace)
     assert onboards == []
 
@@ -159,8 +170,7 @@ def test_home_only_binding_is_shown_not_reminted(tmp_path):
     workspace = tmp_path / "elsewhere"
     workspace.mkdir()
     mirror = tmp_path / ".unitares" / _slot_filename(SLOT)
-    mirror.parent.mkdir(parents=True)
-    mirror.write_text(json.dumps({"uuid": UUID, "client_session_id": CSID, "slot": SLOT}))
+    _seed_cache(mirror)
     stdout, onboards = _serve(tmp_path, claude_session_id=SLOT, cwd=workspace)
     assert onboards == []
     context = _context(stdout)
@@ -170,8 +180,7 @@ def test_home_only_binding_is_shown_not_reminted(tmp_path):
 
 def test_bind_overrides_compact_mode_for_an_unusable_recent_cache(tmp_path):
     cache = tmp_path / ".unitares" / _slot_filename(SLOT)
-    cache.parent.mkdir(parents=True)
-    cache.write_text(json.dumps({"uuid": UUID, "slot": SLOT}))  # no client_session_id
+    _seed_cache(cache, client_session_id="")
     stdout, onboards = _serve(tmp_path, claude_session_id=SLOT)
     assert len(onboards) == 1
     context = _context(stdout)
@@ -180,8 +189,7 @@ def test_bind_overrides_compact_mode_for_an_unusable_recent_cache(tmp_path):
 
 def test_resume_marks_the_inherited_cache(tmp_path):
     cache = tmp_path / ".unitares" / _slot_filename(SLOT)
-    cache.parent.mkdir(parents=True)
-    cache.write_text(json.dumps({"uuid": UUID, "client_session_id": CSID, "slot": SLOT}))
+    _seed_cache(cache)
     _, onboards = _serve(tmp_path, hook_payload={"session_id": SLOT, "source": "resume"})
     assert onboards == []
     data = json.loads(cache.read_text())
@@ -193,8 +201,7 @@ def test_resume_with_home_only_binding_writes_a_complete_marked_cache(tmp_path):
     workspace = tmp_path / "elsewhere"
     workspace.mkdir()
     mirror = tmp_path / ".unitares" / _slot_filename(SLOT)
-    mirror.parent.mkdir(parents=True)
-    mirror.write_text(json.dumps({"uuid": UUID, "client_session_id": CSID, "slot": SLOT}))
+    _seed_cache(mirror)
     _, onboards = _serve(tmp_path, cwd=workspace,
                          hook_payload={"session_id": SLOT, "source": "resume"})
     assert onboards == []

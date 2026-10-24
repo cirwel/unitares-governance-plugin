@@ -36,13 +36,15 @@ def test_post_edit_routes_through_checkin_py_with_plugin_hook_metadata(tmp_path)
     slot = "edit-slot"
     unitares_dir = tmp_path / ".unitares"
     unitares_dir.mkdir()
-    (unitares_dir / f"session-{slot}.json").write_text(json.dumps({
+    session_cache = unitares_dir / f"session-{slot}.json"
+    session_cache.write_text(json.dumps({
         "uuid": "86ae619f-87e0-4040-8f29-eacece0c7904",
         "client_session_id": "agent-edit-test",
-        "continuity_token": "v1.edit-tok",
+        "schema_version": 2,
         "slot": slot,
         "last_checkin_ts": int(time.time()) - 10_000,  # long past threshold
     }))
+    session_cache.chmod(0o600)
     (unitares_dir / "last-milestone.json").write_text(json.dumps({
         "edit_count": 10,  # well past default threshold of 5
         "files_touched": ["a.py", "b.py"],

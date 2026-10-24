@@ -537,12 +537,15 @@ def test_concurrent_session_merges_do_not_lose_updates(tmp_path: Path) -> None:
 
     slot = "concurrent-slot"
     cache_path = workspace / ".unitares" / f"session-{slot}.json"
+    home_cache_path = fake_home / ".unitares" / f"session-{slot}.json"
     cache_path.parent.mkdir(parents=True)
+    home_cache_path.parent.mkdir(parents=True)
     seed = {
         "uuid": "00000000-0000-0000-0000-000000000001",
         "client_session_id": "agent-seed",
     }
     cache_path.write_text(json.dumps(seed), encoding="utf-8")
+    home_cache_path.write_text(json.dumps(seed), encoding="utf-8")
     release_first = signals / "release-first"
 
     worker = r"""
@@ -644,7 +647,7 @@ raise SystemExit(module.cmd_set(args))
                 worker,
                 str(SCRIPT),
                 str(workspace),
-                str(cache_path),
+                str(home_cache_path),
                 str(fake_home / ".unitares-cache-authority" / cache_path.name),
                 str(signals),
                 str(release_first),
@@ -709,16 +712,17 @@ def test_session_cache_and_onboard_helper_share_one_slot_lock(tmp_path: Path) ->
     signals.mkdir()
     slot = "mixed-writer-slot"
     cache_path = workspace / ".unitares" / f"session-{slot}.json"
+    home_cache_path = fake_home / ".unitares" / f"session-{slot}.json"
     cache_path.parent.mkdir(parents=True)
-    cache_path.write_text(
-        json.dumps(
-            {
-                "uuid": "00000000-0000-4000-8000-000000000001",
-                "client_session_id": "agent-seed",
-            }
-        ),
-        encoding="utf-8",
+    home_cache_path.parent.mkdir(parents=True)
+    seed = json.dumps(
+        {
+            "uuid": "00000000-0000-4000-8000-000000000001",
+            "client_session_id": "agent-seed",
+        }
     )
+    cache_path.write_text(seed, encoding="utf-8")
+    home_cache_path.write_text(seed, encoding="utf-8")
     release = signals / "release"
 
     session_worker = r"""
@@ -795,7 +799,7 @@ onboard_helper._update_cache(workspace, mutate, "mixed-writer-slot")
             session_worker,
             str(SCRIPT),
             str(workspace),
-            str(cache_path),
+            str(home_cache_path),
             str(signals),
             str(release),
         ],
@@ -887,6 +891,58 @@ def test_set_session_mirrors_to_home(tmp_path: Path) -> None:
     assert home_path.exists(), f"home mirror not written: {home_path}"
     home_data = json.loads(home_path.read_text())
     assert home_data == ws_data, "home mirror payload should match workspace"
+
+
+def test_workspace_tamper_cannot_promote_proof_into_home(tmp_path: Path) -> None:
+    workspace = tmp_path / "ws"
+    fake_home = tmp_path / "home"
+    fake_home.mkdir(parents=True)
+    slot = "tamper-proof-slot"
+    seeded = _run_with_home(
+        [
+            "set",
+            "session",
+            "--slot",
+            slot,
+            "--json",
+            json.dumps({
+                "uuid": "00000000-0000-4000-8000-000000000099",
+                "client_session_id": "agent-authoritative",
+                "schema_version": 2,
+                "slot": slot,
+            }),
+        ],
+        workspace,
+        fake_home,
+    )
+    assert seeded.returncode == 0, seeded.stderr
+
+    workspace_path = workspace / ".unitares" / f"session-{slot}.json"
+    home_path = fake_home / ".unitares" / f"session-{slot}.json"
+    poisoned = json.loads(workspace_path.read_text(encoding="utf-8"))
+    poisoned["client_session_id"] = "agent-attacker"
+    workspace_path.write_text(json.dumps(poisoned), encoding="utf-8")
+
+    merged = _run_with_home(
+        [
+            "set",
+            "session",
+            "--slot",
+            slot,
+            "--merge",
+            "--json",
+            '{"last_checkin_ts": 123}',
+        ],
+        workspace,
+        fake_home,
+    )
+    assert merged.returncode == 0, merged.stderr
+    assert json.loads(home_path.read_text(encoding="utf-8"))["client_session_id"] == (
+        "agent-authoritative"
+    )
+    assert json.loads(workspace_path.read_text(encoding="utf-8"))["client_session_id"] == (
+        "agent-authoritative"
+    )
 
 
 def test_set_milestone_does_not_mirror_to_home(tmp_path: Path) -> None:
@@ -1055,16 +1111,13 @@ def test_session_cache_file_symlink_is_replaced_or_removed_without_touching_targ
     assert external.read_text(encoding="utf-8") == external_payload
 
 
-def test_home_lock_failure_keeps_primary_usable_and_invalidates_stale_fallback(
+def test_home_primary_lock_failure_aborts_without_trusting_workspace(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     sys.path.insert(0, str(SCRIPT.parent))
     import _session_cache_io as cache_io
-    from _session_lookup import resolve_session_file
-
     workspace = tmp_path / "workspace"
-    other_workspace = tmp_path / "other"
     fake_home = tmp_path / "home"
     workspace_path = workspace / ".unitares" / "session-lock-failure.json"
     home_path = fake_home / ".unitares" / "session-lock-failure.json"
@@ -1086,16 +1139,11 @@ def test_home_lock_failure_keeps_primary_usable_and_invalidates_stale_fallback(
             yield
 
     monkeypatch.setattr(cache_io, "session_cache_lock", fail_home_lock)
-    cache_io.replace_session_cache(workspace_path, new, home_path=home_path)
+    with pytest.raises(OSError, match="simulated HOME mirror lock failure"):
+        cache_io.replace_session_cache(workspace_path, new, home_path=home_path)
 
-    assert json.loads(workspace_path.read_text(encoding="utf-8")) == new
+    assert json.loads(workspace_path.read_text(encoding="utf-8")) == old
     assert json.loads(home_path.read_text(encoding="utf-8")) == old
-    assert resolve_session_file(other_workspace, "lock-failure") is None
-
-    cache_io.clear_session_cache(workspace_path, home_path=home_path)
-    assert not workspace_path.exists()
-    assert home_path.exists()
-    assert resolve_session_file(workspace, "lock-failure") is None
 
 
 def test_invalid_home_primary_is_not_merged_or_returned_by_reservation(
@@ -1509,7 +1557,10 @@ def test_set_session_rejects_whitespace_continuity_token(tmp_path: Path) -> None
         assert "non-empty continuity_token" in result.stderr
 
 
-def test_set_session_merge_strips_legacy_v1_token(tmp_path: Path) -> None:
+def test_set_session_merge_strips_legacy_v1_token(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A pre-existing slot file from before S11/S20 may carry a real
     `continuity_token` at rest. The post-edit auto-checkin hook calls
     `set session --slot X --merge --stamp --json {"last_checkin_ts": N}`
@@ -1519,6 +1570,7 @@ def test_set_session_merge_strips_legacy_v1_token(tmp_path: Path) -> None:
 
     Post-fix: the helper auto-strips the pre-existing token during merge,
     emits a [V1_LEGACY_STRIP] breadcrumb, and lets the clean stamp succeed."""
+    monkeypatch.setenv("HOME", str(tmp_path))
     cache_dir = tmp_path / ".unitares"
     cache_dir.mkdir()
     legacy_path = cache_dir / "session-legacy-slot.json"

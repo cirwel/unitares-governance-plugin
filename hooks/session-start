@@ -232,10 +232,14 @@ if [[ -n "${SESSION_START_STDIN}" ]]; then
   COMPACTION_HOST_NAME="Codex"
   [[ "${HOOK_HOST}" == "claude" ]] && COMPACTION_HOST_NAME="Claude Code"
   COMPACTION_CONTEXT=$(python3 - "${SESSION_START_STDIN}" "${PLUGIN_ROOT}/scripts" "${COMPACTION_HOST_NAME}" <<'PY' 2>/dev/null || true
-import json, os, re, sys
+import json, re, sys
 sys.path.insert(0, sys.argv[2])
-from _session_lookup import _extract_slot, resolve_session_file
-from _session_cache_io import read_json_dict_unlocked
+from _session_lookup import (
+    _extract_slot,
+    load_authoritative_session_for_hook,
+    load_usable_session_for_hook,
+    resolve_proof_session_file,
+)
 
 try:
     event = json.loads(sys.argv[1])
@@ -244,18 +248,16 @@ except (ValueError, TypeError):
 if not isinstance(event, dict) or event.get("source") != "compact":
     sys.exit(0)
 
-path = resolve_session_file(os.getcwd(), _extract_slot(sys.argv[1]))
-cache = read_json_dict_unlocked(path) if path is not None else {}
+authoritative = load_authoritative_session_for_hook(".", sys.argv[1])
+cache = load_usable_session_for_hook(".", sys.argv[1])
+path = resolve_proof_session_file(_extract_slot(sys.argv[1]))
 uuid = cache.get("uuid") or cache.get("agent_uuid")
 binding = cache.get("client_session_id")
-# A resumed host session marks the cache it inherited as prior_process until it
-# mints its own identity; the tool hooks then refuse to inject that binding.
-inherited = cache.get("prior_process") is True
+inherited = authoritative.get("prior_process") is True
 usable = (
     isinstance(uuid, str)
     and re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", uuid)
     and isinstance(binding, str) and binding.strip()
-    and not inherited
 )
 print(f"{sys.argv[3]} reported context compaction for this session. Compaction alone does not "
       "establish a new driver process. Do not mint a new identity or declare lineage "
@@ -656,9 +658,9 @@ import re
 import sys
 
 sys.path.insert(0, sys.argv[1])
-from _session_lookup import load_session_for_hook
+from _session_lookup import load_usable_session_for_hook
 
-data = load_session_for_hook(".", sys.argv[2]) or {}
+data = load_usable_session_for_hook(".", sys.argv[2]) or {}
 uuid = str(data.get("uuid") or "")
 csid = str(data.get("client_session_id") or "")
 # Both values land in agent context; refuse anything that is not a plain id.
@@ -694,9 +696,9 @@ import json
 import sys
 
 sys.path.insert(0, sys.argv[1])
-from _session_lookup import load_session_for_hook
+from _session_lookup import load_authoritative_session_for_hook
 
-data = load_session_for_hook(".", sys.argv[2]) or {}
+data = load_authoritative_session_for_hook(".", sys.argv[2]) or {}
 if data.get("uuid") and data.get("client_session_id"):
     data["prior_process"] = True
     print(json.dumps(data))

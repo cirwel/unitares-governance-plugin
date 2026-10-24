@@ -35,6 +35,7 @@ def _cache(root, slot=SLOT, **overrides):
         "continuity_token": "must-never-appear-in-context",
         "slot": slot, "schema_version": 2, **overrides,
     }))
+    path.chmod(0o600)
     return path
 
 
@@ -76,6 +77,9 @@ def test_repeated_compaction_preserves_binding_even_after_cache_prose_ttl(tmp_pa
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     path = _cache(workspace if location == "workspace" else tmp_path)
+    if location == "workspace":
+        _cache(tmp_path)
+    proof_path = tmp_path / ".unitares" / f"session-{SLOT}.json"
     os.utime(path, (1, 1))  # A prose TTL must not decide identity continuity.
     original = path.read_bytes()
     for _ in range(2):
@@ -84,7 +88,7 @@ def test_repeated_compaction_preserves_binding_even_after_cache_prose_ttl(tmp_pa
             extra_env={"UNITARES_HOOK_COMPACT_TTL": "0"},
         )
         _assert_continuation(_context(stdout), host)
-        assert str(path) in _context(stdout)
+        assert str(proof_path) in _context(stdout)
         # No mint, rebind, check-in or lineage write: only the audit-plane
         # compaction record, bound to the identity the guidance names.
         _assert_only_compaction_record(calls, host)

@@ -166,8 +166,12 @@ def _current_slot_binding(raw: str, *, idle_is_inherited: bool = False) -> dict:
     discarded by post-identity, so that guard keeps refusing.
     """
     try:
-        from _session_lookup import _extract_slot, load_session_for_hook, resolve_session_file
-        sess = load_session_for_hook(Path.cwd(), raw) or {}
+        from _session_lookup import (
+            _extract_slot,
+            load_usable_session_for_hook,
+            resolve_proof_session_file,
+        )
+        sess = load_usable_session_for_hook(Path.cwd(), raw) or {}
     except Exception:
         return {}
     uuid = str(sess.get("uuid") or "").strip()
@@ -178,7 +182,7 @@ def _current_slot_binding(raw: str, *, idle_is_inherited: bool = False) -> dict:
         try:
             from binding_activity import is_idle
             slot = _extract_slot(raw)
-            path = resolve_session_file(Path.cwd(), slot) if slot else None
+            path = resolve_proof_session_file(slot) if slot else None
             if path is not None and is_idle(path, slot, uuid, csid):
                 return {}
         except Exception:
@@ -394,8 +398,8 @@ def main(argv: list[str] | None = None) -> int:
     # honor any tag normalization above.
     if not _has_proof_field(tool_input):
         try:
-            from _session_lookup import load_session_for_hook
-            sess = load_session_for_hook(Path.cwd(), raw)
+            from _session_lookup import load_usable_session_for_hook
+            sess = load_usable_session_for_hook(Path.cwd(), raw)
         except Exception:
             sess = None
         sid = (sess or {}).get("client_session_id")

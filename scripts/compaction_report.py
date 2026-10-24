@@ -35,8 +35,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _http_auth import authorization_safe_urlopen, governance_json_headers  # noqa: E402
-from _session_cache_io import read_json_dict_unlocked  # noqa: E402
-from _session_lookup import _extract_slot, resolve_session_file  # noqa: E402
+from _session_lookup import load_usable_session_for_hook  # noqa: E402
 from checkin import _plugin_version  # noqa: E402
 
 _UUID_RE = re.compile(
@@ -59,12 +58,9 @@ def build_payload(event_text: str, *, host: str, cwd: str) -> dict[str, Any] | N
         return None
     if not isinstance(event, dict) or event.get("source") != "compact":
         return None
-    slot = _extract_slot(event_text)
+    cache = load_usable_session_for_hook(cwd, event_text)
+    slot = str(cache.get("slot") or "")
     if not slot:
-        return None
-    path = resolve_session_file(cwd, slot)
-    cache = read_json_dict_unlocked(path) if path is not None else {}
-    if cache.get("prior_process") is True:
         return None
     agent_uuid = cache.get("uuid") or cache.get("agent_uuid")
     binding = cache.get("client_session_id")

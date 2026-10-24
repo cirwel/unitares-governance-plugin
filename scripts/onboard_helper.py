@@ -474,6 +474,8 @@ def run_onboard(
         "server_url": server_url,
         "agent_name": agent_name,
         "slot": slot or "",
+        "schema_version": 2,
+        "prior_process": False,
         "uuid": parsed.get("uuid"),
         "agent_id": parsed.get("agent_id") or parsed.get("resolved_agent_id") or "",
         "client_session_id": parsed.get("client_session_id", ""),

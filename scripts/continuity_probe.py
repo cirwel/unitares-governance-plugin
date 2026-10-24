@@ -40,7 +40,11 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _session_cache_io import read_json_dict_unlocked  # noqa: E402
-from _session_lookup import _extract_slot, _slot_filename, resolve_session_file  # noqa: E402
+from _session_lookup import (  # noqa: E402
+    _extract_slot,
+    _slot_filename,
+    load_usable_session_for_hook,
+)
 from checkin import _plugin_version  # noqa: E402
 from compaction_report import DEFAULT_TIMEOUT_S, HOSTS, WALL_CLOCK_LIMIT_S, post  # noqa: E402
 
@@ -164,10 +168,7 @@ def build_payload(
         return None
     if not (isinstance(compacted_at, str) and compacted_at):
         return None
-    path = resolve_session_file(cwd, slot)
-    cache = read_json_dict_unlocked(path) if path is not None else {}
-    if cache.get("prior_process") is True:
-        return None
+    cache = load_usable_session_for_hook(cwd, stop_text)
     agent_uuid = cache.get("uuid") or cache.get("agent_uuid")
     binding = cache.get("client_session_id")
     if not (isinstance(agent_uuid, str) and _UUID_RE.fullmatch(agent_uuid)):

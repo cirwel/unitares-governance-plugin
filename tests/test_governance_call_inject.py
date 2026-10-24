@@ -33,15 +33,18 @@ from tag_normalize import TAG_BEARING_SUFFIXES  # noqa: E402
 
 
 def _write_cache(workspace: Path, slot: str = SLOT, sid: str = SID) -> None:
-    cache_dir = workspace / ".unitares"
-    cache_dir.mkdir(parents=True, exist_ok=True)
     safe = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in slot)[:64]
-    (cache_dir / f"session-{safe}.json").write_text(json.dumps({
+    payload = json.dumps({
         "uuid": "cafe1234-0000-0000-0000-000000000000",
         "client_session_id": sid,
         "schema_version": 2,
         "slot": slot,
-    }))
+    })
+    for cache_dir in {workspace / ".unitares", Path.home() / ".unitares"}:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        path = cache_dir / f"session-{safe}.json"
+        path.write_text(payload)
+        path.chmod(0o600)
 
 
 def _run(hook_input: dict, workspace: Path, *, host: str | None = None):
@@ -93,6 +96,20 @@ class TestInjection:
         updated = _updated_input(result)
         assert updated is not None
         assert updated["client_session_id"] == SID
+
+    def test_inherited_home_binding_is_not_injected(self, tmp_path):
+        _write_cache(tmp_path)
+        cache = Path.home() / ".unitares" / f"session-{SLOT}.json"
+        payload = json.loads(cache.read_text(encoding="utf-8"))
+        payload["prior_process"] = True
+        cache.write_text(json.dumps(payload), encoding="utf-8")
+        cache.chmod(0o600)
+
+        result = _run(
+            _hook_input("mcp__unitares-governance__sync_state", {}),
+            tmp_path,
+        )
+        assert _updated_input(result) is None
 
     @pytest.mark.parametrize("tool,args", [
         ("consult", {"brief": "question", "host_ids": ["a", "b"]}),

@@ -286,15 +286,16 @@ def test_onboard_writer_mirrors_slot_and_removes_stale_mirror_on_failure(
 
     def fail_home(path: Path, payload: dict[str, Any]) -> None:
         if path == home_path:
-            raise OSError("simulated mirror failure")
+            raise OSError("simulated primary failure")
         real_write(path, payload)
 
     monkeypatch.setattr(_session_cache_io, "write_json_dict_unlocked", fail_home)
-    onboard_helper._write_cache(workspace, new, slot)
+    with pytest.raises(OSError, match="simulated primary failure"):
+        onboard_helper._write_cache(workspace, new, slot)
 
     workspace_path = workspace / ".unitares" / f"session-{slot}.json"
-    assert json.loads(workspace_path.read_text(encoding="utf-8")) == new
-    assert not home_path.exists()
+    assert not workspace_path.exists()
+    assert json.loads(home_path.read_text(encoding="utf-8")) == old
 
 
 def test_clear_from_empty_supersedes_inflight_lazy_onboard(

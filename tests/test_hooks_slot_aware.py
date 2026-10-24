@@ -27,7 +27,9 @@ def _seed_slotted_cache(workspace: Path, slot: str, payload: dict) -> Path:
     unitares = workspace / ".unitares"
     unitares.mkdir(exist_ok=True)
     path = unitares / _slot_filename(slot)
+    payload = {"schema_version": 2, "slot": slot, **payload}
     path.write_text(json.dumps(payload))
+    path.chmod(0o600)
     return path
 
 
@@ -87,7 +89,6 @@ def test_post_stop_reads_slotted_cache(tmp_path):
     _seed_slotted_cache(tmp_path, slot, {
         "uuid": "86ae619f-87e0-4040-8f29-eacece0c7904",
         "client_session_id": "agent-real-1234",
-        "continuity_token": "v1.real-tok",
         "slot": slot,
     })
     checkins = _run_hook_with_mock_server("post-stop", tmp_path, slot)

@@ -208,6 +208,7 @@ class TestSessionStartMakesNoToolCalls:
             "client_session_id": "agent-invariant-binding",
             "slot": "invariant-slot", "schema_version": 2,
         }))
+        cache.chmod(0o600)
         _, calls = _serve_and_run(
             tmp_path, hook_payload={"session_id": "invariant-slot", "source": "compact"},
         )

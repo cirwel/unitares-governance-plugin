@@ -806,13 +806,16 @@ class TestMintRecordsItsOwnOrigin:
 
     def _seed(self, workspace: Path) -> None:
         safe = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in self.SLOT)[:64]
-        path = workspace / ".unitares" / f"session-{safe}.json"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({
+        payload = json.dumps({
             "uuid": "u-harness", "client_session_id": "agent-harness",
             "onboard_origin": "harness_backstop", "onboard_origin_basis": "harness",
             "slot": self.SLOT, "schema_version": 2,
-        }))
+        })
+        for root in (workspace, workspace / "home"):
+            path = root / ".unitares" / f"session-{safe}.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(payload)
+            path.chmod(0o600)
 
     def test_agent_mint_overwrites_the_inherited_origin(self, tmp_path):
         self._seed(tmp_path)
@@ -884,15 +887,18 @@ class TestInheritedIdentityTransition:
     SLOT = "slot-inherited-identity"
 
     def _seed(self, workspace: Path) -> None:
-        path = workspace / ".unitares" / f"session-{self.SLOT}.json"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({
+        payload = json.dumps({
             "uuid": "u-predecessor",
             "client_session_id": "agent-predecessor",
             "prior_process": True,
             "slot": self.SLOT,
             "schema_version": 2,
-        }))
+        })
+        for root in (workspace, workspace / "home"):
+            path = root / ".unitares" / f"session-{self.SLOT}.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(payload)
+            path.chmod(0o600)
 
     def test_created_identity_consumes_inherited_exemption(self, tmp_path):
         self._seed(tmp_path)
