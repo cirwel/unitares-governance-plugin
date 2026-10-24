@@ -34,6 +34,9 @@ def _seed_session(workspace: Path, slot: str | None = None, **extra) -> None:
     payload = {
         "uuid": "00000000-0000-0000-0000-000000000abc",
         "client_session_id": "sid-xyz",
+        "schema_version": 2,
+        "slot": slot,
+        "prior_process": False,
         **extra,
     }
     cmd = [
@@ -92,6 +95,7 @@ def _run_hook(
     session_id: str | None = None,
     tool_use_id: str | None = None,
     tool_response: object | None = None,
+    client_session_id: str | None = "sid-xyz",
 ):
     success_response = {
         "content": [
@@ -100,7 +104,11 @@ def _run_hook(
     }
     payload_dict = {
         "tool_name": tool_name,
-        "tool_input": {},
+        "tool_input": (
+            {"client_session_id": client_session_id}
+            if client_session_id is not None
+            else {}
+        ),
         "tool_response": tool_response if tool_response is not None else success_response,
     }
     if session_id is not None:
@@ -143,7 +151,7 @@ def _run_pre_hook(
 SLOT = "claude-session-abc-123"
 
 
-def test_idless_hook_preserves_accumulator_and_stamps_last_checkin(tmp_path: Path) -> None:
+def test_idless_hook_preserves_accumulator_without_acknowledging(tmp_path: Path) -> None:
     _seed_session(tmp_path, slot=SLOT)
     _seed_milestone_edits(tmp_path, 3)
 
@@ -151,7 +159,6 @@ def test_idless_hook_preserves_accumulator_and_stamps_last_checkin(tmp_path: Pat
     assert before_milestone["edit_count"] == 3
     assert before_milestone["first_edit_ts"] is not None
 
-    before_ts = int(time.time())
     result = _run_hook(tmp_path, session_id=SLOT)
     assert result.returncode == 0, result.stderr
 
@@ -161,9 +168,7 @@ def test_idless_hook_preserves_accumulator_and_stamps_last_checkin(tmp_path: Pat
     assert after_milestone["first_edit_ts"] is not None
     assert after_milestone["last_edit_ts"] is not None
 
-    after_session = _read("session", tmp_path, slot=SLOT)
-    assert "last_checkin_ts" in after_session
-    assert int(after_session["last_checkin_ts"]) >= before_ts
+    assert "last_checkin_ts" not in _read("session", tmp_path, slot=SLOT)
 
 
 def test_correlated_hook_resets_snapshot_without_newer_edits(tmp_path: Path) -> None:
@@ -178,6 +183,25 @@ def test_correlated_hook_resets_snapshot_without_newer_edits(tmp_path: Path) -> 
     assert result.returncode == 0, result.stderr
     assert _read("milestone", tmp_path, SLOT)["edit_count"] == 0
     assert list((Path.home() / ".unitares" / "milestone-snapshots").glob("*.json")) == []
+
+
+def test_correlated_argless_post_uses_pre_call_authority_snapshot(tmp_path: Path) -> None:
+    _seed_session(tmp_path, slot=SLOT)
+    _seed_milestone_edits(tmp_path, 1)
+    tool_use_id = "toolu_correlated_argless"
+    pre = _run_pre_hook(tmp_path, SLOT, tool_use_id)
+    assert pre.returncode == 0, pre.stderr
+
+    result = _run_hook(
+        tmp_path,
+        session_id=SLOT,
+        tool_use_id=tool_use_id,
+        client_session_id=None,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert _read("milestone", tmp_path, SLOT)["edit_count"] == 0
+    assert "last_checkin_ts" in _read("session", tmp_path, slot=SLOT)
 
 
 def test_hook_is_noop_without_session(tmp_path: Path) -> None:
@@ -244,7 +268,9 @@ def test_hook_updates_last_checkin_on_each_call(tmp_path: Path) -> None:
     _seed_session(tmp_path, slot=SLOT, last_checkin_ts=1_000_000_000)
     _seed_milestone_edits(tmp_path, 1)
 
-    _run_hook(tmp_path, session_id=SLOT)
+    first_id = "toolu_first_stamp"
+    _run_pre_hook(tmp_path, SLOT, first_id)
+    _run_hook(tmp_path, session_id=SLOT, tool_use_id=first_id)
     first = _read("session", tmp_path, slot=SLOT)["last_checkin_ts"]
     assert int(first) > 1_000_000_000
 
@@ -253,7 +279,9 @@ def test_hook_updates_last_checkin_on_each_call(tmp_path: Path) -> None:
     # the most recent successful check-in.
     time.sleep(1)
     _seed_milestone_edits(tmp_path, 1)
-    _run_hook(tmp_path, session_id=SLOT)
+    second_id = "toolu_second_stamp"
+    _run_pre_hook(tmp_path, SLOT, second_id)
+    _run_hook(tmp_path, session_id=SLOT, tool_use_id=second_id)
     second = _read("session", tmp_path, slot=SLOT)["last_checkin_ts"]
     assert int(second) >= int(first)
 
@@ -322,7 +350,9 @@ def test_hook_does_not_write_flat_session_when_slot_known(tmp_path: Path) -> Non
     flat_path = tmp_path / ".unitares" / "session.json"
     assert not flat_path.exists(), "test setup created flat session.json"
 
-    result = _run_hook(tmp_path, session_id=SLOT)
+    tool_use_id = "toolu_no_flat_write"
+    _run_pre_hook(tmp_path, SLOT, tool_use_id)
+    result = _run_hook(tmp_path, session_id=SLOT, tool_use_id=tool_use_id)
     assert result.returncode == 0, result.stderr
     assert not flat_path.exists(), (
         "post-checkin wrote flat session.json instead of slot-scoped target — "
@@ -333,6 +363,49 @@ def test_hook_does_not_write_flat_session_when_slot_known(tmp_path: Path) -> Non
     assert slotted.exists(), "post-checkin did not write slot-scoped cache"
     payload = json.loads(slotted.read_text())
     assert "last_checkin_ts" in payload
+
+
+def test_foreign_proof_cannot_acknowledge_protected_slot_milestone(tmp_path: Path) -> None:
+    _seed_session(tmp_path, slot=SLOT, last_checkin_ts=1_000_000_000)
+    _seed_milestone_edits(tmp_path, 1)
+    tool_use_id = "toolu_foreign_proof"
+    _run_pre_hook(tmp_path, SLOT, tool_use_id)
+
+    result = _run_hook(
+        tmp_path,
+        session_id=SLOT,
+        tool_use_id=tool_use_id,
+        client_session_id="agent-foreign",
+    )
+
+    assert result.returncode == 0
+    assert _read("milestone", tmp_path, SLOT)["edit_count"] == 1
+    assert _read("session", tmp_path, slot=SLOT)["last_checkin_ts"] == 1_000_000_000
+
+
+def test_identity_generation_change_prevents_stale_checkin_ack(tmp_path: Path) -> None:
+    _seed_session(tmp_path, slot=SLOT, last_checkin_ts=1_000_000_000)
+    _seed_milestone_edits(tmp_path, 1)
+    tool_use_id = "toolu_identity_changed"
+    _run_pre_hook(tmp_path, SLOT, tool_use_id)
+
+    _seed_session(
+        tmp_path,
+        slot=SLOT,
+        uuid="00000000-0000-0000-0000-000000000def",
+        client_session_id="sid-new-owner",
+        last_checkin_ts=2_000_000_000,
+    )
+    result = _run_hook(
+        tmp_path,
+        session_id=SLOT,
+        tool_use_id=tool_use_id,
+        client_session_id="sid-xyz",
+    )
+
+    assert result.returncode == 0
+    assert _read("milestone", tmp_path, SLOT)["edit_count"] == 1
+    assert _read("session", tmp_path, slot=SLOT)["last_checkin_ts"] == 2_000_000_000
 
 
 def test_hook_emits_slotless_skip_breadcrumb(tmp_path: Path) -> None:

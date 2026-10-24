@@ -56,6 +56,17 @@ fi
 
 SLOT_HELPER="${PLUGIN_ROOT}/scripts/_slot_from_stdin.py"
 
+_discard_snapshots() {
+  local event_id="$1"
+  [[ -z "${event_id}" ]] && return 0
+  python3 "${SESSION_CACHE_HELPER}" discard-milestone-snapshot \
+    --workspace "${PWD}" --slot "${SLOT}" --event-id "${event_id}" \
+    >/dev/null 2>&1 || true
+  python3 "${SESSION_CACHE_HELPER}" discard-session-snapshot \
+    --workspace "${PWD}" --event-id "${event_id}" \
+    >/dev/null 2>&1 || true
+}
+
 # Capture hook stdin (both hosts pass tool event JSON, including session_id).
 HOOK_INPUT=""
 if [[ ! -t 0 ]]; then
@@ -106,8 +117,9 @@ if [[ -z "${SLOT}" ]]; then
   exit 0
 fi
 
-# Prefer the PreToolUse snapshot keyed by this invocation. Payloads without a
-# tool id retain the legacy immediate compare-and-reset fallback.
+# Require the PreToolUse snapshot keyed by this invocation. Payloads without a
+# tool id cannot prove which authority generation completed and never consume
+# the pending milestone.
 TOOL_USE_ID=$(python3 - "${HOOK_INPUT}" <<'PY' 2>/dev/null || true
 import json
 import sys
@@ -170,45 +182,91 @@ print("1" if explicit_success(payload.get("tool_response")) is True else "0")
 PY
 )
 if [[ "${CHECKIN_SUCCEEDED}" != "1" ]]; then
-  if [[ -n "${TOOL_USE_ID}" ]]; then
-    python3 "${SESSION_CACHE_HELPER}" discard-milestone-snapshot \
-      --workspace "${PWD}" \
-      --slot "${SLOT}" \
-      --event-id "${TOOL_USE_ID}" >/dev/null 2>&1 || true
-  fi
+  _discard_snapshots "${TOOL_USE_ID}"
   exit 0
 fi
 
-# A successful call without an addressable local identity cannot safely stamp
-# a session or acknowledge the workspace milestone. Discard only its temporary
-# snapshot so the pending edits remain visible to a later bound check-in.
-SESSION_PAYLOAD=$(python3 "${SESSION_CACHE_HELPER}" get session --workspace "${PWD}" --slot "${SLOT}" 2>/dev/null || echo "{}")
+# A successful call acknowledges work only when its explicit proof equals the
+# protected current-process HOME binding for this exact host slot. Workspace
+# JSON is a compatibility mirror and is never an acknowledgement authority.
+SESSION_PAYLOAD=$(python3 - "${HOOK_INPUT}" "${PLUGIN_ROOT}/scripts" <<'PY' 2>/dev/null || echo "{}"
+import json
+import os
+import sys
+
+sys.path.insert(0, sys.argv[2])
+from _session_lookup import load_usable_session_for_hook
+
+try:
+    hook = json.loads(sys.argv[1])
+except Exception:
+    hook = {}
+session = load_usable_session_for_hook(os.getcwd(), sys.argv[1])
+tool_input = hook.get("tool_input") if isinstance(hook, dict) else None
+supplied = tool_input.get("client_session_id") if isinstance(tool_input, dict) else None
+expected = session.get("client_session_id") if isinstance(session, dict) else None
+if not isinstance(expected, str) or not expected.strip():
+    print("{}")
+elif supplied is not None and (
+    not isinstance(supplied, str) or supplied.strip() != expected.strip()
+):
+    print("{}")
+else:
+    print(json.dumps(session))
+PY
+)
 if [[ -z "${SESSION_PAYLOAD}" || "${SESSION_PAYLOAD}" == "{}" ]]; then
-  if [[ -n "${TOOL_USE_ID}" ]]; then
-    python3 "${SESSION_CACHE_HELPER}" discard-milestone-snapshot \
-      --workspace "${PWD}" \
-      --slot "${SLOT}" \
-      --event-id "${TOOL_USE_ID}" >/dev/null 2>&1 || true
-  fi
+  _discard_snapshots "${TOOL_USE_ID}"
   exit 0
 fi
 
-if [[ -n "${TOOL_USE_ID}" ]]; then
-  python3 "${SESSION_CACHE_HELPER}" reset-milestone \
-    --workspace "${PWD}" \
-    --slot "${SLOT}" \
-    --snapshot-id "${TOOL_USE_ID}" >/dev/null 2>&1 || true
+if [[ -z "${TOOL_USE_ID}" ]]; then
+  exit 0
 fi
 
 NOW_EPOCH=$(python3 -c "import time; print(int(time.time()))" 2>/dev/null || echo "")
-if [[ -n "${NOW_EPOCH}" ]]; then
-  python3 "${SESSION_CACHE_HELPER}" \
-    set session \
+STAMP_PAYLOAD=$(python3 - "${SESSION_PAYLOAD}" "${NOW_EPOCH}" <<'PY' 2>/dev/null || echo "{}"
+import json
+import sys
+
+try:
+    session = json.loads(sys.argv[1])
+    timestamp = int(sys.argv[2])
+except Exception:
+    print("{}")
+else:
+    print(json.dumps({
+        "uuid": session.get("uuid"),
+        "client_session_id": session.get("client_session_id"),
+        "schema_version": 2,
+        "last_checkin_ts": timestamp,
+    }))
+PY
+)
+if [[ -z "${NOW_EPOCH}" || "${STAMP_PAYLOAD}" == "{}" ]]; then
+  _discard_snapshots "${TOOL_USE_ID}"
+  exit 0
+fi
+
+# The pre-tool session snapshot carries both cache and authority generations.
+# If the slot owner changed while the call was in flight, this CAS fails and
+# the milestone remains pending for the new owner.
+if ! python3 "${SESSION_CACHE_HELPER}" set session \
     --workspace "${PWD}" \
     --slot "${SLOT}" \
     --merge \
     --stamp \
-    --json "{\"last_checkin_ts\": ${NOW_EPOCH}}" >/dev/null 2>&1 || true
+    --snapshot-id "${TOOL_USE_ID}" \
+    --json "${STAMP_PAYLOAD}" >/dev/null 2>&1; then
+  python3 "${SESSION_CACHE_HELPER}" discard-milestone-snapshot \
+    --workspace "${PWD}" --slot "${SLOT}" --event-id "${TOOL_USE_ID}" \
+    >/dev/null 2>&1 || true
+  exit 0
 fi
+
+python3 "${SESSION_CACHE_HELPER}" reset-milestone \
+  --workspace "${PWD}" \
+  --slot "${SLOT}" \
+  --snapshot-id "${TOOL_USE_ID}" >/dev/null 2>&1 || true
 
 exit 0

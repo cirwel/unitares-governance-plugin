@@ -567,6 +567,27 @@ class TestSubagentOnboardGuard:
         assert _run_hook(hook_input, tmp_path).returncode == 0
         assert _read_session_cache(tmp_path, "fresh-slot") == {}
 
+    def test_unmarked_onboard_cannot_replace_existing_driver(self, tmp_path):
+        slot = "driver-slot-unmarked"
+        driver = {
+            "session_id": slot,
+            "tool_name": "mcp__unitares-governance__onboard",
+            "tool_input": {"force_new": True},
+            "tool_response": _mcp_response(uuid="u-driver-unmarked", sid="agent-driver"),
+        }
+        assert _run_hook(driver, tmp_path).returncode == 0
+
+        unmarked = {
+            "session_id": slot,
+            "tool_name": "mcp__unitares-governance__onboard",
+            "tool_input": {"force_new": True},
+            "tool_response": _mcp_response(uuid="u-foreign-unmarked", sid="agent-foreign"),
+        }
+        assert _run_hook(unmarked, tmp_path).returncode == 0
+        cache = _read_session_cache(tmp_path, slot)
+        assert cache["uuid"] == "u-driver-unmarked"
+        assert cache["client_session_id"] == "agent-driver"
+
     def test_subagent_identity_call_does_not_capture_driver_cache(self, tmp_path):
         # identity() carries client_session_id, not spawn_reason — the
         # spawn_reason guard can't see it. Observed live 2026-06-12: a
@@ -809,7 +830,7 @@ class TestMintRecordsItsOwnOrigin:
         payload = json.dumps({
             "uuid": "u-harness", "client_session_id": "agent-harness",
             "onboard_origin": "harness_backstop", "onboard_origin_basis": "harness",
-            "slot": self.SLOT, "schema_version": 2,
+            "slot": self.SLOT, "schema_version": 2, "prior_process": True,
         })
         for root in (workspace, workspace / "home"):
             path = root / ".unitares" / f"session-{safe}.json"
@@ -827,7 +848,7 @@ class TestMintRecordsItsOwnOrigin:
         result = _run_hook({
             "session_id": self.SLOT,
             "tool_name": "mcp__unitares-governance__start_session",
-            "tool_input": {"force_new": True, "spawn_reason": "explicit"},
+            "tool_input": {"force_new": True, "spawn_reason": "explicit", "parent_agent_id": "u-harness"},
             "tool_response": response,
         }, tmp_path, host="claude")
         assert result.returncode == 0
@@ -842,7 +863,7 @@ class TestMintRecordsItsOwnOrigin:
         result = _run_hook({
             "session_id": self.SLOT,
             "tool_name": "mcp__unitares-governance__onboard",
-            "tool_input": {"force_new": True, "spawn_reason": "explicit"},
+            "tool_input": {"force_new": True, "spawn_reason": "explicit", "parent_agent_id": "u-harness"},
             "tool_response": _mcp_response(uuid="u-agent2"),
         }, tmp_path, host="claude")
         assert result.returncode == 0

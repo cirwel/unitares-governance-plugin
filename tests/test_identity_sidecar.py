@@ -453,17 +453,42 @@ def test_bare_onboard_through_proxy_gets_force_new_and_updates_cache(tmp_path: P
     assert "continuity_token" not in cache
 
 
-def test_explicit_proof_field_skips_lazy_onboard_and_injection(tmp_path: Path, fake_server: str) -> None:
+def test_foreign_explicit_proof_cannot_override_configured_slot(tmp_path: Path, fake_server: str) -> None:
     sidecar = _sidecar(tmp_path, fake_server)
+    sidecar.write_session("slot-a", {
+        "uuid": "11111111-2222-4333-8444-555555555555",
+        "client_session_id": "agent-sidecar-111",
+        "schema_version": 2,
+        "slot": "slot-a",
+    })
+
+    status, payload = sidecar.tool_call(
+        {"name": "knowledge", "arguments": {"action": "search", "client_session_id": "agent-explicit"}},
+        headers={},
+    )
+
+    assert status == 409
+    assert "configured slot binding" in payload["error"]
+    assert FakeGovernanceHandler.calls == []
+
+
+def test_matching_explicit_proof_is_allowed_for_configured_slot(tmp_path: Path, fake_server: str) -> None:
+    sidecar = _sidecar(tmp_path, fake_server)
+    sidecar.write_session("slot-a", {
+        "uuid": "11111111-2222-4333-8444-555555555555",
+        "client_session_id": "agent-sidecar-111",
+        "schema_version": 2,
+        "slot": "slot-a",
+    })
 
     status, _payload = sidecar.tool_call(
-        {"name": "knowledge", "arguments": {"action": "search", "client_session_id": "agent-explicit"}},
+        {"name": "knowledge", "arguments": {"action": "search", "client_session_id": "agent-sidecar-111"}},
         headers={},
     )
 
     assert status == 200
     assert [call["name"] for call in FakeGovernanceHandler.calls] == ["knowledge"]
-    assert FakeGovernanceHandler.calls[0]["arguments"]["client_session_id"] == "agent-explicit"
+    assert FakeGovernanceHandler.calls[0]["arguments"]["client_session_id"] == "agent-sidecar-111"
 
 
 def test_audit_endpoint_reports_local_contract_findings(tmp_path: Path, fake_server: str) -> None:

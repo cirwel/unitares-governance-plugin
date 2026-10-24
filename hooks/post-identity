@@ -127,12 +127,15 @@ if suffix not in _id_tools:
 # later auto-checkin then runs as the subagent, and the next session's
 # session-start banner offers the subagent UUID as a lineage candidate
 # (observed live 2026-06-12: slot 155d00fa cached council-refire-verify).
-# Explicit-only, matching #604: dispatched subagents declare
-# spawn_reason="subagent"; inference would mislabel succession onboards.
+# The explicit marker remains a fast-path rejection. The existing protected
+# slot owner below is the authority boundary: a missing or dishonest marker
+# still cannot replace a current driver binding.
 _tool_input = data.get("tool_input")
 if isinstance(_tool_input, dict):
     if str(_tool_input.get("spawn_reason") or "").strip().lower() == "subagent":
         _skip("subagent_onboard_not_cached")
+else:
+    _tool_input = {}
 
 try:
     from _slot_from_stdin import slot_from_payload
@@ -204,6 +207,20 @@ uuid_val = (
 if not uuid_val:
     _skip("no_uuid_in_response")
 
+# Read the existing owner from the protected HOME primary, never the
+# workspace-controlled compatibility mirror. A different UUID may replace it
+# only when session-start already marked that slot as a prior process and the
+# tool declares exact parent lineage. Missing caller role evidence therefore
+# cannot turn a subagent result into the driver's identity.
+_existing = {}
+try:
+    sys.path.insert(0, sys.argv[2])
+    from _session_lookup import load_authoritative_session_for_hook
+    _existing = load_authoritative_session_for_hook(os.getcwd(), sys.argv[1]) or {}
+except Exception:
+    _existing = {}
+_cached_uuid = str(_existing.get("uuid") or "")
+
 # Resume-shaped tools (identity, bind_session) don't carry spawn_reason, so
 # the subagent guard above can't see a subagent's identity() call — observed
 # live 2026-06-12: a council verifier's late identity() re-captured the
@@ -217,14 +234,6 @@ if not uuid_val:
 # session's identity.
 _identity_status = str(_response_field("identity_status") or "").strip().lower()
 if suffix in ("identity", "bind_session"):
-    _existing = {}
-    try:
-        sys.path.insert(0, sys.argv[2])
-        from _session_lookup import load_authoritative_session_for_hook
-        _existing = load_authoritative_session_for_hook(os.getcwd(), sys.argv[1]) or {}
-    except Exception:
-        _existing = {}
-    _cached_uuid = str(_existing.get("uuid") or "")
     # A new process may inherit the predecessor's lineage anchor and make one
     # proofless identity() call to establish its own identity. The server marks
     # that response as created. Accept that one transition even though its UUID
@@ -240,6 +249,16 @@ if suffix in ("identity", "bind_session"):
         and not _inherited_identity_creation
     ):
         _skip("resume_uuid_mismatch_not_cached")
+elif suffix in ("onboard", "start_session") and _cached_uuid != str(uuid_val):
+    _spawn_reason = str((_tool_input or {}).get("spawn_reason") or "").strip().lower()
+    _parent = str((_tool_input or {}).get("parent_agent_id") or "").strip()
+    _declared_successor = (
+        _existing.get("prior_process") is True
+        and _parent == _cached_uuid
+        and _spawn_reason in {"explicit", "compaction"}
+    )
+    if _cached_uuid and not _declared_successor:
+        _skip("mint_uuid_mismatch_without_authoritative_lineage")
 
 # Identity ontology (, §S11): the
 # workspace cache is a lineage anchor, not a resume credential. We stamp

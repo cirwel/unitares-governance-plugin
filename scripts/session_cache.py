@@ -489,8 +489,10 @@ def _parse_session_filename(name: str) -> str | None:
 def cmd_list(args: argparse.Namespace) -> int:
     """List slot inventory for the session cache, newest first.
 
-    Emits a JSON array of ``{slot, parent_agent_id, prior_client_session_id,
-    updated_at, path}`` objects. Field names are deliberately the v2
+    Emits a JSON array of ``{slot, parent_agent_id, updated_at, path}`` objects.
+    The inventory deliberately omits ``client_session_id``: listing workspace
+    lineage hints must never produce a proof value another slot can adopt.
+    Field names are otherwise the v2
     declared-lineage parameters of ``onboard()`` so consumers naturally
     flow into ``onboard(force_new=true, parent_agent_id=entry["parent_agent_id"])``
     — declared lineage, not resume. The scan-newest fallback (S20 §2b) is
@@ -522,11 +524,9 @@ def cmd_list(args: argparse.Namespace) -> int:
             uuid = data.get("uuid")
             if not isinstance(uuid, str) or not _UUID_PATTERN.fullmatch(uuid):
                 continue
-            sid = data.get("client_session_id")
             entries.append({
                 "slot": slot,
                 "parent_agent_id": uuid,
-                "prior_client_session_id": sid,
                 "updated_at": data.get("updated_at"),
                 "path": str(path),
             })
