@@ -35,6 +35,7 @@ def _cache(workspace: Path, *, age_s: float = 0.0, **overrides) -> Path:
         "uuid": UUID, "client_session_id": CSID, "schema_version": 2,
         "slot": SLOT, "onboard_origin": "agent", **overrides,
     }))
+    path.chmod(0o600)
     if age_s:
         stamp = time.time() - age_s
         os.utime(path, (stamp, stamp))
@@ -158,7 +159,8 @@ def test_mark_marks_a_binding_that_exists_only_in_the_home_mirror(tmp_path):
     assert binding_activity.mark(str(workspace), _payload()) == "marked_prior_process"
     data = json.loads(home_copy.read_text())
     assert data["prior_process"] is True and data["uuid"] == UUID
-    assert not (workspace / ".unitares" / f"session-{SLOT}.json").exists()
+    repaired = workspace / ".unitares" / f"session-{SLOT}.json"
+    assert json.loads(repaired.read_text())["prior_process"] is True
 
 
 def test_a_rebind_under_a_new_proof_is_not_judged_by_the_old_stamp(tmp_path):
@@ -170,7 +172,7 @@ def test_a_rebind_under_a_new_proof_is_not_judged_by_the_old_stamp(tmp_path):
     assert binding_activity.mark(str(tmp_path), _payload()) == "touched"
 
 
-def test_mark_never_overwrites_a_mint_made_from_another_workspace(tmp_path):
+def test_mark_uses_the_authoritative_mint_from_another_workspace(tmp_path):
     # Workspace X still holds A; a mint of B from workspace Y reached only the
     # HOME mirror. X's delayed Stop must not write A back over HOME's B.
     workspace = tmp_path / "x"
@@ -178,11 +180,14 @@ def test_mark_never_overwrites_a_mint_made_from_another_workspace(tmp_path):
     _cache(workspace, age_s=2 * DAY)
     home_copy = _cache(tmp_path, uuid="11111111-2222-4333-8444-555555555555",
                        client_session_id="agent-minted-in-y")
-    assert binding_activity.mark(str(workspace), _payload()) == "none"
+    assert binding_activity.mark(str(workspace), _payload()) == "touched"
     assert json.loads(home_copy.read_text())["uuid"] == "11111111-2222-4333-8444-555555555555"
+    assert json.loads(
+        (workspace / ".unitares" / f"session-{SLOT}.json").read_text()
+    )["uuid"] == UUID
 
 
-def test_an_invalidated_home_mirror_does_not_veto_the_marking(tmp_path):
+def test_invalidated_home_primary_prevents_workspace_promotion(tmp_path):
     workspace = tmp_path / "x"
     workspace.mkdir()
     path = _cache(workspace, age_s=2 * DAY)
@@ -193,8 +198,8 @@ def test_an_invalidated_home_mirror_does_not_veto_the_marking(tmp_path):
     authority = cache_authority_path(tmp_path / ".unitares" / f"session-{SLOT}.json")
     authority.parent.mkdir(parents=True, exist_ok=True)
     authority.write_text(json.dumps({"schema_version": 1, "mirror_valid": False}))
-    assert binding_activity.mark(str(workspace), _payload()) == "marked_prior_process"
-    assert json.loads(path.read_text())["prior_process"] is True
+    assert binding_activity.mark(str(workspace), _payload()) == "none"
+    assert json.loads(path.read_text()).get("prior_process") is not True
 
 
 def test_a_marked_binding_stays_idle_after_another_copy_is_written_back(tmp_path):

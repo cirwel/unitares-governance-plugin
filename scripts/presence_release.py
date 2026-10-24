@@ -21,13 +21,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _http_auth import authorization_safe_urlopen, governance_json_headers  # noqa: E402
-from _session_lookup import load_session_for_hook  # noqa: E402
+from _session_lookup import load_usable_session_for_hook  # noqa: E402
 
 DEFAULT_SERVER_URL = "http://localhost:8767"
 
 
 def release(workspace: str, payload: str, budget: float) -> bool:
-    session = load_session_for_hook(workspace, payload)
+    session = load_usable_session_for_hook(workspace, payload)
     client_session_id = str(session.get("client_session_id") or "").strip()
     if not client_session_id:
         return False

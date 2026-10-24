@@ -31,19 +31,20 @@ def _payload() -> str:
 
 
 def _seed_session(workspace: Path) -> None:
-    root = workspace / ".unitares"
-    root.mkdir(parents=True, exist_ok=True)
-    (root / f"session-{SLOT}.json").write_text(
-        json.dumps(
-            {
-                "uuid": AGENT_UUID,
-                "client_session_id": SESSION_ID,
-                "server_url": "http://governance.test",
-                "slot": SLOT,
-            }
-        ),
-        encoding="utf-8",
+    payload = json.dumps(
+        {
+            "uuid": AGENT_UUID,
+            "client_session_id": SESSION_ID,
+            "server_url": "http://governance.test",
+            "schema_version": 2,
+            "slot": SLOT,
+        }
     )
+    for root in {workspace / ".unitares", Path.home() / ".unitares"}:
+        root.mkdir(parents=True, exist_ok=True)
+        path = root / f"session-{SLOT}.json"
+        path.write_text(payload, encoding="utf-8")
+        path.chmod(0o600)
 
 
 def _seed_activity(home: Path, count: int = 25) -> Path:
@@ -446,6 +447,17 @@ def test_worker_waits_for_identity_without_network(tmp_path):
         runtime_sender=lambda url, payload: calls.append(payload) or True,
     ) == {"status": "waiting_identity"}
     assert calls == []
+
+
+def test_runtime_observer_rejects_inherited_binding(tmp_path):
+    _seed_session(tmp_path)
+    cache = Path.home() / ".unitares" / f"session-{SLOT}.json"
+    payload = json.loads(cache.read_text(encoding="utf-8"))
+    payload["prior_process"] = True
+    cache.write_text(json.dumps(payload), encoding="utf-8")
+    cache.chmod(0o600)
+
+    assert runtime_observer._load_session(tmp_path, SLOT) == {}
 
 
 def test_runtime_post_targets_dedicated_sink(monkeypatch):

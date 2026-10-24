@@ -136,14 +136,18 @@ def mark(workspace: str, stdin_payload: str, *, now: float | None = None) -> str
         read_json_dict_unlocked,
         update_session_cache,
     )
-    from _session_lookup import _extract_slot, load_session_for_hook, resolve_session_file
+    from _session_lookup import (
+        _extract_slot,
+        load_authoritative_session_for_hook,
+        resolve_proof_session_file,
+    )
     from session_cache import _cache_path
 
     slot = _extract_slot(stdin_payload)
-    path = resolve_session_file(workspace, slot) if slot else None
+    path = resolve_proof_session_file(slot) if slot else None
     if path is None:
         return "none"
-    data = load_session_for_hook(workspace, stdin_payload) or {}
+    data = load_authoritative_session_for_hook(workspace, stdin_payload) or {}
     uuid = str(data.get("uuid") or "")
     binding = str(data.get("client_session_id") or "")
     if not (uuid and binding) or data.get("prior_process") is True:
@@ -179,16 +183,13 @@ def mark(workspace: str, stdin_payload: str, *, now: float | None = None) -> str
         current["prior_process"] = True
         return current
 
-    # Write to the copy the binding was read from. A binding that exists only
-    # in the HOME mirror is updated there; otherwise the workspace copy is
-    # primary and the HOME mirror follows it. It never leaves this process.
+    # HOME is authoritative; the workspace copy is repaired as a mirror.
     try:
-        if path.resolve() == home_cache.resolve():
-            _, committed = update_session_cache(home_cache, inherit)
-        else:
-            _, committed = update_session_cache(
-                _cache_path("session", Path(workspace), slot), inherit, home_path=home_cache
-            )
+        _, committed = update_session_cache(
+            _cache_path("session", Path(workspace), slot),
+            inherit,
+            home_path=home_cache,
+        )
     except Exception:
         return "none"
     return "marked_prior_process" if committed else "none"

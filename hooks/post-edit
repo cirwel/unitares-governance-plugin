@@ -181,8 +181,8 @@ if [[ -f "${SESSION_LOOKUP}" ]]; then
   SESSION_PAYLOAD=$(printf '%s' "${HOOK_INPUT}" | python3 -c "
 import json, sys
 sys.path.insert(0, '${PLUGIN_ROOT}/scripts')
-from _session_lookup import load_session_for_hook
-data = load_session_for_hook('${PWD}', sys.stdin.read())
+from _session_lookup import load_usable_session_for_hook
+data = load_usable_session_for_hook('${PWD}', sys.stdin.read())
 print(json.dumps(data))
 " 2>/dev/null || echo "{}")
   # Also eval shell vars for UUID_HINT and SLOT (needed by checkin.py call).

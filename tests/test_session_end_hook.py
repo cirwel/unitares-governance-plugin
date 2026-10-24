@@ -27,12 +27,14 @@ def test_session_end_releases_presence_and_sends_no_checkin(tmp_path):
     session_dir = tmp_path / ".unitares"
     session_dir.mkdir()
     slot = "test-slot"
-    (session_dir / _slot_filename(slot)).write_text(json.dumps({
+    cache = session_dir / _slot_filename(slot)
+    cache.write_text(json.dumps({
         "uuid": "86ae619f-87e0-4040-8f29-eacece0c7904",
         "client_session_id": "agent-test1234",
-        "continuity_token": "v1.tok",
+        "schema_version": 2,
         "slot": slot,
     }))
+    cache.chmod(0o600)
 
     try:
         env = {
@@ -86,11 +88,14 @@ def test_presence_release_returns_within_budget_when_server_stalls(tmp_path):
     session_dir = tmp_path / ".unitares"
     session_dir.mkdir()
     slot = "stall-slot"
-    (session_dir / _slot_filename(slot)).write_text(json.dumps({
+    cache = session_dir / _slot_filename(slot)
+    cache.write_text(json.dumps({
         "uuid": "86ae619f-87e0-4040-8f29-eacece0c7904",
         "client_session_id": "agent-stall",
+        "schema_version": 2,
         "slot": slot,
     }))
+    cache.chmod(0o600)
     env = {
         "PATH": "/usr/bin:/bin:/usr/local/bin",
         "HOME": str(tmp_path),

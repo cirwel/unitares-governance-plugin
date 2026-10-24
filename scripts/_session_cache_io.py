@@ -191,19 +191,37 @@ def _transaction_paths(
     path: Path,
     home_path: Path | None,
 ) -> tuple[Path, Path | None, Path | None, bool]:
+    """Return authoritative primary, optional workspace mirror, and authority.
+
+    A slotted session's HOME cache is the only proof-bearing copy protected
+    from a workspace writer.  Older revisions treated the workspace path as
+    primary and copied it into HOME on every merge, which let a modified
+    workspace cache promote attacker-controlled proof into the protected
+    mirror.  When a HOME path is supplied, make it the transaction primary
+    and treat the workspace path as a diagnostic/compatibility mirror.
+    """
     raw_home = home_path
-    path, home_path = _normalized_cache_paths(path, home_path)
+    workspace_path, normalized_home = _normalized_cache_paths(path, home_path)
+    if raw_home is None:
+        return workspace_path, None, None, False
+
+    home_is_primary = True
+    if normalized_home is None:
+        path = workspace_path
+        mirror_path = None
+    else:
+        path = normalized_home
+        mirror_path = workspace_path
     authority_path = (
         _normalized_final_path(cache_authority_path(raw_home))
-        if raw_home is not None
-        else None
+        if raw_home is not None else None
     )
-    if authority_path is not None and authority_path in (path, home_path):
+    if authority_path is not None and authority_path in (path, mirror_path):
         raise ValueError(
             "session cache path aliases its authority record; "
             "use distinct .unitares and .unitares-cache-authority directories"
         )
-    return path, home_path, authority_path, raw_home is not None and home_path is None
+    return path, mirror_path, authority_path, home_is_primary
 
 
 def _read_authority_unlocked(

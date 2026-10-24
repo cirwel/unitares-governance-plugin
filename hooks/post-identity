@@ -220,8 +220,8 @@ if suffix in ("identity", "bind_session"):
     _existing = {}
     try:
         sys.path.insert(0, sys.argv[2])
-        from _session_lookup import load_session_for_hook
-        _existing = load_session_for_hook(os.getcwd(), sys.argv[1]) or {}
+        from _session_lookup import load_authoritative_session_for_hook
+        _existing = load_authoritative_session_for_hook(os.getcwd(), sys.argv[1]) or {}
     except Exception:
         _existing = {}
     _cached_uuid = str(_existing.get("uuid") or "")

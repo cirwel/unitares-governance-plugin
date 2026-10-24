@@ -26,6 +26,7 @@ def _cache(root, **overrides):
         "continuity_token": "never-sent", "slot": SLOT, "schema_version": 2,
         **overrides,
     }))
+    path.chmod(0o600)
     return path
 
 

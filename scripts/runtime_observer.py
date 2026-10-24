@@ -55,7 +55,7 @@ from typing import Any, Callable
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _http_auth import authorization_safe_urlopen, governance_json_headers  # noqa: E402
-from _session_lookup import resolve_session_file  # noqa: E402
+from _session_lookup import load_usable_session_for_hook  # noqa: E402
 from activity_observer import (  # noqa: E402
     _lock_timeout_s,
     _read_state,
@@ -186,18 +186,10 @@ def _process_alive(pid: int, start_token: str = "") -> bool:
 
 
 def _load_session(workspace: Path, slot: str) -> dict[str, Any]:
-    path = resolve_session_file(workspace, slot)
-    if path is None:
-        return {}
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-    if not isinstance(value, dict):
-        return {}
-    if not value.get("uuid") or not value.get("client_session_id"):
-        return {}
-    return value
+    return load_usable_session_for_hook(
+        workspace,
+        json.dumps({"session_id": slot}),
+    )
 
 
 def _event_id(

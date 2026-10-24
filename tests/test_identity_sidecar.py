@@ -466,12 +466,12 @@ def test_mcp_non_tool_call_passes_through_without_onboard(tmp_path: Path, fake_s
 def test_mcp_checkin_stamps_existing_session(tmp_path: Path, fake_server: str) -> None:
     sidecar = _sidecar(tmp_path, fake_server)
     cache_dir = tmp_path / ".unitares"
-    cache_dir.mkdir()
-    (cache_dir / "session-slot-a.json").write_text(json.dumps({
+    sidecar.write_session("slot-a", {
         "uuid": "11111111-2222-4333-8444-555555555555",
         "client_session_id": "agent-sidecar-111",
         "schema_version": 2,
-    }))
+        "slot": "slot-a",
+    })
 
     status, _payload = sidecar.mcp_proxy(
         {

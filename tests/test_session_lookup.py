@@ -15,6 +15,8 @@ from _session_lookup import (
     _extract_slot,
     _slot_filename,
     load_session_for_hook,
+    load_usable_session_for_hook,
+    resolve_proof_session_file,
     resolve_session_file,
 )
 
@@ -34,6 +36,21 @@ def _write_invalid_authority(home: Path, slot: str) -> None:
         json.dumps({"schema_version": 1, "generation": 7, "mirror_valid": False}),
         encoding="utf-8",
     )
+
+
+def _write_proof(home: Path, requested_slot: str, **overrides) -> Path:
+    path = home / ".unitares" / _slot_filename(requested_slot)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "uuid": "86ae619f-87e0-4040-8f29-eacece0c7904",
+        "client_session_id": "agent-test1234",
+        "schema_version": 2,
+        "slot": requested_slot,
+        **overrides,
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    path.chmod(0o600)
+    return path
 
 
 def test_extract_slot_handles_missing_payload():
@@ -158,6 +175,72 @@ def test_load_session_for_hook_reads_codex_fallback_slot(tmp_path):
 
     assert result["uuid"] == "codex-u"
     assert result["client_session_id"] == "agent-codex"
+
+
+def test_usable_binding_comes_only_from_protected_home(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    home = tmp_path / "home"
+    workspace = tmp_path / "workspace"
+    slot = "proof-slot"
+    monkeypatch.setenv("HOME", str(home))
+    workspace_cache = workspace / ".unitares" / _slot_filename(slot)
+    workspace_cache.parent.mkdir(parents=True)
+    workspace_cache.write_text(
+        json.dumps({
+            "uuid": "attacker",
+            "client_session_id": "agent-attacker",
+            "schema_version": 2,
+            "slot": slot,
+        }),
+        encoding="utf-8",
+    )
+
+    payload = json.dumps({"session_id": slot})
+    assert load_usable_session_for_hook(workspace, payload) == {}
+
+    home_cache = _write_proof(home, slot)
+    assert resolve_proof_session_file(slot) == home_cache
+    assert load_usable_session_for_hook(workspace, payload)["client_session_id"] == (
+        "agent-test1234"
+    )
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"prior_process": True},
+        {"slot": "another-slot"},
+        {"schema_version": 1},
+        {"uuid": ""},
+        {"client_session_id": ""},
+    ],
+)
+def test_usable_binding_rejects_inherited_or_malformed_records(
+    tmp_path: Path,
+    monkeypatch,
+    overrides: dict,
+) -> None:
+    home = tmp_path / "home"
+    slot = "proof-slot"
+    monkeypatch.setenv("HOME", str(home))
+    _write_proof(home, slot, **overrides)
+
+    assert load_usable_session_for_hook(
+        tmp_path / "workspace",
+        json.dumps({"session_id": slot}),
+    ) == {}
+
+
+def test_usable_binding_rejects_loose_mode(tmp_path: Path, monkeypatch) -> None:
+    home = tmp_path / "home"
+    slot = "loose-proof-slot"
+    monkeypatch.setenv("HOME", str(home))
+    path = _write_proof(home, slot)
+    path.chmod(0o644)
+
+    assert resolve_proof_session_file(slot) is None
 
 
 def test_home_fallback_removed_closes_cross_agent_siphoning(tmp_path, monkeypatch):

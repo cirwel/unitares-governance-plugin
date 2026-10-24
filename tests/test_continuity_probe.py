@@ -226,6 +226,7 @@ def test_question_at_compaction_and_answer_at_turn_end(tmp_path, host):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     _cache(workspace)
+    _cache(tmp_path)
 
     stdout, calls = _serve_and_run(
         tmp_path, cwd=workspace, host=host, hook_payload=_event(), extra_env=PROBE_ON,

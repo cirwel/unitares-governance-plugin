@@ -88,6 +88,17 @@ def test_time_threshold_does_not_fire_without_edits() -> None:
     assert result["fire"] is False
 
 
+def test_inherited_binding_never_fires() -> None:
+    result = decide(
+        session={**SESSION, "prior_process": True},
+        milestone=_milestone(edit_count=10, files=["/f"]),
+        now=FIXED_NOW,
+    )
+    assert result["fire"] is False
+    assert result["reason"] == "no_usable_binding"
+    assert result["client_session_id"] == "sid-123"
+
+
 def test_last_checkin_ts_dominates_first_edit_ts() -> None:
     # A recent /checkin should suppress auto-fire even if first_edit_ts is
     # stale — last_checkin_ts is the authoritative anchor.

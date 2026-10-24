@@ -83,7 +83,8 @@ def _seed_slotted(workspace: Path, slot: str, payload: dict) -> Path:
     unitares = workspace / ".unitares"
     unitares.mkdir(exist_ok=True)
     path = unitares / _slot_filename(slot)
-    path.write_text(json.dumps(payload))
+    path.write_text(json.dumps({"schema_version": 2, "slot": slot, **payload}))
+    path.chmod(0o600)
     return path
 
 
