@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import hmac
+import ipaddress
 import json
 import os
 import secrets
@@ -57,6 +58,7 @@ from onboard_helper import (  # noqa: E402
     unwrap_tool_response,
 )
 from _session_cache_io import session_cache_lock  # noqa: E402
+from _session_lookup import load_authoritative_session_for_hook  # noqa: E402
 
 
 IDENTITY_TOOL_NAMES = {"onboard", "start_session", "identity", "bind_session"}
@@ -275,11 +277,15 @@ class IdentitySidecar:
         return bool(supplied) and hmac.compare_digest(supplied, self.capability_token)
 
     def read_session(self, slot: str) -> dict[str, Any]:
-        return _read_cache(self.workspace, slot)
+        return load_authoritative_session_for_hook(
+            self.workspace,
+            json.dumps({"session_id": slot}),
+        )
 
     def write_session(self, slot: str, payload: dict[str, Any]) -> None:
         clean = {k: v for k, v in payload.items() if k != "continuity_token"}
         clean.setdefault("schema_version", 2)
+        clean["slot"] = slot
         clean["updated_at"] = _now_iso()
         _write_cache(self.workspace, clean, slot)
 
@@ -307,11 +313,26 @@ class IdentitySidecar:
                 session = self.read_session(slot)
                 sid = session.get("client_session_id")
                 if isinstance(sid, str) and sid.strip():
+                    # The workspace cache is a compatibility mirror only.  A
+                    # protected HOME binding remains authoritative and repairs
+                    # a missing or attacker-modified workspace copy.
+                    workspace_session = _read_cache(self.workspace, slot)
+                    if workspace_session != session:
+                        _write_cache(self.workspace, session, slot)
                     return {
                         "status": "cached",
                         "uuid": session.get("uuid", ""),
                         "client_session_id": sid.strip(),
                         "session": session,
+                    }
+                protected_path = _cache_path(Path.home(), slot)
+                if protected_path.exists() or protected_path.is_symlink():
+                    return {
+                        "status": "invalid_protected_binding",
+                        "error": (
+                            "protected HOME session binding is invalid; "
+                            "clear it explicitly before onboarding a replacement"
+                        ),
                     }
                 result = run_onboard(
                     server_url=self.server_url,
@@ -336,6 +357,7 @@ class IdentitySidecar:
             if not session:
                 return None
             session.setdefault("schema_version", 2)
+            session["slot"] = slot
             session["updated_at"] = _now_iso()
             return session
 
@@ -810,6 +832,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--audit-log-tail", type=int, default=int(os.environ.get("UNITARES_SIDECAR_AUDIT_LOG_TAIL", "200")),
                         help="default number of check-in log lines included by GET /audit")
     args = parser.parse_args(argv)
+
+    raw_host = args.host.strip()
+    try:
+        address = ipaddress.ip_address(raw_host.strip("[]"))
+    except ValueError:
+        if raw_host.lower() != "localhost":
+            parser.error("--host must be localhost or a loopback IP address")
+    else:
+        if not address.is_loopback:
+            parser.error("--host must be localhost or a loopback IP address")
 
     workspace = Path(args.workspace).expanduser().resolve()
     default_slot = args.slot.strip() or f"sidecar-{_workspace_hash(workspace)}"

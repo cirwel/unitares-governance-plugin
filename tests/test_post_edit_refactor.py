@@ -11,6 +11,7 @@ import json
 import os
 import socketserver
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -47,14 +48,30 @@ def test_post_edit_routes_through_checkin_py_with_plugin_hook_metadata(tmp_path)
         "last_checkin_ts": int(time.time()) - 10_000,  # long past threshold
     }))
     session_cache.chmod(0o600)
-    workspace_unitares = workspace / ".unitares"
-    workspace_unitares.mkdir()
-    (workspace_unitares / "last-milestone.json").write_text(json.dumps({
-        "edit_count": 10,  # well past default threshold of 5
-        "files_touched": ["a.py", "b.py"],
-        "last_edit_ts": int(time.time()),
-        "first_edit_ts": int(time.time()) - 10_000,
-    }))
+    subprocess.run(
+        [
+            sys.executable,
+            str(PLUGIN_ROOT / "scripts" / "session_cache.py"),
+            "set",
+            "milestone",
+            "--workspace",
+            str(workspace),
+            "--slot",
+            slot,
+            "--json",
+            json.dumps(
+                {
+                    "edit_count": 10,
+                    "files_touched": ["a.py", "b.py"],
+                    "last_edit_ts": int(time.time()),
+                    "first_edit_ts": int(time.time()) - 10_000,
+                }
+            ),
+        ],
+        env={"PATH": "/usr/bin:/bin:/usr/local/bin", "HOME": str(tmp_path)},
+        check=True,
+        capture_output=True,
+    )
 
     # Realistic PostToolUse hook payload on stdin (Claude Code passes
     # session_id; S20.1a strictly requires it for slot-scoped writes).

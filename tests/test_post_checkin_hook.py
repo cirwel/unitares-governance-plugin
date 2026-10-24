@@ -52,7 +52,7 @@ def _seed_session(workspace: Path, slot: str | None = None, **extra) -> None:
     subprocess.run(cmd, check=True, capture_output=True)
 
 
-def _seed_milestone_edits(workspace: Path, n: int) -> None:
+def _seed_milestone_edits(workspace: Path, n: int, slot: str = "claude-session-abc-123") -> None:
     for i in range(n):
         subprocess.run(
             [
@@ -61,6 +61,8 @@ def _seed_milestone_edits(workspace: Path, n: int) -> None:
                 "bump-edit",
                 "--workspace",
                 str(workspace),
+                "--slot",
+                slot,
                 "--file-path",
                 f"/w/f{i}.py",
             ],
@@ -145,7 +147,7 @@ def test_idless_hook_preserves_accumulator_and_stamps_last_checkin(tmp_path: Pat
     _seed_session(tmp_path, slot=SLOT)
     _seed_milestone_edits(tmp_path, 3)
 
-    before_milestone = _read("milestone", tmp_path)
+    before_milestone = _read("milestone", tmp_path, SLOT)
     assert before_milestone["edit_count"] == 3
     assert before_milestone["first_edit_ts"] is not None
 
@@ -153,7 +155,7 @@ def test_idless_hook_preserves_accumulator_and_stamps_last_checkin(tmp_path: Pat
     result = _run_hook(tmp_path, session_id=SLOT)
     assert result.returncode == 0, result.stderr
 
-    after_milestone = _read("milestone", tmp_path)
+    after_milestone = _read("milestone", tmp_path, SLOT)
     assert after_milestone["edit_count"] == 3
     assert after_milestone["files_touched"]
     assert after_milestone["first_edit_ts"] is not None
@@ -174,8 +176,8 @@ def test_correlated_hook_resets_snapshot_without_newer_edits(tmp_path: Path) -> 
     result = _run_hook(tmp_path, session_id=SLOT, tool_use_id=tool_use_id)
 
     assert result.returncode == 0, result.stderr
-    assert _read("milestone", tmp_path)["edit_count"] == 0
-    assert list((tmp_path / ".unitares" / "milestone-snapshots").glob("*.json")) == []
+    assert _read("milestone", tmp_path, SLOT)["edit_count"] == 0
+    assert list((Path.home() / ".unitares" / "milestone-snapshots").glob("*.json")) == []
 
 
 def test_hook_is_noop_without_session(tmp_path: Path) -> None:
@@ -192,7 +194,7 @@ def test_failed_checkin_without_session_discards_snapshot(tmp_path: Path) -> Non
     tool_use_id = "toolu_no_session_failure"
     pre = _run_pre_hook(tmp_path, SLOT, tool_use_id)
     assert pre.returncode == 0, pre.stderr
-    snapshots = tmp_path / ".unitares" / "milestone-snapshots"
+    snapshots = Path.home() / ".unitares" / "milestone-snapshots"
     assert len(list(snapshots.glob("*.json"))) == 1
 
     post = _run_hook(
@@ -204,7 +206,7 @@ def test_failed_checkin_without_session_discards_snapshot(tmp_path: Path) -> Non
 
     assert post.returncode == 0, post.stderr
     assert list(snapshots.glob("*.json")) == []
-    assert _read("milestone", tmp_path)["edit_count"] == 1
+    assert _read("milestone", tmp_path, SLOT)["edit_count"] == 1
 
 
 def test_pre_hook_does_not_snapshot_non_governance_checkin(tmp_path: Path) -> None:
@@ -218,7 +220,7 @@ def test_pre_hook_does_not_snapshot_non_governance_checkin(tmp_path: Path) -> No
     )
 
     assert pre.returncode == 0, pre.stderr
-    snapshots = tmp_path / ".unitares" / "milestone-snapshots"
+    snapshots = Path.home() / ".unitares" / "milestone-snapshots"
     assert not snapshots.exists() or list(snapshots.glob("*.json")) == []
 
 
@@ -234,7 +236,7 @@ def test_post_hook_does_not_acknowledge_non_governance_checkin(tmp_path: Path) -
     )
 
     assert post.returncode == 0, post.stderr
-    assert _read("milestone", tmp_path)["edit_count"] == 2
+    assert _read("milestone", tmp_path, SLOT)["edit_count"] == 2
     assert "last_checkin_ts" not in _read("session", tmp_path, slot=SLOT)
 
 
@@ -263,15 +265,15 @@ def test_hook_preserves_edit_made_during_manual_checkin(tmp_path: Path) -> None:
 
     pre = _run_pre_hook(tmp_path, SLOT, tool_use_id)
     assert pre.returncode == 0, pre.stderr
-    assert len(list((tmp_path / ".unitares" / "milestone-snapshots").glob("*.json"))) == 1
+    assert len(list((Path.home() / ".unitares" / "milestone-snapshots").glob("*.json"))) == 1
 
     _seed_milestone_edits(tmp_path, 1)
     post = _run_hook(tmp_path, session_id=SLOT, tool_use_id=tool_use_id)
     assert post.returncode == 0, post.stderr
 
-    milestone = _read("milestone", tmp_path)
+    milestone = _read("milestone", tmp_path, SLOT)
     assert milestone["edit_count"] == 2
-    assert list((tmp_path / ".unitares" / "milestone-snapshots").glob("*.json")) == []
+    assert list((Path.home() / ".unitares" / "milestone-snapshots").glob("*.json")) == []
 
 
 def test_failed_checkin_preserves_milestone_and_timestamp(tmp_path: Path) -> None:
@@ -289,10 +291,10 @@ def test_failed_checkin_preserves_milestone_and_timestamp(tmp_path: Path) -> Non
     )
 
     assert post.returncode == 0, post.stderr
-    milestone = _read("milestone", tmp_path)
+    milestone = _read("milestone", tmp_path, SLOT)
     assert milestone["edit_count"] == 2
     assert _read("session", tmp_path, slot=SLOT)["last_checkin_ts"] == 1_000_000_000
-    assert list((tmp_path / ".unitares" / "milestone-snapshots").glob("*.json")) == []
+    assert list((Path.home() / ".unitares" / "milestone-snapshots").glob("*.json")) == []
 
 
 def test_outer_success_cannot_mask_nested_checkin_failure(tmp_path: Path) -> None:
@@ -306,7 +308,7 @@ def test_outer_success_cannot_mask_nested_checkin_failure(tmp_path: Path) -> Non
     )
 
     assert post.returncode == 0, post.stderr
-    assert _read("milestone", tmp_path)["edit_count"] == 1
+    assert _read("milestone", tmp_path, SLOT)["edit_count"] == 1
     assert _read("session", tmp_path, slot=SLOT)["last_checkin_ts"] == 1_000_000_000
 
 
@@ -374,5 +376,5 @@ def test_hook_skips_when_slot_unrecoverable(tmp_path: Path) -> None:
 
     # Milestone accumulator unchanged — workspace-scoped, but resetting on
     # behalf of an unidentifiable caller would clobber other agents' windows.
-    after_milestone = _read("milestone", tmp_path)
+    after_milestone = _read("milestone", tmp_path, SLOT)
     assert after_milestone["edit_count"] == 2
