@@ -33,6 +33,26 @@ def _seed_slotted_cache(workspace: Path, slot: str, payload: dict) -> Path:
     return path
 
 
+def _seed_slot_milestone(workspace: Path, slot: str, payload: dict) -> None:
+    subprocess.run(
+        [
+            sys.executable,
+            str(PLUGIN_ROOT / "scripts" / "session_cache.py"),
+            "set",
+            "milestone",
+            "--workspace",
+            str(workspace),
+            "--slot",
+            slot,
+            "--json",
+            json.dumps(payload),
+        ],
+        env={"PATH": "/usr/bin:/bin:/usr/local/bin", "HOME": str(workspace)},
+        check=True,
+        capture_output=True,
+    )
+
+
 def _run_hook_with_mock_server(
     hook_name: str,
     workspace: Path,
@@ -177,12 +197,11 @@ def test_post_edit_reads_slotted_cache(tmp_path):
         "slot": slot,
         "last_checkin_ts": int(time.time()) - 10_000,
     })
-    milestone = tmp_path / ".unitares" / "last-milestone.json"
-    milestone.write_text(json.dumps({
+    _seed_slot_milestone(tmp_path, slot, {
         "edit_count": 10,
         "files_touched": ["a.py"],
         "last_edit_ts": int(time.time()),
-    }))
+    })
     checkins = _run_hook_with_mock_server(
         "post-edit", tmp_path, slot,
         extra_stdin_fields={

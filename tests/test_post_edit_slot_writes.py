@@ -26,6 +26,7 @@ import time
 from pathlib import Path
 
 PLUGIN_ROOT = Path(__file__).parent.parent
+SESSION_CACHE = PLUGIN_ROOT / "scripts" / "session_cache.py"
 sys.path.insert(0, str(PLUGIN_ROOT / "scripts"))
 
 from _session_lookup import _slot_filename  # noqa: E402
@@ -88,6 +89,34 @@ def _seed_slotted(workspace: Path, slot: str, payload: dict) -> Path:
     return path
 
 
+def _milestone_path(workspace: Path, slot: str) -> Path:
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SESSION_CACHE),
+            "path",
+            "milestone",
+            "--workspace",
+            str(workspace),
+            "--slot",
+            slot,
+        ],
+        env={"PATH": "/usr/bin:/bin:/usr/local/bin", "HOME": str(workspace)},
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    return Path(result.stdout.strip())
+
+
+def _seed_milestone(workspace: Path, slot: str, payload: dict) -> Path:
+    path = _milestone_path(workspace, slot)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    path.chmod(0o600)
+    return path
+
+
 def _run_post_edit(
     workspace: Path,
     stdin_payload: dict,
@@ -137,12 +166,12 @@ def test_last_checkin_ts_lands_in_slotted_cache(tmp_path: Path) -> None:
         "slot": slot,
         "last_checkin_ts": int(time.time()) - 10_000,  # past threshold
     })
-    (tmp_path / ".unitares" / "last-milestone.json").write_text(json.dumps({
+    _seed_milestone(tmp_path, slot, {
         "edit_count": 10,  # past edit threshold
         "files_touched": ["a.py"],
         "last_edit_ts": int(time.time()),
         "first_edit_ts": int(time.time()) - 10_000,
-    }))
+    })
 
     flat_path = tmp_path / ".unitares" / "session.json"
     assert not flat_path.exists()
@@ -182,16 +211,15 @@ def test_rejected_auto_checkin_preserves_milestone_and_timestamp(tmp_path: Path)
             "last_checkin_ts": original_ts,
         },
     )
-    milestone_path = tmp_path / ".unitares" / "last-milestone.json"
-    milestone_path.write_text(
-        json.dumps(
-            {
+    milestone_path = _seed_milestone(
+        tmp_path,
+        slot,
+        {
                 "edit_count": 10,
                 "files_touched": ["a.py"],
                 "last_edit_ts": int(time.time()),
                 "first_edit_ts": original_ts,
-            }
-        )
+        },
     )
 
     result = _run_post_edit(
@@ -212,6 +240,47 @@ def test_rejected_auto_checkin_preserves_milestone_and_timestamp(tmp_path: Path)
     assert milestone["edit_count"] == 11
 
 
+def test_workspace_milestone_cannot_inject_slot_attribution(tmp_path: Path) -> None:
+    slot = "claude-protected-milestone"
+    _seed_slotted(
+        tmp_path,
+        slot,
+        {
+            "uuid": "86ae619f-87e0-4040-8f29-eacece0c7904",
+            "client_session_id": "agent-protected-milestone",
+            "continuity_token": "",
+            "slot": slot,
+            "last_checkin_ts": int(time.time()),
+        },
+    )
+    (tmp_path / ".unitares" / "last-milestone.json").write_text(
+        json.dumps(
+            {
+                "edit_count": 99,
+                "files_touched": ["attacker-selected.py"],
+                "first_edit_ts": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = _run_post_edit(
+        tmp_path,
+        {
+            "hook_event_name": "PostToolUse",
+            "session_id": slot,
+            "tool_name": "Edit",
+            "tool_input": {"file_path": str(tmp_path / "victim-edit.py")},
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert RecordingHandler.calls == []
+    milestone = json.loads(_milestone_path(tmp_path, slot).read_text(encoding="utf-8"))
+    assert milestone["edit_count"] == 1
+    assert milestone["files_touched"] == [str(tmp_path / "victim-edit.py")]
+
+
 def test_concurrent_post_edits_submit_only_one_auto_checkin(tmp_path: Path) -> None:
     slot = "claude-concurrent-checkin"
     _seed_slotted(
@@ -225,17 +294,16 @@ def test_concurrent_post_edits_submit_only_one_auto_checkin(tmp_path: Path) -> N
             "last_checkin_ts": int(time.time()),
         },
     )
-    milestone_path = tmp_path / ".unitares" / "last-milestone.json"
-    milestone_path.write_text(
-        json.dumps(
-            {
+    milestone_path = _seed_milestone(
+        tmp_path,
+        slot,
+        {
                 "revision": 4,
                 "edit_count": 4,
                 "files_touched": ["seed.py"],
                 "last_edit_ts": int(time.time()),
                 "first_edit_ts": int(time.time()),
-            }
-        )
+        },
     )
 
     SlowAcceptedCheckinHandler.calls = []
@@ -308,7 +376,7 @@ def test_concurrent_post_edits_submit_only_one_auto_checkin(tmp_path: Path) -> N
         if call.get("name") == "process_agent_update"
     ]
     assert len(checkins) == 1
-    assert not (tmp_path / ".unitares" / "milestone-delivery-claim.json").exists()
+    assert not list((tmp_path / ".unitares").glob("milestone-delivery-*.json"))
     milestone = json.loads(milestone_path.read_text())
     assert milestone["revision"] >= 6
 
@@ -484,12 +552,12 @@ def test_stdin_session_id_overrides_stale_cache_slot(tmp_path: Path) -> None:
         "slot": live_slot,
         "last_checkin_ts": int(time.time()) - 10_000,
     })
-    (tmp_path / ".unitares" / "last-milestone.json").write_text(json.dumps({
+    _seed_milestone(tmp_path, live_slot, {
         "edit_count": 10,
         "files_touched": ["a.py"],
         "last_edit_ts": int(time.time()),
         "first_edit_ts": int(time.time()) - 10_000,
-    }))
+    })
 
     before_ts = int(time.time())
     result = _run_post_edit(tmp_path, {

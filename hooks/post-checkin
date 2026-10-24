@@ -173,6 +173,7 @@ if [[ "${CHECKIN_SUCCEEDED}" != "1" ]]; then
   if [[ -n "${TOOL_USE_ID}" ]]; then
     python3 "${SESSION_CACHE_HELPER}" discard-milestone-snapshot \
       --workspace "${PWD}" \
+      --slot "${SLOT}" \
       --event-id "${TOOL_USE_ID}" >/dev/null 2>&1 || true
   fi
   exit 0
@@ -186,6 +187,7 @@ if [[ -z "${SESSION_PAYLOAD}" || "${SESSION_PAYLOAD}" == "{}" ]]; then
   if [[ -n "${TOOL_USE_ID}" ]]; then
     python3 "${SESSION_CACHE_HELPER}" discard-milestone-snapshot \
       --workspace "${PWD}" \
+      --slot "${SLOT}" \
       --event-id "${TOOL_USE_ID}" >/dev/null 2>&1 || true
   fi
   exit 0
@@ -194,6 +196,7 @@ fi
 if [[ -n "${TOOL_USE_ID}" ]]; then
   python3 "${SESSION_CACHE_HELPER}" reset-milestone \
     --workspace "${PWD}" \
+    --slot "${SLOT}" \
     --snapshot-id "${TOOL_USE_ID}" >/dev/null 2>&1 || true
 fi
 

@@ -9,6 +9,7 @@ Covers the behavior the post-edit hook depends on:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -410,9 +411,9 @@ def test_tool_snapshot_resets_when_no_newer_edit_landed(tmp_path: Path) -> None:
         tmp_path,
     )
 
-    _run(["reset-milestone", "--snapshot-id", event_id], tmp_path)
+    _run(["reset-milestone", "--snapshot-id", event_id, "--slot", "slot-a"], tmp_path)
 
-    assert _read_milestone(tmp_path)["edit_count"] == 0
+    assert json.loads(_run(["get", "milestone", "--slot", "slot-a"], tmp_path))["edit_count"] == 0
 
 
 def test_missing_tool_snapshot_never_resets(tmp_path: Path) -> None:
@@ -448,16 +449,16 @@ def test_discard_milestone_snapshots_is_exact_slot_scoped(tmp_path: Path) -> Non
     )
 
     assert result == {"removed": 1}
-    snapshots = list((tmp_path / ".unitares" / "milestone-snapshots").glob("*.json"))
+    snapshots = list((Path.home() / ".unitares" / "milestone-snapshots").glob("*.json"))
     assert len(snapshots) == 1
     assert json.loads(snapshots[0].read_text(encoding="utf-8"))["slot"] == "slot-b"
 
-    _run(["reset-milestone", "--snapshot-id", "event-b"], tmp_path)
-    assert _read_milestone(tmp_path)["edit_count"] == 0
+    _run(["reset-milestone", "--snapshot-id", "event-b", "--slot", "slot-b"], tmp_path)
+    assert json.loads(_run(["get", "milestone", "--slot", "slot-b"], tmp_path))["edit_count"] == 0
 
 
 def test_new_snapshot_prunes_stale_and_legacy_snapshot_residue(tmp_path: Path) -> None:
-    snapshot_dir = tmp_path / ".unitares" / "milestone-snapshots"
+    snapshot_dir = Path.home() / ".unitares" / "milestone-snapshots"
     snapshot_dir.mkdir(parents=True)
     stale = snapshot_dir / "stale.json"
     stale.write_text(
@@ -1188,6 +1189,37 @@ def test_invalid_home_primary_is_not_merged_or_returned_by_reservation(
         home_path=cache_path,
     )
     assert current == {}
+
+
+def test_identity_generation_snapshot_is_kept_out_of_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+    event_id = "identity-reservation"
+
+    result = _run_raw(
+        [
+            "snapshot-session",
+            "--workspace",
+            str(workspace),
+            "--event-id",
+            event_id,
+            "--slot",
+            "slot-a",
+        ],
+        workspace,
+    )
+
+    assert result.returncode == 0, result.stderr
+    digest = hashlib.sha256(event_id.encode("utf-8")).hexdigest()[:24]
+    assert not (workspace / ".unitares" / "session-snapshots" / f"{digest}.json").exists()
+    protected = fake_home / ".unitares" / "session-snapshots" / f"{digest}.json"
+    assert protected.exists()
+    assert protected.stat().st_mode & 0o077 == 0
 
 
 def test_clear_slotted_session_removes_workspace_and_home_mirror(

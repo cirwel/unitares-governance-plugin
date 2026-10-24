@@ -158,6 +158,7 @@ fi
 MILESTONE_PAYLOAD=$(python3 "${SESSION_CACHE_HELPER}" \
   bump-edit \
   --workspace "${PWD}" \
+  --slot "${SLOT}" \
   --file-paths-json "${FILE_PATHS_JSON}" \
   --echo 2>/dev/null || echo "{}")
 
@@ -284,6 +285,7 @@ DELIVERY_OWNER="${HOOK_HOST}:${SLOT}:${MILESTONE_REVISION}:$$:${RANDOM:-0}"
 DELIVERY_CLAIM=$(python3 "${SESSION_CACHE_HELPER}" \
   claim-milestone-delivery \
   --workspace "${PWD}" \
+  --slot "${SLOT}" \
   --revision "${MILESTONE_REVISION}" \
   --owner "${DELIVERY_OWNER}" \
   --ttl "${UNITARES_AUTO_CHECKIN_CLAIM_TTL_S:-30}" \
@@ -300,6 +302,7 @@ _release_delivery_claim() {
   python3 "${SESSION_CACHE_HELPER}" \
     release-milestone-delivery \
     --workspace "${PWD}" \
+    --slot "${SLOT}" \
     --owner "${DELIVERY_OWNER}" >/dev/null 2>&1 || true
 }
 trap _release_delivery_claim EXIT
@@ -328,6 +331,7 @@ fi
 python3 "${SESSION_CACHE_HELPER}" \
   reset-milestone \
   --workspace "${PWD}" \
+  --slot "${SLOT}" \
   --expected-revision "${MILESTONE_REVISION}" >/dev/null 2>&1 || true
 
 NOW_EPOCH=$(python3 -c "import time; print(int(time.time()))")

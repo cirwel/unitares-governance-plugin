@@ -257,13 +257,20 @@ def _load_payload(args: argparse.Namespace) -> dict[str, Any]:
 
 def cmd_path(args: argparse.Namespace) -> int:
     workspace = _workspace_path(args.workspace)
-    print(_cache_path(args.kind, workspace, getattr(args, "slot", None)))
+    if args.kind == "milestone":
+        print(_milestone_path(workspace, getattr(args, "slot", None)))
+    else:
+        print(_cache_path(args.kind, workspace, getattr(args, "slot", None)))
     return 0
 
 
 def cmd_get(args: argparse.Namespace) -> int:
     workspace = _workspace_path(args.workspace)
-    payload = _read_json(_cache_path(args.kind, workspace, getattr(args, "slot", None)))
+    if args.kind == "milestone":
+        path = _milestone_path(workspace, getattr(args, "slot", None))
+    else:
+        path = _cache_path(args.kind, workspace, getattr(args, "slot", None))
+    payload = _read_json(path)
     if args.key:
         value = payload.get(args.key)
         if value is None:
@@ -299,7 +306,11 @@ def cmd_set(args: argparse.Namespace) -> int:
         )
         return 2
 
-    path = _cache_path(args.kind, workspace, slot)
+    path = (
+        _milestone_path(workspace, slot)
+        if args.kind == "milestone"
+        else _cache_path(args.kind, workspace, slot)
+    )
     payload = _load_payload(args)
     if args.kind == "milestone":
         with _milestone_lock(path):
@@ -550,18 +561,53 @@ def cmd_list(args: argparse.Namespace) -> int:
 MILESTONE_FILE_CAP = 20
 
 
-def _milestone_snapshot_path(workspace: Path, event_id: str) -> Path:
+def _milestone_scope(workspace: Path, slot: str) -> str:
+    workspace_digest = hashlib.sha256(str(workspace).encode("utf-8")).hexdigest()[:16]
+    slot_digest = hashlib.sha256(slot.encode("utf-8")).hexdigest()[:16]
+    return f"{workspace_digest}-{slot_digest}"
+
+
+def _milestone_path(workspace: Path, slot: str | None = None) -> Path:
+    safe_slot = _slot_suffix(slot)
+    if not safe_slot:
+        return _cache_path("milestone", workspace)
+    return Path.home() / CACHE_DIR / f"milestone-{_milestone_scope(workspace, safe_slot)}.json"
+
+
+def _milestone_snapshot_directory(workspace: Path, slot: str | None = None) -> Path:
+    if _slot_suffix(slot):
+        return Path.home() / CACHE_DIR / "milestone-snapshots"
+    return workspace / CACHE_DIR / "milestone-snapshots"
+
+
+def _milestone_snapshot_path(
+    workspace: Path,
+    event_id: str,
+    slot: str | None = None,
+) -> Path:
     digest = hashlib.sha256(event_id.encode("utf-8")).hexdigest()[:24]
-    return workspace / CACHE_DIR / "milestone-snapshots" / f"{digest}.json"
+    safe_slot = _slot_suffix(slot)
+    if safe_slot:
+        digest = f"{_milestone_scope(workspace, safe_slot)}-{digest}"
+    return _milestone_snapshot_directory(workspace, slot) / f"{digest}.json"
 
 
 def _session_snapshot_path(workspace: Path, event_id: str) -> Path:
+    del workspace
     digest = hashlib.sha256(event_id.encode("utf-8")).hexdigest()[:24]
-    return workspace / CACHE_DIR / "session-snapshots" / f"{digest}.json"
+    return Path.home() / CACHE_DIR / "session-snapshots" / f"{digest}.json"
 
 
-def _milestone_delivery_claim_path(workspace: Path) -> Path:
-    return workspace / CACHE_DIR / "milestone-delivery-claim.json"
+def _milestone_delivery_claim_path(
+    workspace: Path,
+    slot: str | None = None,
+) -> Path:
+    safe_slot = _slot_suffix(slot)
+    if not safe_slot:
+        return workspace / CACHE_DIR / "milestone-delivery-claim.json"
+    return Path.home() / CACHE_DIR / (
+        f"milestone-delivery-{_milestone_scope(workspace, safe_slot)}.json"
+    )
 
 
 def _snapshot_created_epoch(path: Path, payload: dict[str, Any]) -> float:
@@ -585,7 +631,8 @@ def _prune_session_snapshots(
     *,
     now: float | None = None,
 ) -> int:
-    directory = workspace / CACHE_DIR / "session-snapshots"
+    del workspace
+    directory = Path.home() / CACHE_DIR / "session-snapshots"
     if not directory.is_dir():
         return 0
     cutoff = (time.time() if now is None else now) - DEFAULT_SESSION_SNAPSHOT_MAX_AGE_S
@@ -653,10 +700,11 @@ def cmd_discard_session_snapshot(args: argparse.Namespace) -> int:
 def _prune_milestone_snapshots(
     workspace: Path,
     *,
+    slot: str | None = None,
     now: float | None = None,
 ) -> int:
     """Remove stale tool snapshots without touching another live session."""
-    directory = workspace / CACHE_DIR / "milestone-snapshots"
+    directory = _milestone_snapshot_directory(workspace, slot)
     if not directory.is_dir():
         return 0
     cutoff = (time.time() if now is None else now) - DEFAULT_MILESTONE_SNAPSHOT_MAX_AGE_S
@@ -672,8 +720,9 @@ def _prune_milestone_snapshots(
 def cmd_claim_milestone_delivery(args: argparse.Namespace) -> int:
     """Claim the single in-flight auto-checkin delivery slot for a workspace."""
     workspace = _workspace_path(args.workspace)
-    milestone_path = _cache_path("milestone", workspace)
-    claim_path = _milestone_delivery_claim_path(workspace)
+    slot = getattr(args, "slot", None)
+    milestone_path = _milestone_path(workspace, slot)
+    claim_path = _milestone_delivery_claim_path(workspace, slot)
     now = time.time()
     # checkin.py's edit delivery can use its full 20-second HTTP timeout. Keep
     # the claim alive beyond that transport budget so a slow accepted response
@@ -715,8 +764,9 @@ def cmd_claim_milestone_delivery(args: argparse.Namespace) -> int:
 def cmd_release_milestone_delivery(args: argparse.Namespace) -> int:
     """Release an auto-checkin delivery claim only when its owner matches."""
     workspace = _workspace_path(args.workspace)
-    milestone_path = _cache_path("milestone", workspace)
-    claim_path = _milestone_delivery_claim_path(workspace)
+    slot = getattr(args, "slot", None)
+    milestone_path = _milestone_path(workspace, slot)
+    claim_path = _milestone_delivery_claim_path(workspace, slot)
 
     with _milestone_lock(milestone_path):
         existing = _read_json(claim_path)
@@ -734,10 +784,14 @@ def cmd_snapshot_milestone(args: argparse.Namespace) -> int:
     if not args.slot.strip():
         raise ValueError("snapshot-milestone requires a non-empty --slot")
     workspace = _workspace_path(args.workspace)
-    milestone_path = _cache_path("milestone", workspace)
-    snapshot_path = _milestone_snapshot_path(workspace, args.event_id)
+    milestone_path = _milestone_path(workspace, args.slot)
+    snapshot_path = _milestone_snapshot_path(
+        workspace,
+        args.event_id,
+        getattr(args, "slot", None),
+    )
     with _milestone_lock(milestone_path):
-        _prune_milestone_snapshots(workspace)
+        _prune_milestone_snapshots(workspace, slot=args.slot)
         existing = _read_json(milestone_path)
         snapshot = {
             "schema_version": 1,
@@ -755,7 +809,7 @@ def cmd_snapshot_milestone(args: argparse.Namespace) -> int:
 def cmd_discard_milestone_snapshot(args: argparse.Namespace) -> int:
     """Discard a tool-scoped snapshot without acknowledging its edits."""
     workspace = _workspace_path(args.workspace)
-    snapshot_path = _milestone_snapshot_path(workspace, args.event_id)
+    snapshot_path = _milestone_snapshot_path(workspace, args.event_id, args.slot)
     snapshot = _read_json(snapshot_path)
     if snapshot.get("event_id") == args.event_id:
         snapshot_path.unlink(missing_ok=True)
@@ -765,8 +819,8 @@ def cmd_discard_milestone_snapshot(args: argparse.Namespace) -> int:
 def cmd_discard_milestone_snapshots(args: argparse.Namespace) -> int:
     """Discard only snapshots owned by one exact host session slot."""
     workspace = _workspace_path(args.workspace)
-    milestone_path = _cache_path("milestone", workspace)
-    directory = workspace / CACHE_DIR / "milestone-snapshots"
+    milestone_path = _milestone_path(workspace, args.slot)
+    directory = _milestone_snapshot_directory(workspace, args.slot)
     removed = 0
     with _milestone_lock(milestone_path):
         if directory.is_dir():
@@ -775,7 +829,7 @@ def cmd_discard_milestone_snapshots(args: argparse.Namespace) -> int:
                     continue
                 path.unlink(missing_ok=True)
                 removed += 1
-        _prune_milestone_snapshots(workspace)
+        _prune_milestone_snapshots(workspace, slot=args.slot)
     if args.echo:
         print(json.dumps({"removed": removed}))
     return 0
@@ -790,7 +844,7 @@ def cmd_bump_edit(args: argparse.Namespace) -> int:
     timestamp) are preserved so existing readers keep working.
     """
     workspace = _workspace_path(args.workspace)
-    path = _cache_path("milestone", workspace)
+    path = _milestone_path(workspace, getattr(args, "slot", None))
     with _milestone_lock(path):
         existing = _read_json(path)
 
@@ -838,13 +892,18 @@ def cmd_bump_edit(args: argparse.Namespace) -> int:
 def cmd_reset_milestone(args: argparse.Namespace) -> int:
     """Reset edits acknowledged by a check-in unless a newer bump landed."""
     workspace = _workspace_path(args.workspace)
-    path = _cache_path("milestone", workspace)
+    slot = getattr(args, "slot", None)
+    path = _milestone_path(workspace, slot)
     with _milestone_lock(path):
         existing = _read_json(path)
         expected_revision = getattr(args, "expected_revision", None)
         snapshot_id = getattr(args, "snapshot_id", None)
         if snapshot_id:
-            snapshot_path = _milestone_snapshot_path(workspace, snapshot_id)
+            snapshot_path = _milestone_snapshot_path(
+                workspace,
+                snapshot_id,
+                slot,
+            )
             snapshot = _read_json(snapshot_path)
             snapshot_path.unlink(missing_ok=True)
             if snapshot.get("event_id") == snapshot_id and isinstance(
@@ -956,6 +1015,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Append an edit event to the milestone accumulator",
     )
     p_bump.add_argument("--workspace")
+    p_bump.add_argument("--slot")
     p_bump.add_argument("--file-path", action="append", default=[])
     p_bump.add_argument("--file-paths-json", default="")
     p_bump.add_argument("--echo", action="store_true")
@@ -966,6 +1026,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Claim the workspace auto-checkin delivery slot",
     )
     p_claim_delivery.add_argument("--workspace")
+    p_claim_delivery.add_argument("--slot")
     p_claim_delivery.add_argument("--revision", type=int, required=True)
     p_claim_delivery.add_argument("--owner", required=True)
     p_claim_delivery.add_argument(
@@ -981,6 +1042,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Release the matching workspace auto-checkin delivery claim",
     )
     p_release_delivery.add_argument("--workspace")
+    p_release_delivery.add_argument("--slot")
     p_release_delivery.add_argument("--owner", required=True)
     p_release_delivery.add_argument("--echo", action="store_true")
     p_release_delivery.set_defaults(func=cmd_release_milestone_delivery)
@@ -1000,6 +1062,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Discard a failed check-in's revision snapshot without resetting edits",
     )
     p_discard_snapshot.add_argument("--workspace")
+    p_discard_snapshot.add_argument("--slot")
     p_discard_snapshot.add_argument("--event-id", required=True)
     p_discard_snapshot.set_defaults(func=cmd_discard_milestone_snapshot)
 
@@ -1017,6 +1080,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Reset the milestone accumulator after a check-in",
     )
     p_reset.add_argument("--workspace")
+    p_reset.add_argument("--slot")
     p_reset.add_argument(
         "--expected-revision",
         type=int,

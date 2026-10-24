@@ -257,6 +257,103 @@ def test_concurrent_ensure_session_is_single_flight(
     }
 
 
+def test_workspace_session_mirror_cannot_override_protected_binding(
+    tmp_path: Path,
+    fake_server: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+    sidecar = _sidecar(tmp_path, fake_server)
+    sidecar.write_session(
+        "slot-a",
+        {
+            "schema_version": 2,
+            "slot": "slot-a",
+            "uuid": "protected-uuid",
+            "client_session_id": "agent-protected",
+        },
+    )
+    workspace_cache = tmp_path / ".unitares" / "session-slot-a.json"
+    workspace_cache.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "slot": "slot-a",
+                "uuid": "attacker-uuid",
+                "client_session_id": "agent-attacker",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = sidecar.ensure_session("slot-a")
+
+    assert result["status"] == "cached"
+    assert result["client_session_id"] == "agent-protected"
+    assert json.loads(workspace_cache.read_text(encoding="utf-8"))["uuid"] == "protected-uuid"
+    assert FakeGovernanceHandler.calls == []
+
+
+def test_missing_workspace_mirror_is_restored_from_protected_binding(
+    tmp_path: Path,
+    fake_server: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+    sidecar = _sidecar(tmp_path, fake_server)
+    sidecar.write_session(
+        "slot-a",
+        {
+            "schema_version": 2,
+            "slot": "slot-a",
+            "uuid": "protected-uuid",
+            "client_session_id": "agent-protected",
+        },
+    )
+    workspace_cache = tmp_path / ".unitares" / "session-slot-a.json"
+    workspace_cache.unlink()
+
+    result = sidecar.ensure_session("slot-a")
+
+    assert result["status"] == "cached"
+    assert result["client_session_id"] == "agent-protected"
+    assert json.loads(workspace_cache.read_text(encoding="utf-8"))["uuid"] == "protected-uuid"
+    assert FakeGovernanceHandler.calls == []
+
+
+def test_invalid_existing_protected_binding_requires_explicit_clear(
+    tmp_path: Path,
+    fake_server: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_home = tmp_path / "home"
+    protected = fake_home / ".unitares" / "session-slot-a.json"
+    protected.parent.mkdir(parents=True)
+    protected.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "slot": "wrong-slot",
+                "uuid": "stale",
+                "client_session_id": "agent-stale",
+            }
+        ),
+        encoding="utf-8",
+    )
+    protected.chmod(0o600)
+    monkeypatch.setenv("HOME", str(fake_home))
+    sidecar = _sidecar(tmp_path, fake_server)
+
+    result = sidecar.ensure_session("slot-a")
+
+    assert result["status"] == "invalid_protected_binding"
+    assert FakeGovernanceHandler.calls == []
+
+
 def test_clear_supersedes_inflight_sidecar_identity_response(
     tmp_path: Path,
     fake_server: str,
@@ -303,6 +400,17 @@ def test_clear_supersedes_inflight_sidecar_identity_response(
     assert result[0][0] == 200
     assert sidecar.read_session("slot-a") == {}
     assert not (fake_home / ".unitares" / "session-slot-a.json").exists()
+
+
+@pytest.mark.parametrize("host", ["0.0.0.0", "192.0.2.10", "example.com"])
+def test_standalone_sidecar_rejects_non_loopback_host(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    host: str,
+) -> None:
+    monkeypatch.setenv("UNITARES_SIDECAR_CAPABILITY", "test-capability")
+    with pytest.raises(SystemExit, match="2"):
+        identity_sidecar.main(["--host", host, "--workspace", str(tmp_path)])
 
 
 def test_turn_checkin_lazy_onboards_then_sends_real_checkin(tmp_path: Path, fake_server: str) -> None:

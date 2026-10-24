@@ -14,6 +14,7 @@ from tests.test_session_start_checkin import RecordingHandler, _ReusableTCPServe
 
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+SESSION_CACHE = PLUGIN_ROOT / "scripts" / "session_cache.py"
 
 
 def _env(workspace: Path, port: int) -> dict[str, str]:
@@ -42,6 +43,26 @@ def _seed_session(workspace: Path, slot: str) -> None:
         )
     )
     (state / f"session-{slot}.json").chmod(0o600)
+
+
+def _read_milestone(workspace: Path, slot: str) -> dict:
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SESSION_CACHE),
+            "get",
+            "milestone",
+            "--workspace",
+            str(workspace),
+            "--slot",
+            slot,
+        ],
+        env={**_env(workspace, 1)},
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    return json.loads(result.stdout)
 
 
 def test_codex_post_edit_is_local_only_and_records_all_patch_paths(tmp_path: Path):
@@ -94,7 +115,7 @@ def test_codex_post_edit_is_local_only_and_records_all_patch_paths(tmp_path: Pat
         thread.join(timeout=2)
 
     assert result.returncode == 0, result.stderr
-    milestone = json.loads((tmp_path / ".unitares" / "last-milestone.json").read_text())
+    milestone = _read_milestone(tmp_path, slot)
     assert milestone["edit_count"] == 1
     assert milestone["files_touched"] == ["src/a.py", "src/b.py"]
     assert not [call for call in RecordingHandler.calls if call.get("name") == "process_agent_update"]
@@ -205,7 +226,7 @@ def test_codex_first_turn_edit_records_milestone_without_identity_cache(tmp_path
     )
 
     assert result.returncode == 0, result.stderr
-    milestone = json.loads((tmp_path / ".unitares" / "last-milestone.json").read_text())
+    milestone = _read_milestone(tmp_path, "codex-first-turn")
     assert milestone["edit_count"] == 1
     assert milestone["files_touched"] == ["src/first.py"]
     assert not list((tmp_path / ".unitares").glob("session-*.json"))
@@ -237,7 +258,7 @@ def test_codex_explicit_failed_post_edit_does_not_record_milestone(tmp_path: Pat
     )
 
     assert result.returncode == 0, result.stderr
-    assert not (tmp_path / ".unitares" / "last-milestone.json").exists()
+    assert _read_milestone(tmp_path, "codex-failed-edit") == {}
 
 
 def test_codex_stop_cleans_snapshot_using_canonicalized_session_slot(tmp_path: Path):
