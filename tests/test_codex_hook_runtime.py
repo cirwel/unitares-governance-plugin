@@ -135,31 +135,41 @@ def test_codex_post_edit_is_local_only_and_records_all_patch_paths(tmp_path: Pat
     assert all(payload["source_host"] == "codex" for payload in watcher_payloads)
 
 
-def test_codex_release_handler_does_not_depend_on_session_cache(tmp_path: Path):
+def test_codex_release_handler_does_not_depend_on_session_cache(
+    tmp_path: Path,
+    monkeypatch,
+):
     LeaseHandler.calls = []
     server = _ReusableTCPServer(("127.0.0.1", 0), LeaseHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     slot = "codex-release-slot"
     tool_use_id = "call_release_without_cache"
+    monkeypatch.setenv("HOME", str(tmp_path))
     state_path = file_lease_hook._state_path(tmp_path, slot, tool_use_id)
-    state_path.parent.mkdir()
-    state_path.write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "slot": slot,
-                "workspace": str(tmp_path),
-                "tool_use_id": tool_use_id,
-                "leases": {
-                    f"file://{tmp_path / 'src/a.py'}": {
-                        "lease_id": "lease-a",
-                        "path": "src/a.py",
-                        "surface_id": f"file://{tmp_path / 'src/a.py'}",
-                    }
-                },
-            }
-        )
+    holder_uuid = "33333333-3333-4333-8333-333333333333"
+    surface = f"file://{tmp_path / 'src/a.py'}"
+    file_lease_hook._save_state(
+        tmp_path,
+        slot,
+        {
+            "version": file_lease_hook.STATE_VERSION,
+            "slot": slot,
+            "workspace": str(tmp_path),
+            "tool_use_id": tool_use_id,
+            "holder_uuid": holder_uuid,
+            "leases": {
+                surface: {
+                    "lease_id": "lease-a",
+                    "path": "src/a.py",
+                    "surface_id": surface,
+                    "holder_uuid": holder_uuid,
+                    "tool_use_id": tool_use_id,
+                }
+            },
+        },
+        tool_use_id,
+        token="lease-token",
     )
     payload = {
         "hook_event_name": "PostToolUse",

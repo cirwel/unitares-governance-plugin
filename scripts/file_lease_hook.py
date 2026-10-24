@@ -12,8 +12,10 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import hmac
 import json
 import os
+import stat
 import sys
 import tempfile
 import threading
@@ -55,7 +57,7 @@ _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 # died before release-edit ran). A short TTL means even that orphan self-heals
 # fast via the reaper. Overridable via UNITARES_FILE_LEASE_TTL_S.
 DEFAULT_TTL_S = 30
-STATE_VERSION = 1
+STATE_VERSION = 2
 DEFAULT_BATCH_TIMEOUT_S = 3.5
 
 
@@ -97,8 +99,18 @@ def _legacy_state_path(workspace: Path, slot: str, tool_use_id: str = "") -> Pat
 
 
 def _state_path(workspace: Path, slot: str, tool_use_id: str = "") -> Path:
+    """Return the owner-private authority path; workspace JSON is never proof."""
+    workspace_key = hashlib.sha256(
+        str(workspace.resolve()).encode("utf-8")
+    ).hexdigest()[:20]
     edit_suffix = f"-edit-{_edit_key(tool_use_id)}" if tool_use_id else ""
-    return workspace / ".unitares" / f"file-leases-{_slot_key(slot)}{edit_suffix}.json"
+    return (
+        Path.home().resolve()
+        / ".unitares"
+        / "file-lease-state"
+        / workspace_key
+        / f"file-leases-{_slot_key(slot)}{edit_suffix}.json"
+    )
 
 
 def _state_paths(
@@ -107,7 +119,7 @@ def _state_paths(
     *,
     deadline: float | None = None,
 ) -> list[Path]:
-    directory = workspace / ".unitares"
+    directory = _state_path(workspace, slot).parent
     if not directory.is_dir():
         return []
     paths: list[Path] = []
@@ -125,17 +137,13 @@ def _state_paths(
             seen.add(path)
         return True
 
-    for path in (
-        _state_path(workspace, slot),
-        _legacy_state_path(workspace, slot),
-    ):
+    for path in (_state_path(workspace, slot),):
         if not add_if_owned(path):
             _debug("state discovery deadline reached; TTL cleanup remains")
             return paths
 
     edit_prefixes = (
         f"file-leases-{_slot_key(slot)}-edit-",
-        f"file-leases-{_safe_slot(slot)}-edit-",
     )
     try:
         entries = os.scandir(directory)
@@ -167,8 +175,94 @@ def _read_json(path: Path) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+def _read_protected_state(path: Path) -> dict[str, Any]:
+    """Read authority-bearing state only from an owner-private regular file."""
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return {}
+    getuid = getattr(os, "getuid", None)
+    if not stat.S_ISREG(info.st_mode):
+        return {}
+    if os.name != "nt" and (
+        info.st_mode & 0o077 or (callable(getuid) and info.st_uid != getuid())
+    ):
+        return {}
+    return _read_json(path)
+
+
+def _state_mac(state: dict[str, Any], token: str) -> str:
+    authenticated = {key: value for key, value in state.items() if key != "integrity"}
+    canonical = json.dumps(
+        authenticated,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    key = hashlib.sha256(
+        b"unitares:file-lease-state:v2\0" + token.encode("utf-8")
+    ).digest()
+    return hmac.new(key, canonical, hashlib.sha256).hexdigest()
+
+
+def _state_has_valid_mac(state: dict[str, Any], token: str) -> bool:
+    supplied = state.get("integrity")
+    return (
+        isinstance(supplied, str)
+        and len(supplied) == 64
+        and bool(token)
+        and hmac.compare_digest(supplied, _state_mac(state, token))
+    )
+
+
+def _state_is_bound(
+    state: dict[str, Any],
+    *,
+    workspace: Path,
+    slot: str,
+    tool_use_id: str | None = None,
+) -> bool:
+    """Validate the release authority's complete holder/event binding."""
+    if (
+        state.get("version") != STATE_VERSION
+        or state.get("slot") != slot
+        or state.get("workspace") != str(workspace.resolve())
+    ):
+        return False
+    state_tool_use_id = state.get("tool_use_id")
+    if not isinstance(state_tool_use_id, str):
+        return False
+    if tool_use_id is not None and state_tool_use_id != tool_use_id:
+        return False
+    holder_uuid = state.get("holder_uuid")
+    if not isinstance(holder_uuid, str) or not holder_uuid.strip():
+        return False
+    leases = state.get("leases")
+    if not isinstance(leases, dict):
+        return False
+    for surface, row in leases.items():
+        if (
+            not isinstance(surface, str)
+            or not surface.startswith("file://")
+            or not isinstance(row, dict)
+            or row.get("surface_id") != surface
+            or row.get("holder_uuid") != holder_uuid
+            or row.get("tool_use_id") != state_tool_use_id
+            or not isinstance(row.get("path"), str)
+            or not row.get("path")
+            or not isinstance(row.get("lease_id"), str)
+            or not row.get("lease_id")
+        ):
+            return False
+    return True
+
+
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        path.parent.chmod(0o700)
+    except OSError:
+        pass
     data = json.dumps(payload, sort_keys=True).encode("utf-8")
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
     try:
@@ -510,37 +604,34 @@ def _surface_id(
     return f"file://{p}"
 
 
-def _load_state(workspace: Path, slot: str, tool_use_id: str = "") -> dict[str, Any]:
+def _load_state(
+    workspace: Path,
+    slot: str,
+    tool_use_id: str = "",
+    *,
+    token: str,
+) -> dict[str, Any]:
     path = _state_path(workspace, slot, tool_use_id)
-    legacy_path = _legacy_state_path(workspace, slot, tool_use_id)
-    data: dict[str, Any] = {}
-    source: Path | None = None
     if path.is_file():
-        source = path
-        data = _read_json(path)
-    elif legacy_path.is_file():
-        legacy = _read_json(legacy_path)
-        if legacy.get("slot") == slot:
-            source = legacy_path
-            data = legacy
-    if source is None:
-        return {
-            "version": STATE_VERSION,
-            "slot": slot,
-            "workspace": str(workspace),
-            "tool_use_id": tool_use_id,
-            "holder_uuid": "",
-            "leases": {},
-        }
-    if not data or data.get("version") != STATE_VERSION:
-        version = data.get("version") if isinstance(data, dict) else None
-        raise UnsupportedLeaseStateError(
-            f"unsupported or unreadable lease state at {source} (version={version!r})"
-        )
-    leases = data.get("leases")
-    if not isinstance(leases, dict):
-        data["leases"] = {}
-    return data
+        data = _read_protected_state(path)
+        if not _state_has_valid_mac(data, token) or not _state_is_bound(
+            data,
+            workspace=workspace,
+            slot=slot,
+            tool_use_id=tool_use_id,
+        ):
+            raise UnsupportedLeaseStateError(
+                f"untrusted or ownership-mismatched lease state at {path}"
+            )
+        return data
+    return {
+        "version": STATE_VERSION,
+        "slot": slot,
+        "workspace": str(workspace.resolve()),
+        "tool_use_id": tool_use_id,
+        "holder_uuid": "",
+        "leases": {},
+    }
 
 
 def _holder_uuid(workspace: Path, event: EditHookEvent, state: dict[str, Any]) -> str:
@@ -568,12 +659,21 @@ def _save_state(
     slot: str,
     state: dict[str, Any],
     tool_use_id: str = "",
+    *,
+    token: str,
 ) -> None:
     path = _state_path(workspace, slot, tool_use_id)
+    if not _state_is_bound(
+        state,
+        workspace=workspace,
+        slot=slot,
+        tool_use_id=tool_use_id,
+    ):
+        raise UnsupportedLeaseStateError(
+            "refusing to persist lease state without exact holder/event/surface binding"
+        )
+    state["integrity"] = _state_mac(state, token)
     _write_json(path, state)
-    legacy = _legacy_state_path(workspace, slot, tool_use_id)
-    if legacy != path:
-        legacy.unlink(missing_ok=True)
 
 
 def _block(message: str) -> int:
@@ -680,16 +780,16 @@ def _persist_or_remove_state(
     slot: str,
     state: dict[str, Any],
     tool_use_id: str = "",
+    *,
+    token: str,
 ) -> None:
     leases = state.get("leases")
     if isinstance(leases, dict) and leases:
-        _save_state(workspace, slot, state, tool_use_id)
+        _save_state(workspace, slot, state, tool_use_id, token=token)
     else:
         _state_path(workspace, slot, tool_use_id).unlink(missing_ok=True)
-        _legacy_state_path(workspace, slot, tool_use_id).unlink(missing_ok=True)
         if tool_use_id:
             _remove_edit_lock_sidecar(_state_path(workspace, slot, tool_use_id))
-            _remove_edit_lock_sidecar(_legacy_state_path(workspace, slot, tool_use_id))
 
 
 def _remove_edit_lock_sidecar(state_path: Path) -> None:
@@ -740,7 +840,7 @@ def _rollback_batch_leases(
             leases.pop(key, None)
         else:
             _debug(f"rollback release failed for {key}: {result.get('error')}")
-    _persist_or_remove_state(workspace, slot, state, tool_use_id)
+    _persist_or_remove_state(workspace, slot, state, tool_use_id, token=token)
 
 
 def _cmd_pre_edit_locked(args: argparse.Namespace, stdin_text: str) -> int:
@@ -765,7 +865,12 @@ def _cmd_pre_edit_locked(args: argparse.Namespace, stdin_text: str) -> int:
         return _fail_open_or_block("missing LEASE_PLANE_BEARER_TOKEN")
 
     try:
-        state = _load_state(workspace, payload.session_id, payload.tool_use_id)
+        state = _load_state(
+            workspace,
+            payload.session_id,
+            payload.tool_use_id,
+            token=token,
+        )
     except UnsupportedLeaseStateError as exc:
         return _fail_open_or_block(str(exc))
     holder_uuid = _holder_uuid(workspace, payload, state)
@@ -880,7 +985,13 @@ def _cmd_pre_edit_locked(args: argparse.Namespace, stdin_text: str) -> int:
             heartbeat = _heartbeat(token, str(existing["lease_id"]), timeout_s=timeout_s)
             if heartbeat.get("ok") is True:
                 existing["last_heartbeat_at"] = time.time()
-                _save_state(workspace, payload.session_id, state, payload.tool_use_id)
+                _save_state(
+                    workspace,
+                    payload.session_id,
+                    state,
+                    payload.tool_use_id,
+                    token=token,
+                )
                 continue
             if heartbeat.get("error") not in {"not_found", "expired"}:
                 rollback()
@@ -933,7 +1044,13 @@ def _cmd_pre_edit_locked(args: argparse.Namespace, stdin_text: str) -> int:
             if key not in rollback_keys:
                 rollback_keys.append(key)
             try:
-                _save_state(workspace, payload.session_id, state, payload.tool_use_id)
+                _save_state(
+                    workspace,
+                    payload.session_id,
+                    state,
+                    payload.tool_use_id,
+                    token=token,
+                )
             except Exception as exc:
                 rollback()
                 return _fail_open_or_block(
@@ -995,6 +1112,7 @@ def cmd_heartbeat_session(args: argparse.Namespace, stdin_text: str) -> int:
 def _release_state_file(
     state_path: Path,
     *,
+    workspace: Path,
     token: str,
     deadline: float,
     expected_slot: str | None = None,
@@ -1015,18 +1133,15 @@ def _release_state_file(
         with session_cache_lock(state_path, timeout_s=lock_timeout):
             if not state_path.is_file():
                 return False
-            state = _read_json(state_path)
-            if state.get("version") != STATE_VERSION:
-                _debug(f"release preserved unsupported state: {state_path}")
-                return False
-            if expected_slot is not None and state.get("slot") != expected_slot:
-                _debug(f"release preserved slot-mismatched state: {state_path}")
-                return False
-            if (
-                expected_tool_use_id is not None
-                and state.get("tool_use_id") != expected_tool_use_id
+            state = _read_protected_state(state_path)
+            slot = expected_slot or str(state.get("slot") or "")
+            if not _state_has_valid_mac(state, token) or not _state_is_bound(
+                state,
+                workspace=workspace,
+                slot=slot,
+                tool_use_id=expected_tool_use_id,
             ):
-                _debug(f"release preserved tool-mismatched state: {state_path}")
+                _debug(f"release preserved untrusted or mismatched state: {state_path}")
                 return False
             leases = state.get("leases")
             deadline_reached = False
@@ -1085,6 +1200,7 @@ def cmd_release_session(args: argparse.Namespace, stdin_text: str) -> int:
             break
         if _release_state_file(
             state_path,
+            workspace=workspace,
             token=token,
             deadline=deadline,
             expected_slot=session_id,
@@ -1127,33 +1243,16 @@ def _cmd_release_edit_locked(args: argparse.Namespace, stdin_text: str) -> int:
         return 0
     state_tool_use_id = payload.tool_use_id
     try:
-        state = _load_state(workspace, payload.session_id, state_tool_use_id)
+        state = _load_state(
+            workspace,
+            payload.session_id,
+            state_tool_use_id,
+            token=token,
+        )
     except UnsupportedLeaseStateError as exc:
         _debug(f"release-edit preserved state: {exc}")
         return 0
     leases = state.get("leases")
-    if not isinstance(leases, dict) or not leases:
-        # Hot-upgrade compatibility: an edit acquired under the old
-        # session-wide state contract may complete after this version installs.
-        for legacy_path in (
-            _state_path(workspace, payload.session_id),
-            _legacy_state_path(workspace, payload.session_id),
-        ):
-            legacy = _read_json(legacy_path)
-            legacy_leases = legacy.get("leases")
-            if (
-                legacy.get("version") == STATE_VERSION
-                and legacy.get("slot") == payload.session_id
-                and isinstance(legacy_leases, dict)
-                and any(
-                    isinstance(row, dict) and row.get("path") in payload.paths
-                    for row in legacy_leases.values()
-                )
-            ):
-                state = legacy
-                leases = legacy_leases
-                state_tool_use_id = ""
-                break
     if not isinstance(leases, dict) or not leases:
         return 0
     release_budget = min(_batch_timeout_s(), 1.5) if args.host == "codex" else _batch_timeout_s()
@@ -1205,6 +1304,7 @@ def _cmd_release_edit_locked(args: argparse.Namespace, stdin_text: str) -> int:
         payload.session_id,
         state,
         state_tool_use_id,
+        token=token,
     )
     return 0
 
@@ -1269,12 +1369,10 @@ def cmd_release_batch(args: argparse.Namespace, stdin_text: str) -> int:
         if time.monotonic() >= deadline:
             _debug("release-batch deadline reached; SessionEnd/TTL cleanup remains")
             break
-        for state_path in (
-            _state_path(workspace, session_id, tool_use_id),
-            _legacy_state_path(workspace, session_id, tool_use_id),
-        ):
+        for state_path in (_state_path(workspace, session_id, tool_use_id),):
             if _release_state_file(
                 state_path,
+                workspace=workspace,
                 token=token,
                 deadline=deadline,
                 expected_slot=session_id,
