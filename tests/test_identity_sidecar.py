@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import socket
 import threading
 import urllib.request
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from socketserver import TCPServer
 
@@ -19,14 +20,18 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import identity_sidecar  # noqa: E402
 import session_cache  # noqa: E402
-from identity_sidecar import IdentitySidecar, make_handler  # noqa: E402
+from identity_sidecar import (  # noqa: E402
+    BoundedThreadingHTTPServer,
+    IdentitySidecar,
+    make_handler,
+)
 
 
 class _ReusableTCPServer(TCPServer):
     allow_reuse_address = True
 
 
-class _ReusableThreadingHTTPServer(ThreadingHTTPServer):
+class _ReusableThreadingHTTPServer(BoundedThreadingHTTPServer):
     allow_reuse_address = True
 
 
@@ -496,7 +501,10 @@ def test_http_client_config_returns_slot_scoped_mcp_snippet(tmp_path: Path, fake
     sidecar = _sidecar(tmp_path, fake_server)
     srv, thread, base_url = _serve_sidecar(sidecar)
     try:
-        status, payload = _http_get_json(f"{base_url}/client-config?slot=codex-local")
+        status, payload = _http_get_json(
+            f"{base_url}/client-config?slot=codex-local",
+            headers={"Authorization": f"Bearer {sidecar.capability_token}"},
+        )
     finally:
         _stop_server(srv, thread)
 
@@ -504,14 +512,17 @@ def test_http_client_config_returns_slot_scoped_mcp_snippet(tmp_path: Path, fake
     assert isinstance(payload, dict)
     assert payload["success"] is True
     assert payload["sidecar_url"] == base_url
-    assert payload["slot"] == "codex-local"
+    assert payload["slot"] == "slot-a"
     assert payload["transport"]["mcp"]["mode"] == "jsonrpc-http"
     assert payload["transport"]["mcp"]["url"] == f"{base_url}/mcp/"
     config = payload["mcp_config"]["mcpServers"]["unitares-governance-sidecar"]
     assert config == {
         "type": "url",
         "url": f"{base_url}/mcp/",
-        "headers": {"X-UNITARES-Slot": "codex-local"},
+        "headers": {
+            "Authorization": f"Bearer {sidecar.capability_token}",
+            "X-UNITARES-Slot": "slot-a",
+        },
     }
 
 
@@ -527,7 +538,10 @@ def test_http_mcp_route_lazy_onboards_and_injects_client_session_id(tmp_path: Pa
                 "method": "tools/call",
                 "params": {"name": "knowledge", "arguments": {"action": "search"}},
             },
-            headers={"X-UNITARES-Slot": "codex-http"},
+            headers={
+                "Authorization": f"Bearer {sidecar.capability_token}",
+                "X-UNITARES-Slot": "codex-http",
+            },
         )
     finally:
         _stop_server(srv, thread)
@@ -545,7 +559,7 @@ def test_http_mcp_route_lazy_onboards_and_injects_client_session_id(tmp_path: Pa
     visible = _mcp_text_payload(payload)
     assert visible["echo"]["action"] == "search"
     assert "client_session_id" not in visible["echo"]
-    cache = json.loads((tmp_path / ".unitares" / "session-codex-http.json").read_text())
+    cache = json.loads((tmp_path / ".unitares" / "session-slot-a.json").read_text())
     assert cache["client_session_id"] == "agent-sidecar-111"
     assert "continuity_token" not in cache
 
@@ -557,6 +571,7 @@ def test_http_session_start_hides_onboard_proof_material(tmp_path: Path, fake_se
         status, payload = _http_post_json(
             f"{base_url}/session/start",
             {"agent_name": "sidecar-agent", "slot": "codex-start"},
+            headers={"Authorization": f"Bearer {sidecar.capability_token}"},
         )
     finally:
         _stop_server(srv, thread)
@@ -568,3 +583,92 @@ def test_http_session_start_hides_onboard_proof_material(tmp_path: Path, fake_se
     assert "client_session_id" not in _json_text(payload)
     assert "continuity_token" not in _json_text(payload)
     assert "raw_governance" not in _json_text(payload)
+
+
+@pytest.mark.parametrize("path", ["/health", "/client-config", "/session", "/audit"])
+def test_every_get_route_requires_the_sidecar_capability(
+    tmp_path: Path, fake_server: str, path: str
+) -> None:
+    sidecar = _sidecar(tmp_path, fake_server)
+    srv, thread, base_url = _serve_sidecar(sidecar)
+    try:
+        with pytest.raises(urllib.error.HTTPError) as raised:
+            _http_get_json(f"{base_url}{path}")
+    finally:
+        _stop_server(srv, thread)
+    assert raised.value.code == 401
+
+
+def test_post_route_rejects_unauthenticated_governance_call(
+    tmp_path: Path, fake_server: str
+) -> None:
+    sidecar = _sidecar(tmp_path, fake_server)
+    srv, thread, base_url = _serve_sidecar(sidecar)
+    try:
+        with pytest.raises(urllib.error.HTTPError) as raised:
+            _http_post_json(
+                f"{base_url}/v1/tools/call",
+                {"name": "sync_state", "arguments": {"response_text": "forged"}},
+            )
+    finally:
+        _stop_server(srv, thread)
+    assert raised.value.code == 401
+    assert FakeGovernanceHandler.calls == []
+
+
+def test_post_rejects_oversize_body_before_json_parse(tmp_path: Path, fake_server: str) -> None:
+    sidecar = _sidecar(tmp_path, fake_server)
+    srv, thread, base_url = _serve_sidecar(sidecar)
+    try:
+        host, port_text = base_url.removeprefix("http://").split(":", 1)
+        with socket.create_connection((host, int(port_text)), timeout=5) as client:
+            client.sendall(
+                (
+                    "POST /v1/tools/call HTTP/1.1\r\n"
+                    f"Host: {host}:{port_text}\r\n"
+                    f"Authorization: Bearer {sidecar.capability_token}\r\n"
+                    f"Content-Length: {identity_sidecar.MAX_REQUEST_BYTES + 1}\r\n"
+                    "Connection: close\r\n\r\n"
+                ).encode("ascii")
+            )
+            response = client.recv(4096)
+    finally:
+        _stop_server(srv, thread)
+    assert b" 413 " in response
+
+
+def test_bounded_server_refuses_connections_above_worker_cap() -> None:
+    entered = threading.Event()
+    release = threading.Event()
+
+    class BlockingHandler(BaseHTTPRequestHandler):
+        def log_message(self, _fmt, *_args):  # pragma: no cover
+            return
+
+        def do_GET(self):  # noqa: N802
+            entered.set()
+            release.wait(timeout=5)
+            self.send_response(200)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+    server = BoundedThreadingHTTPServer(
+        ("127.0.0.1", 0), BlockingHandler, max_workers=1
+    )
+    serving = threading.Thread(target=server.serve_forever, daemon=True)
+    serving.start()
+    base_url = f"http://127.0.0.1:{server.server_address[1]}"
+    first = threading.Thread(
+        target=lambda: urllib.request.urlopen(f"{base_url}/hold", timeout=5).close(),
+        daemon=True,
+    )
+    first.start()
+    try:
+        assert entered.wait(timeout=2)
+        with pytest.raises(urllib.error.HTTPError) as raised:
+            urllib.request.urlopen(f"{base_url}/overflow", timeout=2)
+        assert raised.value.code == 503
+    finally:
+        release.set()
+        first.join(timeout=2)
+        _stop_server(server, serving)

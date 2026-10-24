@@ -193,12 +193,19 @@ For clients without lifecycle hooks, run the local identity sidecar and send
 governance REST tool calls through it:
 
 ```bash
+export UNITARES_SIDECAR_CAPABILITY="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
 python3 scripts/identity_sidecar.py \
   --server-url http://localhost:8767 \
   --workspace "$PWD" \
   --slot codex-local \
   --port 8768
 ```
+
+Every route, including `/health`, requires
+`Authorization: Bearer $UNITARES_SIDECAR_CAPABILITY`. The capability is bound
+to the sidecar's configured slot; request headers and bodies cannot switch the
+server to another slot. Run a separate sidecar with a separate capability for
+each concurrently managed process.
 
 Phase 1 is a dependency-free sidecar, not a full streamable-MCP/SSE
 implementation. It wraps REST `/v1/tools/call` and minimal JSON-RPC MCP
@@ -207,16 +214,16 @@ implementation. It wraps REST `/v1/tools/call` and minimal JSON-RPC MCP
 `force_new=true` for bare `onboard` / `start_session`, stamps the slot cache
 after check-ins, and exposes `GET /audit`. Useful endpoints:
 
-- `GET http://127.0.0.1:8768/client-config?slot=codex-local` for a generated MCP/client snippet
+- `GET http://127.0.0.1:8768/client-config` for an authenticated MCP/client snippet
 - `POST http://127.0.0.1:8768/v1/tools/call` with `{"name": "...", "arguments": {...}}`
 - `POST http://127.0.0.1:8768/mcp/` for JSON-RPC MCP requests; `tools/call` is intercepted and other JSON requests pass through
 - `POST http://127.0.0.1:8768/turn/checkin` with `response_text`, `complexity`, and an optional `confidence`. Omit `confidence` unless the caller is stating an agent-authored belief: the server mints a tactical prediction from any value supplied and scores it into the calibration curve, so a placeholder becomes a forecast nobody made.
 - `POST http://127.0.0.1:8768/turn/stop` for an end-of-turn check-in
 - `GET http://127.0.0.1:8768/audit?log_tail=200` for bounded local cache/log contract findings
 
-Use `X-UNITARES-Slot` or top-level `{"slot": "..."}` when one sidecar serves
-multiple clients. Without an explicit slot, the sidecar uses a workspace-derived
-default slot.
+Pass the bearer header on each request. The generated client snippet includes
+it and names the configured slot. If `--slot` is omitted, the sidecar uses a
+workspace-derived default slot.
 
 ### Plain CLI wrapper (`u-run`)
 
@@ -229,12 +236,13 @@ scripts/u-run --class goose -- goose run --recipe review.yaml
 
 The first `--` separates wrapper options from the child command. `u-run` then:
 
-1. reuses a healthy sidecar for the same workspace and upstream server, or
-   starts one and owns its cleanup;
+1. reuses a healthy sidecar only when `UNITARES_SIDECAR_CAPABILITY` proves the
+   existing process, or starts one with a fresh random capability and owns its cleanup;
 2. creates one unique slot (or uses an explicit `--slot`) and calls
    `/session/start` once, which writes `.unitares/session-<slot>.json`;
 3. exports `UNITARES_SERVER_URL`, `UNITARES_SIDECAR_URL`,
-   `UNITARES_SIDECAR_SLOT`, and `UNITARES_MODEL_TYPE` to the child;
+   `UNITARES_SIDECAR_SLOT`, `UNITARES_SIDECAR_CAPABILITY`, and
+   `UNITARES_MODEL_TYPE` to the child;
 4. forwards `SIGINT`, `SIGTERM`, and `SIGHUP` to the child process group and
    preserves the child's shell exit status; and
 5. submits one `/turn/stop` check-in from observed wall time and exit status,

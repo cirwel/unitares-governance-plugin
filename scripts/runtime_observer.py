@@ -54,7 +54,11 @@ from typing import Any, Callable
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from _http_auth import authorization_safe_urlopen, governance_json_headers  # noqa: E402
+from _http_auth import (  # noqa: E402
+    authorization_safe_urlopen,
+    governance_json_headers,
+    read_limited_response,
+)
 from _session_lookup import load_usable_session_for_hook  # noqa: E402
 from activity_observer import (  # noqa: E402
     _lock_timeout_s,
@@ -239,7 +243,7 @@ def _post_runtime(
     )
     try:
         with authorization_safe_urlopen(request, timeout=timeout) as response:
-            body = json.loads(response.read().decode("utf-8"))
+            body = json.loads(read_limited_response(response).decode("utf-8"))
         return bool(body.get("success"))
     except (urllib.error.URLError, UnicodeDecodeError, json.JSONDecodeError, OSError):
         return False

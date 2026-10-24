@@ -34,7 +34,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Optional, Tuple
 
-from _http_auth import authorization_safe_urlopen
+from _http_auth import authorization_safe_urlopen, read_limited_response
 from _session_cache_io import (
     home_session_mirror_is_valid,
     replace_session_cache,
@@ -182,7 +182,7 @@ def _post_json(url: str, payload: dict, timeout: float, token: str | None) -> di
         req.add_header("Authorization", f"Bearer {token}")
     try:
         with authorization_safe_urlopen(req, timeout=timeout) as resp:
-            raw = resp.read().decode("utf-8")
+            raw = read_limited_response(resp).decode("utf-8")
     except urllib.error.HTTPError as exc:
         return _failure_response(
             error=f"onboard HTTP request failed: {exc}",

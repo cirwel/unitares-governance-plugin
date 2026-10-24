@@ -31,9 +31,9 @@ except ImportError:  # Executed directly from an installed plugin.
     from edit_hook_event import EditHookEvent, EditHookPayloadError, normalize_edit_hook
 
 try:
-    from ._http_auth import authorization_safe_urlopen
+    from ._http_auth import authorization_safe_urlopen, read_limited_response
 except ImportError:  # Executed directly from an installed plugin.
-    from _http_auth import authorization_safe_urlopen
+    from _http_auth import authorization_safe_urlopen, read_limited_response
 
 try:
     from ._session_cache_io import session_cache_lock
@@ -359,9 +359,9 @@ def _http_json(
             request,
             timeout=_timeout_s() if timeout_s is None else max(0.05, timeout_s),
         ) as response:
-            raw = response.read()
+            raw = read_limited_response(response)
     except urllib.error.HTTPError as exc:
-        raw = exc.read()
+        raw = read_limited_response(exc)
     except Exception as exc:
         return {"ok": False, "error": "service_unavailable", "reason": type(exc).__name__}
 

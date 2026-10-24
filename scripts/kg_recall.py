@@ -18,7 +18,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from _http_auth import authorization_safe_urlopen, governance_json_headers
+from _http_auth import authorization_safe_urlopen, governance_json_headers, read_limited_response
 
 
 DEFAULT_SERVER_URL = "http://localhost:8767"
@@ -119,7 +119,7 @@ def search(
         method="POST",
     )
     with authorization_safe_urlopen(request, timeout=timeout_s) as response:
-        return _unwrap(json.loads(response.read().decode()))
+        return _unwrap(json.loads(read_limited_response(response).decode()))
 
 
 def _one_line(value: Any, *, limit: int) -> str:

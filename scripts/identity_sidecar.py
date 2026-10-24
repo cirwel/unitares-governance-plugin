@@ -21,9 +21,13 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import hmac
 import json
 import os
+import secrets
+import socket
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -38,7 +42,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from audit_identity_contract import audit_checkin_log, audit_session_caches, parse_since  # noqa: E402
 from checkin import _plugin_version, submit_checkin  # noqa: E402
 from governance_call_inject import INJECT_SUFFIXES, PROOF_FIELDS  # noqa: E402
-from _http_auth import authorization_safe_urlopen  # noqa: E402
+from _http_auth import authorization_safe_urlopen, read_limited_response  # noqa: E402
 from _redact import sanitize_model_visible_payload  # noqa: E402
 from onboard_helper import (  # noqa: E402
     CacheGenerationToken,
@@ -60,6 +64,52 @@ START_TOOL_NAMES = {"onboard", "start_session"}
 CHECKIN_TOOL_NAMES = {"process_agent_update", "sync_state"}
 DEFAULT_PORT = 8768
 DEFAULT_TIMEOUT = 20.0
+MAX_REQUEST_BYTES = 1024 * 1024
+CLIENT_SOCKET_TIMEOUT = 5.0
+MAX_REQUEST_WORKERS = 32
+
+
+class RequestBodyError(ValueError):
+    def __init__(self, status: int, message: str) -> None:
+        super().__init__(message)
+        self.status = status
+
+
+class BoundedThreadingHTTPServer(ThreadingHTTPServer):
+    """Threaded loopback server with a hard cap on active handlers."""
+
+    daemon_threads = True
+    allow_reuse_address = True
+    request_queue_size = 64
+
+    def __init__(self, *args: Any, max_workers: int = MAX_REQUEST_WORKERS, **kwargs: Any) -> None:
+        self._request_slots = threading.BoundedSemaphore(max(1, max_workers))
+        super().__init__(*args, **kwargs)
+
+    def process_request(self, request: Any, client_address: Any) -> None:
+        if not self._request_slots.acquire(blocking=False):
+            try:
+                try:
+                    request.sendall(
+                        b"HTTP/1.1 503 Service Unavailable\r\n"
+                        b"Connection: close\r\nContent-Length: 0\r\n\r\n"
+                    )
+                except OSError:
+                    pass
+            finally:
+                self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self._request_slots.release()
+            raise
+
+    def process_request_thread(self, request: Any, client_address: Any) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._request_slots.release()
 
 
 def _now_iso() -> str:
@@ -70,8 +120,14 @@ def _workspace_hash(workspace: Path) -> str:
     return hashlib.md5(str(workspace).encode("utf-8")).hexdigest()[:8]
 
 
-def _json_response(handler: BaseHTTPRequestHandler, status: int, payload: Any) -> None:
-    visible = sanitize_model_visible_payload(payload)
+def _json_response(
+    handler: BaseHTTPRequestHandler,
+    status: int,
+    payload: Any,
+    *,
+    sanitize: bool = True,
+) -> None:
+    visible = sanitize_model_visible_payload(payload) if sanitize else payload
     body = (json.dumps(visible, indent=2, sort_keys=True) + "\n").encode("utf-8")
     handler.send_response(status)
     handler.send_header("Content-Type", "application/json")
@@ -81,18 +137,29 @@ def _json_response(handler: BaseHTTPRequestHandler, status: int, payload: Any) -
 
 
 def _read_request_json(handler: BaseHTTPRequestHandler) -> Any:
-    raw_len = handler.headers.get("Content-Length") or "0"
+    raw_len = handler.headers.get("Content-Length")
+    if raw_len is None:
+        raise RequestBodyError(411, "Content-Length required")
     try:
-        length = max(0, int(raw_len))
+        length = int(raw_len)
     except ValueError:
-        length = 0
-    raw = handler.rfile.read(length) if length else b""
+        raise RequestBodyError(400, "invalid Content-Length") from None
+    if length < 0:
+        raise RequestBodyError(400, "invalid Content-Length")
+    if length > MAX_REQUEST_BYTES:
+        raise RequestBodyError(413, "request body too large")
+    try:
+        raw = handler.rfile.read(length) if length else b""
+    except (TimeoutError, socket.timeout):
+        raise RequestBodyError(408, "request body timed out") from None
+    if len(raw) != length:
+        raise RequestBodyError(400, "incomplete request body")
     if not raw:
         return {}
     try:
         data = json.loads(raw.decode("utf-8"))
-    except Exception:
-        return {}
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise RequestBodyError(400, "request body must be valid UTF-8 JSON") from None
     return data
 
 
@@ -127,8 +194,8 @@ def _post_json(url: str, payload: dict[str, Any], timeout: float, token: str | N
     started = time.monotonic()
     try:
         with authorization_safe_urlopen(req, timeout=timeout) as resp:
-            raw = resp.read().decode("utf-8")
-    except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
+            raw = read_limited_response(resp).decode("utf-8")
+    except (urllib.error.URLError, TimeoutError, ConnectionError, ValueError) as exc:
         return {}, int((time.monotonic() - started) * 1000), str(getattr(exc, "reason", exc))
     try:
         data = json.loads(raw)
@@ -152,12 +219,12 @@ def _post_json_any(
     started = time.monotonic()
     try:
         with authorization_safe_urlopen(req, timeout=timeout) as resp:
-            raw = resp.read().decode("utf-8")
+            raw = read_limited_response(resp).decode("utf-8")
             status = int(resp.status)
     except urllib.error.HTTPError as exc:
-        raw = exc.read().decode("utf-8", errors="replace")
+        raw = read_limited_response(exc).decode("utf-8", errors="replace")
         status = int(exc.code)
-    except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
+    except (urllib.error.URLError, TimeoutError, ConnectionError, ValueError) as exc:
         return None, 502, int((time.monotonic() - started) * 1000), str(getattr(exc, "reason", exc))
     try:
         data = json.loads(raw) if raw else {}
@@ -177,6 +244,7 @@ class IdentitySidecar:
         default_slot: str,
         timeout: float = DEFAULT_TIMEOUT,
         auth_token: str | None = None,
+        capability_token: str | None = None,
         log_path: Path | None = None,
         audit_log_tail: int | None = 200,
     ) -> None:
@@ -187,21 +255,24 @@ class IdentitySidecar:
         self.default_slot = default_slot
         self.timeout = timeout
         self.auth_token = auth_token
+        self.capability_token = capability_token or secrets.token_urlsafe(32)
         self.log_path = log_path or Path(os.environ.get("UNITARES_CHECKIN_LOG", "~/.unitares/checkins.log")).expanduser()
         self.audit_log_tail = audit_log_tail
 
     def slot_from(self, body: dict[str, Any], headers: Any) -> str:
-        header_slot = headers.get("X-UNITARES-Slot") if headers else ""
-        sidecar = body.get("sidecar")
-        body_slot = ""
-        if isinstance(sidecar, dict):
-            raw = sidecar.get("slot")
-            body_slot = raw if isinstance(raw, str) else ""
-        raw_top = body.get("slot")
-        if isinstance(raw_top, str) and raw_top.strip():
-            body_slot = raw_top
-        slot = (header_slot or body_slot or self.default_slot or "").strip()
-        return slot or f"sidecar-{_workspace_hash(self.workspace)}"
+        # The capability is minted for exactly one server-assigned slot.
+        # Caller-controlled headers and JSON can no longer select another
+        # session cache or borrow its governance authority.
+        del body, headers
+        return self.default_slot or f"sidecar-{_workspace_hash(self.workspace)}"
+
+    def authorized(self, headers: Any) -> bool:
+        raw = str(headers.get("Authorization") or "") if headers else ""
+        prefix = "Bearer "
+        if not raw.startswith(prefix):
+            return False
+        supplied = raw[len(prefix):]
+        return bool(supplied) and hmac.compare_digest(supplied, self.capability_token)
 
     def read_session(self, slot: str) -> dict[str, Any]:
         return _read_cache(self.workspace, slot)
@@ -590,13 +661,17 @@ class IdentitySidecar:
                     "unitares-governance-sidecar": {
                         "type": "url",
                         "url": mcp_url,
-                        "headers": {"X-UNITARES-Slot": slot},
+                        "headers": {
+                            "Authorization": f"Bearer {self.capability_token}",
+                            "X-UNITARES-Slot": slot,
+                        },
                     }
                 }
             },
             "environment": {
                 "UNITARES_SIDECAR_URL": base,
                 "UNITARES_SIDECAR_SLOT": slot,
+                "UNITARES_SIDECAR_CAPABILITY": self.capability_token,
                 "UNITARES_SERVER_URL": self.server_url,
             },
             "notes": [
@@ -611,17 +686,27 @@ def make_handler(sidecar: IdentitySidecar) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
         server_version = "UNITARESIdentitySidecar/0.1"
 
+        def setup(self) -> None:
+            super().setup()
+            self.connection.settimeout(CLIENT_SOCKET_TIMEOUT)
+
         def log_message(self, fmt: str, *args: Any) -> None:  # keep stdout clean for agents
             if os.environ.get("UNITARES_SIDECAR_ACCESS_LOG", "off").lower() in {"1", "on", "true"}:
                 super().log_message(fmt, *args)
 
         def do_GET(self) -> None:  # noqa: N802
+            if not sidecar.authorized(self.headers):
+                _json_response(self, 401, {"success": False, "error": "unauthorized"})
+                return
             parsed = urllib.parse.urlparse(self.path)
             query = urllib.parse.parse_qs(parsed.query)
             path = parsed.path
             if path == "/health":
                 _json_response(self, 200, {
                     "success": True,
+                    "capability_id": hashlib.sha256(
+                        sidecar.capability_token.encode("utf-8")
+                    ).hexdigest(),
                     "server_url": sidecar.server_url,
                     "workspace": str(sidecar.workspace),
                     "default_slot": sidecar.default_slot,
@@ -637,6 +722,7 @@ def make_handler(sidecar: IdentitySidecar) -> type[BaseHTTPRequestHandler]:
                     self,
                     200,
                     sidecar.client_config(sidecar_url=_handler_base_url(self), slot=slot),
+                    sanitize=False,
                 )
                 return
             if path == "/session":
@@ -663,7 +749,14 @@ def make_handler(sidecar: IdentitySidecar) -> type[BaseHTTPRequestHandler]:
             _json_response(self, 404, {"success": False, "error": "not found"})
 
         def do_POST(self) -> None:  # noqa: N802
-            body = _read_request_json(self)
+            if not sidecar.authorized(self.headers):
+                _json_response(self, 401, {"success": False, "error": "unauthorized"})
+                return
+            try:
+                body = _read_request_json(self)
+            except RequestBodyError as exc:
+                _json_response(self, exc.status, {"success": False, "error": str(exc)})
+                return
             parsed = urllib.parse.urlparse(self.path)
             path = parsed.path
             if path not in {"/mcp", "/mcp/"} and not isinstance(body, dict):
@@ -720,6 +813,9 @@ def main(argv: list[str] | None = None) -> int:
 
     workspace = Path(args.workspace).expanduser().resolve()
     default_slot = args.slot.strip() or f"sidecar-{_workspace_hash(workspace)}"
+    capability_token = (os.environ.get("UNITARES_SIDECAR_CAPABILITY") or "").strip()
+    if not capability_token:
+        parser.error("UNITARES_SIDECAR_CAPABILITY is required")
     sidecar = IdentitySidecar(
         server_url=args.server_url,
         workspace=workspace,
@@ -728,9 +824,10 @@ def main(argv: list[str] | None = None) -> int:
         default_slot=default_slot,
         timeout=args.timeout,
         auth_token=os.environ.get("UNITARES_HTTP_API_TOKEN") or None,
+        capability_token=capability_token,
         audit_log_tail=args.audit_log_tail,
     )
-    httpd = ThreadingHTTPServer((args.host, args.port), make_handler(sidecar))
+    httpd = BoundedThreadingHTTPServer((args.host, args.port), make_handler(sidecar))
     print(json.dumps({
         "success": True,
         "sidecar_url": f"http://{args.host}:{args.port}",

@@ -470,8 +470,9 @@ def test_runtime_post_targets_dedicated_sink(monkeypatch):
         def __exit__(self, *args):
             return False
 
-        def read(self):
-            return b'{"success": true}'
+        def read(self, size=-1):
+            body = b'{"success": true}'
+            return body if size < 0 else body[:size]
 
     def open_request(request, *, timeout):
         seen["url"] = request.full_url

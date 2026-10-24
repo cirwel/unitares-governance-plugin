@@ -23,8 +23,8 @@ class _HTTPResponse:
     def __exit__(self, *args):
         return False
 
-    def read(self):
-        return self.body
+    def read(self, size=-1):
+        return self.body if size < 0 else self.body[:size]
 
 
 def test_http_200_inner_rejection_is_not_delivery():

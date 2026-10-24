@@ -43,7 +43,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Optional
 
-from _http_auth import authorization_safe_urlopen, governance_json_headers
+from _http_auth import authorization_safe_urlopen, governance_json_headers, read_limited_response
 
 DEFAULT_SERVER_URL = "http://localhost:8767"
 DEFAULT_CACHE_DIR = "~/.unitares/skills-cache"
@@ -180,7 +180,7 @@ def _fetch_from_server(
     )
     try:
         with authorization_safe_urlopen(req, timeout=timeout) as resp:
-            body = resp.read().decode("utf-8")
+            body = read_limited_response(resp).decode("utf-8")
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         _crumb("HTTP_ERROR", f"{type(exc).__name__}: {exc}")
         return None

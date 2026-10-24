@@ -33,7 +33,7 @@ SCRIPTS = ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 from onboard_helper import run_onboard, unwrap_tool_response  # noqa: E402
-from _http_auth import authorization_safe_urlopen  # noqa: E402
+from _http_auth import authorization_safe_urlopen, read_limited_response  # noqa: E402
 
 
 DEFAULT_SERVER_URL = "http://127.0.0.1:8767"
@@ -195,10 +195,10 @@ def _post_tool(
     req = Request(url, data=body, headers=headers, method="POST")
     try:
         with authorization_safe_urlopen(req, timeout=timeout) as resp:
-            raw = json.loads(resp.read().decode("utf-8"))
+            raw = json.loads(read_limited_response(resp).decode("utf-8"))
     except HTTPError as exc:
         try:
-            raw = json.loads(exc.read().decode("utf-8"))
+            raw = json.loads(read_limited_response(exc).decode("utf-8"))
         except Exception:
             raw = {"error": f"HTTP {exc.code}: {exc.reason}"}
     except URLError as exc:
