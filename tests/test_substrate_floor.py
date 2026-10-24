@@ -80,7 +80,7 @@ def test_post_targets_observe_endpoint_with_http_api_token(monkeypatch):
         def __exit__(self, *a):
             return False
 
-        def read(self):
+        def read(self, size=-1):
             return b""
 
     def fake_urlopen(req, timeout=5.0):

@@ -24,7 +24,7 @@ from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from _http_auth import authorization_safe_urlopen, governance_json_headers
+from _http_auth import authorization_safe_urlopen, governance_json_headers, read_limited_response
 from _redact import redact_secrets
 
 DEFAULT_SERVER_URL = "http://localhost:8767"
@@ -267,7 +267,7 @@ def _post_to_governance(
     t0 = time.monotonic()
     try:
         with authorization_safe_urlopen(req, timeout=timeout) as resp:
-            raw_response = resp.read()
+            raw_response = read_limited_response(resp)
         latency_ms = int((time.monotonic() - t0) * 1000)
         try:
             response = json.loads(raw_response.decode("utf-8"))

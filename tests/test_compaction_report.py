@@ -110,8 +110,8 @@ def test_post_is_false_and_silent_for_odd_responses(monkeypatch, body):
         def __exit__(self, *exc):
             return False
 
-        def read(self):
-            return body
+        def read(self, size=-1):
+            return body if size < 0 else body[:size]
 
     monkeypatch.setattr(compaction_report, "authorization_safe_urlopen", lambda *a, **k: _Response())
     assert compaction_report.post("http://srv", {"a": 1}, timeout=0.1) is False

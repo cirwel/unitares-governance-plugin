@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import ipaddress
 import json
 import os
+import secrets
 import signal
 import subprocess
 import sys
@@ -19,7 +21,11 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
 
-from _http_auth import authorization_safe_urlopen
+from _http_auth import (
+    ResponseTooLargeError,
+    authorization_safe_urlopen,
+    read_limited_response,
+)
 
 
 DEFAULT_SERVER_URL = "http://localhost:8767"
@@ -96,6 +102,7 @@ def _http_json(
     *,
     payload: dict[str, Any] | None = None,
     slot: str = "",
+    capability: str,
     timeout: float = HTTP_TIMEOUT,
 ) -> dict[str, Any]:
     data = json.dumps(payload).encode("utf-8") if payload is not None else None
@@ -107,14 +114,22 @@ def _http_json(
     )
     if payload is not None:
         request.add_header("Content-Type", "application/json")
+    request.add_header("Authorization", f"Bearer {capability}")
     if slot:
         request.add_header("X-UNITARES-Slot", slot)
     try:
         with authorization_safe_urlopen(request, timeout=timeout) as response:
-            raw = response.read()
+            raw = read_limited_response(response)
     except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")[:300]
+        try:
+            detail = read_limited_response(exc, max_bytes=4096).decode(
+                "utf-8", errors="replace"
+            )[:300]
+        except ResponseTooLargeError:
+            detail = "response body exceeded 4096 bytes"
         raise URunError(f"{url} returned HTTP {exc.code}: {detail}") from exc
+    except ResponseTooLargeError as exc:
+        raise URunError(f"{url} returned an oversized response: {exc}") from exc
     except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as exc:
         detail = getattr(exc, "reason", exc)
         raise SidecarUnavailable(f"{url} is unavailable: {detail}") from exc
@@ -163,18 +178,33 @@ def _sidecar_bind(sidecar_url: str) -> tuple[str, int, str]:
     return bind_host, port, base
 
 
-def _probe_health(sidecar_url: str) -> dict[str, Any] | None:
+def _probe_health(sidecar_url: str, capability: str) -> dict[str, Any] | None:
     try:
-        return _http_json(f"{sidecar_url}/health", timeout=0.5)
+        return _http_json(
+            f"{sidecar_url}/health",
+            capability=capability,
+            timeout=0.5,
+        )
     except SidecarUnavailable:
         return None
 
 
 def _validate_health(
-    health: dict[str, Any], *, server_url: str, workspace: Path
+    health: dict[str, Any],
+    *,
+    server_url: str,
+    workspace: Path,
+    capability: str,
+    slot: str,
 ) -> None:
     if health.get("success") is not True:
         raise URunError("sidecar health response did not report success")
+    expected_capability_id = hashlib.sha256(capability.encode("utf-8")).hexdigest()
+    if not secrets.compare_digest(
+        str(health.get("capability_id") or ""),
+        expected_capability_id,
+    ):
+        raise URunError("sidecar health response did not prove the configured capability")
     reported_server = str(health.get("server_url") or "").rstrip("/")
     if reported_server != server_url.rstrip("/"):
         raise URunError(
@@ -186,6 +216,12 @@ def _validate_health(
         raise URunError(
             "running sidecar targets a different workspace "
             f"({reported_workspace or '<missing>'})"
+        )
+    reported_slot = str(health.get("default_slot") or "")
+    if reported_slot != slot:
+        raise URunError(
+            "running sidecar is bound to a different slot "
+            f"({reported_slot or '<missing>'})"
         )
 
 
@@ -219,12 +255,21 @@ def ensure_sidecar(
     workspace: Path,
     slot: str,
     model_type: str,
+    capability: str,
+    reuse_existing: bool,
 ) -> subprocess.Popen[Any] | None:
     host, port, sidecar_url = _sidecar_bind(sidecar_url)
-    health = _probe_health(sidecar_url)
-    if health is not None:
-        _validate_health(health, server_url=server_url, workspace=workspace)
-        return None
+    if reuse_existing:
+        health = _probe_health(sidecar_url, capability)
+        if health is not None:
+            _validate_health(
+                health,
+                server_url=server_url,
+                workspace=workspace,
+                capability=capability,
+                slot=slot,
+            )
+            return None
 
     command = [
         sys.executable,
@@ -243,12 +288,15 @@ def ensure_sidecar(
         model_type,
     ]
     try:
+        sidecar_environment = os.environ.copy()
+        sidecar_environment["UNITARES_SIDECAR_CAPABILITY"] = capability
         process = subprocess.Popen(
             command,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             close_fds=True,
             cwd=str(Path.home()),
+            env=sidecar_environment,
             **_process_group_kwargs(),
         )
     except OSError as exc:
@@ -257,9 +305,15 @@ def ensure_sidecar(
     deadline = time.monotonic() + STARTUP_TIMEOUT
     try:
         while time.monotonic() < deadline:
-            health = _probe_health(sidecar_url)
+            health = _probe_health(sidecar_url, capability)
             if health is not None:
-                _validate_health(health, server_url=server_url, workspace=workspace)
+                _validate_health(
+                    health,
+                    server_url=server_url,
+                    workspace=workspace,
+                    capability=capability,
+                    slot=slot,
+                )
                 # Another wrapper may have won the bind race. In that case our
                 # failed process is not an owned, running sidecar.
                 return process if process.poll() is None else None
@@ -276,12 +330,13 @@ def ensure_sidecar(
 
 
 def _start_session(
-    *, sidecar_url: str, slot: str, model_type: str
+    *, sidecar_url: str, slot: str, model_type: str, capability: str
 ) -> None:
     response = _http_json(
         f"{sidecar_url}/session/start",
         payload={"slot": slot, "model_type": model_type},
         slot=slot,
+        capability=capability,
     )
     result = response.get("result")
     if (
@@ -316,6 +371,7 @@ def _submit_exit_checkin(
     return_code: int,
     exit_code: int,
     wall_seconds: float,
+    capability: str,
 ) -> None:
     response = _http_json(
         f"{sidecar_url}/turn/stop",
@@ -327,6 +383,7 @@ def _submit_exit_checkin(
             "epistemic_class": "substrate_interpretation",
         },
         slot=slot,
+        capability=capability,
     )
     if response.get("success") is not True:
         raise URunError(f"exit check-in was not accepted: {response}")
@@ -387,6 +444,8 @@ def main(argv: list[str] | None = None) -> int:
         return 125
     model_type = args.agent_class.strip() if args.agent_class else DEFAULT_MODEL_TYPE
     slot = args.slot.strip() or f"u-run-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    configured_capability = (os.environ.get("UNITARES_SIDECAR_CAPABILITY") or "").strip()
+    capability = configured_capability or secrets.token_urlsafe(32)
     owned_sidecar: subprocess.Popen[Any] | None = None
 
     try:
@@ -397,14 +456,22 @@ def main(argv: list[str] | None = None) -> int:
             workspace=workspace,
             slot=slot,
             model_type=model_type,
+            capability=capability,
+            reuse_existing=bool(configured_capability),
         )
-        _start_session(sidecar_url=sidecar_url, slot=slot, model_type=model_type)
+        _start_session(
+            sidecar_url=sidecar_url,
+            slot=slot,
+            model_type=model_type,
+            capability=capability,
+        )
         environment = os.environ.copy()
         environment.update(
             {
                 "UNITARES_SERVER_URL": server_url,
                 "UNITARES_SIDECAR_URL": sidecar_url,
                 "UNITARES_SIDECAR_SLOT": slot,
+                "UNITARES_SIDECAR_CAPABILITY": capability,
                 "UNITARES_MODEL_TYPE": model_type,
             }
         )
@@ -416,6 +483,7 @@ def main(argv: list[str] | None = None) -> int:
                 return_code=return_code,
                 exit_code=exit_code,
                 wall_seconds=wall_seconds,
+                capability=capability,
             )
         except URunError as exc:
             # Lifecycle telemetry must not replace the wrapped command's exit

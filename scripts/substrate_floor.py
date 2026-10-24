@@ -23,9 +23,9 @@ import urllib.error
 import urllib.request
 
 try:
-    from ._http_auth import authorization_safe_urlopen, governance_json_headers
+    from ._http_auth import authorization_safe_urlopen, governance_json_headers, read_limited_response
 except ImportError:  # Executed directly from an installed plugin.
-    from _http_auth import authorization_safe_urlopen, governance_json_headers
+    from _http_auth import authorization_safe_urlopen, governance_json_headers, read_limited_response
 
 DEFAULT_SERVER_URL = "http://localhost:8767"
 POST_TIMEOUT_SEC = 5.0
@@ -68,7 +68,7 @@ def _post(url: str, payload: dict, timeout: float = POST_TIMEOUT_SEC):
     t0 = time.monotonic()
     try:
         with authorization_safe_urlopen(req, timeout=timeout) as resp:
-            resp.read()  # drain
+            read_limited_response(resp)  # drain within the shared response budget
         return True, int((time.monotonic() - t0) * 1000), None
     except urllib.error.URLError as e:
         return False, int((time.monotonic() - t0) * 1000), str(getattr(e, "reason", e))

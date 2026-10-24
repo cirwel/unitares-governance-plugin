@@ -14,7 +14,9 @@ sys.path.insert(0, str(SCRIPTS))
 
 from _http_auth import (  # noqa: E402
     _AuthorizationSafeRedirectHandler,
+    ResponseTooLargeError,
     governance_json_headers,
+    read_limited_response,
 )
 
 
@@ -76,7 +78,7 @@ def test_same_origin_redirect_retains_authorization(source: str, target: str):
         ("http://example.test/start", "http://example.test:bad/next"),
     ],
 )
-def test_cross_origin_or_malformed_redirect_strips_authorization(
+def test_cross_origin_or_malformed_redirect_is_refused(
     source: str,
     target: str,
 ):
@@ -94,11 +96,10 @@ def test_cross_origin_or_malformed_redirect_strips_authorization(
         target,
     )
 
-    assert redirected is not None
-    assert redirected.get_header("Authorization") is None
+    assert redirected is None
 
 
-def test_redirect_chain_never_restores_stripped_authorization():
+def test_refused_cross_origin_redirect_cannot_start_a_chain():
     handler = _AuthorizationSafeRedirectHandler()
     original = urllib.request.Request(
         "https://example.test/start",
@@ -112,19 +113,31 @@ def test_redirect_chain_never_restores_stripped_authorization():
         {},
         "https://other.test/middle",
     )
-    assert cross_origin is not None
+    assert cross_origin is None
 
-    returned = handler.redirect_request(
-        cross_origin,
-        None,
-        302,
-        "Found",
-        {},
-        "https://example.test/end",
-    )
 
-    assert returned is not None
-    assert returned.get_header("Authorization") is None
+class _Response:
+    def __init__(self, body: bytes, declared: str | None = None):
+        self.body = body
+        self.headers = {} if declared is None else {"Content-Length": declared}
+
+    def read(self, size: int) -> bytes:
+        return self.body[:size]
+
+
+def test_limited_response_rejects_declared_oversize_without_reading():
+    response = _Response(b"small", declared="999")
+    with pytest.raises(ResponseTooLargeError):
+        read_limited_response(response, max_bytes=8)
+
+
+def test_limited_response_rejects_chunked_oversize():
+    with pytest.raises(ResponseTooLargeError):
+        read_limited_response(_Response(b"ninebytes"), max_bytes=8)
+
+
+def test_limited_response_accepts_body_at_limit():
+    assert read_limited_response(_Response(b"12345678"), max_bytes=8) == b"12345678"
 
 
 def test_production_scripts_do_not_bypass_authorization_safe_opener():
@@ -155,6 +168,28 @@ def test_production_scripts_do_not_bypass_authorization_safe_opener():
             )
             raw_import = isinstance(function, ast.Name) and function.id in imported_urlopen
             if raw_attribute or raw_import:
+                violations.append(f"{path.relative_to(SCRIPTS)}:{node.lineno}")
+
+    assert violations == []
+
+
+def test_production_http_clients_do_not_use_unbounded_response_reads():
+    violations: list[str] = []
+    response_names = {"response", "resp", "exc"}
+    for path in sorted(SCRIPTS.rglob("*.py")):
+        if path.name == "_http_auth.py":
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or node.args or node.keywords:
+                continue
+            function = node.func
+            if (
+                isinstance(function, ast.Attribute)
+                and function.attr == "read"
+                and isinstance(function.value, ast.Name)
+                and function.value.id in response_names
+            ):
                 violations.append(f"{path.relative_to(SCRIPTS)}:{node.lineno}")
 
     assert violations == []

@@ -34,7 +34,11 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from _http_auth import authorization_safe_urlopen, governance_json_headers  # noqa: E402
+from _http_auth import (  # noqa: E402
+    authorization_safe_urlopen,
+    governance_json_headers,
+    read_limited_response,
+)
 from _session_lookup import load_usable_session_for_hook  # noqa: E402
 from checkin import _plugin_version  # noqa: E402
 
@@ -90,7 +94,7 @@ def post(server_url: str, payload: dict[str, Any], *, timeout: float) -> bool:
     )
     try:
         with authorization_safe_urlopen(request, timeout=timeout) as response:
-            body = json.loads(response.read().decode("utf-8"))
+            body = json.loads(read_limited_response(response).decode("utf-8"))
         return isinstance(body, dict) and body.get("success") is True
     except (urllib.error.URLError, UnicodeDecodeError, json.JSONDecodeError, OSError, ValueError):
         return False
