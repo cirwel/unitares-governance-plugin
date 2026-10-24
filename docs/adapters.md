@@ -194,6 +194,7 @@ governance REST tool calls through it:
 
 ```bash
 export UNITARES_SIDECAR_CAPABILITY="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+export UNITARES_SIDECAR_STARTUP_SECRET="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
 python3 scripts/identity_sidecar.py \
   --server-url http://localhost:8767 \
   --workspace "$PWD" \
@@ -201,11 +202,13 @@ python3 scripts/identity_sidecar.py \
   --port 8768
 ```
 
-Every route, including `/health`, requires
+Every operational route, including `/health`, requires
 `Authorization: Bearer $UNITARES_SIDECAR_CAPABILITY`. The capability is bound
 to the sidecar's configured slot; request headers and bodies cannot switch the
-server to another slot. Run a separate sidecar with a separate capability for
-each concurrently managed process.
+server to another slot. The unauthenticated `/startup-proof` route returns only
+a challenge-bound HMAC so wrappers can authenticate the listener before sending
+that bearer. Run a separate sidecar with separate secrets for each concurrently
+managed process.
 
 Phase 1 is a dependency-free sidecar, not a full streamable-MCP/SSE
 implementation. It wraps REST `/v1/tools/call` and minimal JSON-RPC MCP
@@ -236,8 +239,10 @@ scripts/u-run --class goose -- goose run --recipe review.yaml
 
 The first `--` separates wrapper options from the child command. `u-run` then:
 
-1. reuses a healthy sidecar only when `UNITARES_SIDECAR_CAPABILITY` proves the
-   existing process, or starts one with a fresh random capability and owns its cleanup;
+1. reuses a healthy sidecar only after a challenge-response using
+   `UNITARES_SIDECAR_STARTUP_SECRET`, then verifies that the process holds the
+   separate `UNITARES_SIDECAR_CAPABILITY`; otherwise it starts one with fresh
+   random secrets and owns its cleanup;
 2. creates one unique slot (or uses an explicit `--slot`) and calls
    `/session/start` once, which writes `.unitares/session-<slot>.json`;
 3. exports `UNITARES_SERVER_URL`, `UNITARES_SIDECAR_URL`,

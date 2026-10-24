@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 import signal
@@ -12,6 +13,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -29,6 +31,7 @@ import u_run  # noqa: E402
 
 SERVER_URL = "http://governance.test:8767"
 CAPABILITY = "test-sidecar-capability"
+STARTUP_SECRET = "test-sidecar-startup-secret"
 
 
 class _ReusableServer(ThreadingHTTPServer):
@@ -73,7 +76,18 @@ def _sidecar_handler(
             return
 
         def do_GET(self):  # noqa: N802
-            assert self.path == "/health"
+            parsed = urllib.parse.urlsplit(self.path)
+            if parsed.path == "/startup-proof":
+                assert self.headers.get("Authorization") is None
+                challenge = urllib.parse.parse_qs(parsed.query)["challenge"][0]
+                proof = hmac.new(
+                    STARTUP_SECRET.encode(),
+                    challenge.encode(),
+                    hashlib.sha256,
+                ).hexdigest()
+                _respond(self, {"success": True, "proof": proof})
+                return
+            assert parsed.path == "/health"
             assert self.headers.get("Authorization") == f"Bearer {CAPABILITY}"
             _respond(
                 self,
@@ -104,6 +118,7 @@ def test_reuses_sidecar_exports_context_and_preserves_child_exit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("UNITARES_SIDECAR_CAPABILITY", CAPABILITY)
+    monkeypatch.setenv("UNITARES_SIDECAR_STARTUP_SECRET", STARTUP_SECRET)
     calls: list[tuple[str, dict[str, Any]]] = []
     server, thread, sidecar_url = _serve(_sidecar_handler(tmp_path, calls))
     output = tmp_path / "child-env.json"
@@ -161,11 +176,14 @@ def test_reuses_sidecar_exports_context_and_preserves_child_exit(
 def test_health_lookalike_without_capability_proof_is_not_reused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    authorization_headers: list[str | None] = []
+
     class Lookalike(BaseHTTPRequestHandler):
         def log_message(self, _fmt, *_args):  # pragma: no cover
             return
 
         def do_GET(self):  # noqa: N802
+            authorization_headers.append(self.headers.get("Authorization"))
             _respond(
                 self,
                 {
@@ -196,6 +214,8 @@ def test_health_lookalike_without_capability_proof_is_not_reused(
         _stop_server(server, thread)
 
     assert result == 125
+    assert authorization_headers
+    assert authorization_headers == [None]
 
 
 class _GovernanceHandler(BaseHTTPRequestHandler):
@@ -296,7 +316,11 @@ def test_forwards_termination_signal_to_child_group(tmp_path: Path) -> None:
         ],
         stderr=subprocess.PIPE,
         text=True,
-        env={**os.environ, "UNITARES_SIDECAR_CAPABILITY": CAPABILITY},
+        env={
+            **os.environ,
+            "UNITARES_SIDECAR_CAPABILITY": CAPABILITY,
+            "UNITARES_SIDECAR_STARTUP_SECRET": STARTUP_SECRET,
+        },
     )
     child_pid = 0
     try:

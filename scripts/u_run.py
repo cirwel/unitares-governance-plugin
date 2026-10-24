@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import hmac
 import ipaddress
 import json
 import os
@@ -102,7 +103,7 @@ def _http_json(
     *,
     payload: dict[str, Any] | None = None,
     slot: str = "",
-    capability: str,
+    capability: str | None,
     timeout: float = HTTP_TIMEOUT,
 ) -> dict[str, Any]:
     data = json.dumps(payload).encode("utf-8") if payload is not None else None
@@ -114,7 +115,8 @@ def _http_json(
     )
     if payload is not None:
         request.add_header("Content-Type", "application/json")
-    request.add_header("Authorization", f"Bearer {capability}")
+    if capability:
+        request.add_header("Authorization", f"Bearer {capability}")
     if slot:
         request.add_header("X-UNITARES-Slot", slot)
     try:
@@ -189,6 +191,31 @@ def _probe_health(sidecar_url: str, capability: str) -> dict[str, Any] | None:
         return None
 
 
+def _probe_startup_proof(
+    sidecar_url: str,
+    startup_secret: str,
+) -> bool | None:
+    challenge = secrets.token_urlsafe(32)
+    query = urllib.parse.urlencode({"challenge": challenge})
+    try:
+        response = _http_json(
+            f"{sidecar_url}/startup-proof?{query}",
+            capability=None,
+            timeout=0.5,
+        )
+    except SidecarUnavailable:
+        return None
+    expected = hmac.new(
+        startup_secret.encode("utf-8"),
+        challenge.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    return response.get("success") is True and hmac.compare_digest(
+        str(response.get("proof") or ""),
+        expected,
+    )
+
+
 def _validate_health(
     health: dict[str, Any],
     *,
@@ -256,12 +283,18 @@ def ensure_sidecar(
     slot: str,
     model_type: str,
     capability: str,
+    startup_secret: str,
     reuse_existing: bool,
 ) -> subprocess.Popen[Any] | None:
     host, port, sidecar_url = _sidecar_bind(sidecar_url)
     if reuse_existing:
-        health = _probe_health(sidecar_url, capability)
-        if health is not None:
+        authenticated = _probe_startup_proof(sidecar_url, startup_secret)
+        if authenticated is False:
+            raise URunError("existing sidecar did not prove the configured startup secret")
+        if authenticated is True:
+            health = _probe_health(sidecar_url, capability)
+            if health is None:
+                raise URunError("authenticated sidecar became unavailable during health check")
             _validate_health(
                 health,
                 server_url=server_url,
@@ -290,6 +323,7 @@ def ensure_sidecar(
     try:
         sidecar_environment = os.environ.copy()
         sidecar_environment["UNITARES_SIDECAR_CAPABILITY"] = capability
+        sidecar_environment["UNITARES_SIDECAR_STARTUP_SECRET"] = startup_secret
         process = subprocess.Popen(
             command,
             stdin=subprocess.DEVNULL,
@@ -305,8 +339,13 @@ def ensure_sidecar(
     deadline = time.monotonic() + STARTUP_TIMEOUT
     try:
         while time.monotonic() < deadline:
-            health = _probe_health(sidecar_url, capability)
-            if health is not None:
+            authenticated = _probe_startup_proof(sidecar_url, startup_secret)
+            if authenticated is False:
+                raise URunError("sidecar listener failed startup authentication")
+            if authenticated is True:
+                health = _probe_health(sidecar_url, capability)
+                if health is None:
+                    raise URunError("authenticated sidecar became unavailable during health check")
                 _validate_health(
                     health,
                     server_url=server_url,
@@ -445,7 +484,11 @@ def main(argv: list[str] | None = None) -> int:
     model_type = args.agent_class.strip() if args.agent_class else DEFAULT_MODEL_TYPE
     slot = args.slot.strip() or f"u-run-{os.getpid()}-{uuid.uuid4().hex[:8]}"
     configured_capability = (os.environ.get("UNITARES_SIDECAR_CAPABILITY") or "").strip()
+    configured_startup_secret = (
+        os.environ.get("UNITARES_SIDECAR_STARTUP_SECRET") or ""
+    ).strip()
     capability = configured_capability or secrets.token_urlsafe(32)
+    startup_secret = configured_startup_secret or secrets.token_urlsafe(32)
     owned_sidecar: subprocess.Popen[Any] | None = None
 
     try:
@@ -457,7 +500,8 @@ def main(argv: list[str] | None = None) -> int:
             slot=slot,
             model_type=model_type,
             capability=capability,
-            reuse_existing=bool(configured_capability),
+            startup_secret=startup_secret,
+            reuse_existing=bool(configured_capability and configured_startup_secret),
         )
         _start_session(
             sidecar_url=sidecar_url,

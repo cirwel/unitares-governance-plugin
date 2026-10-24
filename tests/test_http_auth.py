@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import ast
 import sys
+import threading
 import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -12,6 +14,7 @@ import pytest
 SCRIPTS = Path(__file__).parent.parent / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
+import _http_auth  # noqa: E402
 from _http_auth import (  # noqa: E402
     _AuthorizationSafeRedirectHandler,
     InsecureBearerTransportError,
@@ -37,6 +40,19 @@ def test_bearer_request_rejects_non_loopback_cleartext_before_socket(
         authorization_safe_urlopen(request, timeout=1)
 
 
+def test_governance_request_rejects_non_loopback_cleartext_without_bearer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = urllib.request.Request("http://example.test/v1")
+
+    def unexpected_open(*_args, **_kwargs):
+        pytest.fail("cleartext governance request reached the network opener")
+
+    monkeypatch.setattr("_http_auth._AUTHORIZATION_SAFE_OPENER.open", unexpected_open)
+    with pytest.raises(InsecureBearerTransportError):
+        authorization_safe_urlopen(request, timeout=1)
+
+
 @pytest.mark.parametrize("url", ["http://localhost:8767/v1", "http://127.0.0.1:8767/v1"])
 def test_bearer_request_allows_loopback_development_transport(
     monkeypatch: pytest.MonkeyPatch,
@@ -44,12 +60,74 @@ def test_bearer_request_allows_loopback_development_transport(
 ) -> None:
     sentinel = object()
     monkeypatch.setattr(
-        "_http_auth._AUTHORIZATION_SAFE_OPENER.open",
+        "_http_auth._LOOPBACK_DIRECT_OPENER.open",
         lambda *_args, **_kwargs: sentinel,
     )
 
     request = urllib.request.Request(url, headers={"Authorization": "Bearer secret"})
     assert authorization_safe_urlopen(request, timeout=1) is sentinel
+
+
+def test_loopback_request_bypasses_ambient_proxy_and_keeps_bearer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target_headers: list[str | None] = []
+    proxy_headers: list[str | None] = []
+
+    class Target(BaseHTTPRequestHandler):
+        def log_message(self, _fmt, *_args):
+            return
+
+        def do_GET(self):  # noqa: N802
+            target_headers.append(self.headers.get("Authorization"))
+            self.send_response(200)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+    class Proxy(BaseHTTPRequestHandler):
+        def log_message(self, _fmt, *_args):
+            return
+
+        def do_GET(self):  # noqa: N802
+            proxy_headers.append(self.headers.get("Authorization"))
+            self.send_response(502)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+    target = ThreadingHTTPServer(("127.0.0.1", 0), Target)
+    proxy = ThreadingHTTPServer(("127.0.0.1", 0), Proxy)
+    target_thread = threading.Thread(target=target.serve_forever, daemon=True)
+    proxy_thread = threading.Thread(target=proxy.serve_forever, daemon=True)
+    target_thread.start()
+    proxy_thread.start()
+    proxy_url = f"http://127.0.0.1:{proxy.server_address[1]}"
+    monkeypatch.setenv("HTTP_PROXY", proxy_url)
+    monkeypatch.setenv("NO_PROXY", "")
+    monkeypatch.setattr(
+        _http_auth,
+        "_AUTHORIZATION_SAFE_OPENER",
+        urllib.request.build_opener(
+            urllib.request.ProxyHandler({"http": proxy_url}),
+            _AuthorizationSafeRedirectHandler(),
+        ),
+    )
+    try:
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{target.server_address[1]}/health",
+            headers={"Authorization": "Bearer loopback-secret"},
+        )
+        with authorization_safe_urlopen(request, timeout=2) as response:
+            assert response.status == 200
+    finally:
+        target.shutdown()
+        proxy.shutdown()
+        target_thread.join(timeout=2)
+        proxy_thread.join(timeout=2)
+        target.server_close()
+        proxy.server_close()
+
+    assert target_headers == ["Bearer loopback-secret"]
+    assert proxy_headers == []
 
 
 def test_json_headers_omit_authorization_without_token(monkeypatch):
