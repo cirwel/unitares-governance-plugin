@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import os
 import urllib.parse
 import urllib.request
@@ -12,6 +13,10 @@ DEFAULT_MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 
 class ResponseTooLargeError(ValueError):
     """An HTTP peer exceeded the caller's bounded response budget."""
+
+
+class InsecureBearerTransportError(ValueError):
+    """A bearer would cross a cleartext, non-loopback HTTP connection."""
 
 
 def _http_origin(url: str) -> tuple[str, str, int] | None:
@@ -57,12 +62,37 @@ _AUTHORIZATION_SAFE_OPENER = urllib.request.build_opener(
 )
 
 
+def _is_loopback_host(host: str) -> bool:
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _validate_bearer_transport(request: urllib.request.Request) -> None:
+    authorization = str(request.get_header("Authorization") or "").strip()
+    if not authorization:
+        return
+    origin = _http_origin(request.full_url)
+    if origin is None:
+        raise InsecureBearerTransportError("bearer request URL is malformed")
+    scheme, host, _port = origin
+    if scheme == "https" or (scheme == "http" and _is_loopback_host(host)):
+        return
+    raise InsecureBearerTransportError(
+        "refusing to send an authorization bearer over non-loopback HTTP"
+    )
+
+
 def authorization_safe_urlopen(
     request: urllib.request.Request,
     *,
     timeout: float,
 ) -> Any:
     """Open a request while refusing every cross-origin redirect."""
+    _validate_bearer_transport(request)
     return _AUTHORIZATION_SAFE_OPENER.open(request, timeout=timeout)
 
 

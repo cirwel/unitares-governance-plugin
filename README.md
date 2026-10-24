@@ -52,8 +52,10 @@ Run inside Claude Code:
 
 Start a new session. The plugin registers its MCP client through
 [`.mcp.json`](.mcp.json) and loads [Claude hooks](hooks/claude-hooks.json).
-The default server is `http://localhost:8767`; a remote or authenticated
-deployment uses `UNITARES_SERVER_URL` and `UNITARES_HTTP_API_TOKEN`.
+The bundled transport is unauthenticated and defaults to
+`http://localhost:8767`. For a remote or authenticated deployment, disable it
+and register an HTTPS MCP server as described in
+[Server connections](docs/configuration.md#server-connections).
 
 ### Codex
 

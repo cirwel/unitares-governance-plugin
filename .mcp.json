@@ -2,10 +2,7 @@
   "mcpServers": {
     "unitares-governance": {
       "type": "http",
-      "url": "${UNITARES_SERVER_URL:-http://localhost:8767}/mcp/",
-      "headers": {
-        "Authorization": "Bearer ${UNITARES_HTTP_API_TOKEN:-}"
-      }
+      "url": "${UNITARES_SERVER_URL:-http://localhost:8767}/mcp/"
     }
   }
 }

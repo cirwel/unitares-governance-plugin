@@ -452,7 +452,7 @@ def test_pre_edit_converts_unexpected_required_helper_failure_to_block(
     )
 
     assert result.returncode == 2
-    assert "required file lease helper exited with status 1" in result.stderr
+    assert "BLOCKED: file lease required but unavailable" in result.stderr
 
 
 def test_both_hosts_route_identity_calls_through_pretool_generation_guard():
