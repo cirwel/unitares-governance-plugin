@@ -99,19 +99,7 @@ jobs:
       - name: Lint changed files
         run: |
           base="${{ steps.base.outputs.ref }}"
-          files=$(git diff --name-only --diff-filter=ACMR "${base}...HEAD" 2>/dev/null \
-                  || git diff --name-only --diff-filter=ACMR "$base")
-          rc=0
-          for f in $files; do
-            case "$f" in .github/workflows/ci.yml) continue;; esac
-            [ -f "$f" ] || continue
-            if grep -nIE '/Users/cirwel|claude\.ai/code/session|Claude-Session:' "$f" >/dev/null 2>&1; then
-              echo "::error file=$f::operator-local path or Claude session-attribution link in committed content"
-              rc=1
-            fi
-          done
-          if [ "$rc" = 0 ]; then echo "Files: clean"; fi
-          exit $rc
+          ./scripts/dev/lint-changed-files.sh "$base"
 
       - name: Lint PR body
         if: github.event_name == 'pull_request'

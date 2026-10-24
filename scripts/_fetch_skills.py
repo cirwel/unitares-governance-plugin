@@ -19,10 +19,10 @@ into structured fields), and downstream consumers like
 ``_freshness_warning.py`` parse `last_verified` from the rendered
 frontmatter.
 
-Identity-blindness invariant (§4.5): cache files are content-addressed
-by skill name + registry_hash. They are NOT keyed by agent_uuid or any
-identity-derived value. The cache surface is process-instance-local
-and identity-blind by design.
+Identity-blindness invariant (§4.5): cache files are partitioned by skill
+name and normalized server origin, then carry the registry hash returned by
+that origin. They are NOT keyed by agent_uuid or any identity-derived value.
+The cache surface is process-instance-local and identity-blind by design.
 
 State-legibility per axiom #14: every fallback path emits a
 ``[FETCH_SKILLS_<state>]`` breadcrumb on stderr so operators can tell
@@ -33,12 +33,14 @@ distinct success paths are kept distinguishable.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any, Optional
@@ -70,13 +72,31 @@ def _cache_dir() -> Path:
     return Path(raw).expanduser()
 
 
-def _cache_path_for(name: str) -> Path:
+def _normalized_origin(server_url: str) -> str:
+    try:
+        parsed = urllib.parse.urlsplit(server_url)
+        scheme = parsed.scheme.lower()
+        if scheme not in {"http", "https"} or not parsed.hostname:
+            return ""
+        host = parsed.hostname.encode("idna").decode("ascii").lower()
+        port = parsed.port or (443 if scheme == "https" else 80)
+    except (UnicodeError, ValueError):
+        return ""
+    return f"{scheme}://{host}:{port}"
+
+
+def _cache_path_for(name: str, server_url: str) -> Path:
     safe = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in name)
-    return _cache_dir() / f"{safe[:64]}.json"
+    origin = _normalized_origin(server_url)
+    origin_key = hashlib.sha256(origin.encode("utf-8")).hexdigest()[:16]
+    return _cache_dir() / f"{safe[:64]}-{origin_key}.json"
 
 
-def _read_cache(name: str) -> Optional[dict[str, Any]]:
-    path = _cache_path_for(name)
+def _read_cache(name: str, server_url: str) -> Optional[dict[str, Any]]:
+    origin = _normalized_origin(server_url)
+    if not origin:
+        return None
+    path = _cache_path_for(name, server_url)
     if not path.is_file():
         return None
     try:
@@ -85,13 +105,19 @@ def _read_cache(name: str) -> Optional[dict[str, Any]]:
         return None
     if not isinstance(data, dict):
         return None
+    if data.get("source_origin") != origin:
+        return None
     return data
 
 
-def _write_cache(name: str, payload: dict[str, Any]) -> None:
-    path = _cache_path_for(name)
+def _write_cache(name: str, server_url: str, payload: dict[str, Any]) -> None:
+    origin = _normalized_origin(server_url)
+    if not origin:
+        raise ValueError("server URL has no valid HTTP origin")
+    path = _cache_path_for(name, server_url)
+    payload = {**payload, "source_origin": origin}
     path.parent.mkdir(parents=True, exist_ok=True)
-    # Cache file is content-addressed and identity-blind, but skills cache
+    # Cache file is origin-partitioned and identity-blind, but skills cache
     # may include source_files paths from the operator's checkout — 0600
     # to match the rest of the plugin's local-cache contract.
     #
@@ -326,7 +352,7 @@ def fetch_skill_content(
     content. ``content`` is empty string on ``not_found``.
     """
     now = int(time.time())
-    cached = _read_cache(name)
+    cached = _read_cache(name, server_url)
 
     # 1. Cache-hit path: TTL-fresh content replays without HTTP.
     # Floor delta at 0 so a future-dated `fetched_at` (NFS clock skew, an
@@ -352,6 +378,7 @@ def fetch_skill_content(
             try:
                 _write_cache(
                     name,
+                    server_url,
                     {
                         "rendered": rendered,
                         "registry_hash": response.get("registry_hash"),
