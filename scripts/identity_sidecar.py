@@ -247,6 +247,7 @@ class IdentitySidecar:
         timeout: float = DEFAULT_TIMEOUT,
         auth_token: str | None = None,
         capability_token: str | None = None,
+        startup_secret: str | None = None,
         log_path: Path | None = None,
         audit_log_tail: int | None = 200,
     ) -> None:
@@ -258,6 +259,7 @@ class IdentitySidecar:
         self.timeout = timeout
         self.auth_token = auth_token
         self.capability_token = capability_token or secrets.token_urlsafe(32)
+        self.startup_secret = startup_secret
         self.log_path = log_path or Path(os.environ.get("UNITARES_CHECKIN_LOG", "~/.unitares/checkins.log")).expanduser()
         self.audit_log_tail = audit_log_tail
 
@@ -275,6 +277,15 @@ class IdentitySidecar:
             return False
         supplied = raw[len(prefix):]
         return bool(supplied) and hmac.compare_digest(supplied, self.capability_token)
+
+    def startup_proof(self, challenge: str) -> str | None:
+        if not self.startup_secret:
+            return None
+        return hmac.new(
+            self.startup_secret.encode("utf-8"),
+            challenge.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
 
     def read_session(self, slot: str) -> dict[str, Any]:
         return load_authoritative_session_for_hook(
@@ -717,12 +728,20 @@ def make_handler(sidecar: IdentitySidecar) -> type[BaseHTTPRequestHandler]:
                 super().log_message(fmt, *args)
 
         def do_GET(self) -> None:  # noqa: N802
-            if not sidecar.authorized(self.headers):
-                _json_response(self, 401, {"success": False, "error": "unauthorized"})
-                return
             parsed = urllib.parse.urlparse(self.path)
             query = urllib.parse.parse_qs(parsed.query)
             path = parsed.path
+            if path == "/startup-proof":
+                challenge = (query.get("challenge") or [""])[0]
+                proof = sidecar.startup_proof(challenge)
+                if not challenge or proof is None:
+                    _json_response(self, 404, {"success": False, "error": "not found"})
+                else:
+                    _json_response(self, 200, {"success": True, "proof": proof})
+                return
+            if not sidecar.authorized(self.headers):
+                _json_response(self, 401, {"success": False, "error": "unauthorized"})
+                return
             if path == "/health":
                 _json_response(self, 200, {
                     "success": True,
@@ -857,6 +876,9 @@ def main(argv: list[str] | None = None) -> int:
         timeout=args.timeout,
         auth_token=os.environ.get("UNITARES_HTTP_API_TOKEN") or None,
         capability_token=capability_token,
+        startup_secret=(
+            os.environ.get("UNITARES_SIDECAR_STARTUP_SECRET") or ""
+        ).strip() or None,
         audit_log_tail=args.audit_log_tail,
     )
     httpd = BoundedThreadingHTTPServer((args.host, args.port), make_handler(sidecar))

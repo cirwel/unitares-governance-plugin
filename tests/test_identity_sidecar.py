@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import hmac
 import json
 import socket
 import threading
@@ -705,6 +707,38 @@ def test_every_get_route_requires_the_sidecar_capability(
     finally:
         _stop_server(srv, thread)
     assert raised.value.code == 401
+
+
+def test_startup_proof_authenticates_listener_without_disclosing_capability(
+    tmp_path: Path, fake_server: str
+) -> None:
+    sidecar = IdentitySidecar(
+        server_url=fake_server,
+        workspace=tmp_path,
+        agent_name="sidecar-agent",
+        model_type="sidecar-test",
+        default_slot="slot-a",
+        startup_secret="separate-startup-secret",
+    )
+    srv, thread, base_url = _serve_sidecar(sidecar)
+    challenge = "fresh-random-challenge"
+    try:
+        status, payload = _http_get_json(
+            f"{base_url}/startup-proof?challenge={challenge}"
+        )
+    finally:
+        _stop_server(srv, thread)
+
+    assert status == 200
+    assert payload == {
+        "success": True,
+        "proof": hmac.new(
+            b"separate-startup-secret",
+            challenge.encode(),
+            hashlib.sha256,
+        ).hexdigest(),
+    }
+    assert sidecar.capability_token not in json.dumps(payload)
 
 
 def test_post_route_rejects_unauthenticated_governance_call(

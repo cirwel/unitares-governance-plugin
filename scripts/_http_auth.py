@@ -60,6 +60,10 @@ class _AuthorizationSafeRedirectHandler(urllib.request.HTTPRedirectHandler):
 _AUTHORIZATION_SAFE_OPENER = urllib.request.build_opener(
     _AuthorizationSafeRedirectHandler()
 )
+_LOOPBACK_DIRECT_OPENER = urllib.request.build_opener(
+    urllib.request.ProxyHandler({}),
+    _AuthorizationSafeRedirectHandler(),
+)
 
 
 def _is_loopback_host(host: str) -> bool:
@@ -71,19 +75,25 @@ def _is_loopback_host(host: str) -> bool:
         return False
 
 
-def _validate_bearer_transport(request: urllib.request.Request) -> None:
-    authorization = str(request.get_header("Authorization") or "").strip()
-    if not authorization:
-        return
+def _validate_governance_transport(
+    request: urllib.request.Request,
+) -> tuple[str, str, int]:
     origin = _http_origin(request.full_url)
     if origin is None:
-        raise InsecureBearerTransportError("bearer request URL is malformed")
+        raise InsecureBearerTransportError("governance request URL is malformed")
     scheme, host, _port = origin
     if scheme == "https" or (scheme == "http" and _is_loopback_host(host)):
-        return
+        return origin
     raise InsecureBearerTransportError(
-        "refusing to send an authorization bearer over non-loopback HTTP"
+        "refusing to send governance data over non-loopback HTTP"
     )
+
+
+def _validate_bearer_transport(
+    request: urllib.request.Request,
+) -> tuple[str, str, int]:
+    """Compatibility name for callers of the original transport validator."""
+    return _validate_governance_transport(request)
 
 
 def authorization_safe_urlopen(
@@ -91,9 +101,14 @@ def authorization_safe_urlopen(
     *,
     timeout: float,
 ) -> Any:
-    """Open a request while refusing every cross-origin redirect."""
-    _validate_bearer_transport(request)
-    return _AUTHORIZATION_SAFE_OPENER.open(request, timeout=timeout)
+    """Open a governance request with safe transport and redirects."""
+    scheme, host, _port = _validate_governance_transport(request)
+    opener = (
+        _LOOPBACK_DIRECT_OPENER
+        if scheme == "http" and _is_loopback_host(host)
+        else _AUTHORIZATION_SAFE_OPENER
+    )
+    return opener.open(request, timeout=timeout)
 
 
 def read_limited_response(
