@@ -1,13 +1,14 @@
-# UNITARES for Claude Code and Codex
+# UNITARES for Claude Code, Codex, and ChatGPT
 
 [![CI](https://github.com/cirwel/unitares-governance-plugin/actions/workflows/ci.yml/badge.svg)](https://github.com/cirwel/unitares-governance-plugin/actions/workflows/ci.yml)
 [![Version](https://img.shields.io/badge/version-0.4.22-blue.svg)](.claude-plugin/plugin.json)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
-Connect **Claude Code and Codex** to [UNITARES](https://github.com/cirwel/unitares),
-accountability infrastructure for long-running AI agents. Keep identity,
-findings, reviews, and outcomes in an attributed record that the operator and
-later agents can recover after a session ends.
+Connect **Claude Code, Codex, and ChatGPT** to
+[UNITARES](https://github.com/cirwel/unitares), accountability infrastructure
+for long-running AI agents. Keep identity, findings, reviews, and outcomes in
+an attributed record that the operator and later agents can recover after a
+session ends.
 
 This plugin supplies the MCP connection, lifecycle hooks, skills, and client
 helpers. It connects to a **self-hosted, single-operator UNITARES server**;
@@ -76,6 +77,24 @@ bundled transport and register an authenticated `unitares-governance` server.
 [CODEX_START.md](CODEX_START.md) covers explicit use, hook behavior, and the
 local continuity cache. Hook scripts must exist in the client's execution
 environment; installing a plugin on the web does not deploy local scripts.
+
+### ChatGPT
+
+Build a hook-free portable package after registering the UNITARES MCP endpoint
+in ChatGPT, or build a direct OAuth-DCR package for a hosted HTTPS endpoint:
+
+```bash
+python3 scripts/dev/build-chatgpt-plugin.py \
+  --app-id plugin_asdk_app_REPLACE_ME \
+  --output /absolute/path/to/unitares-chatgpt \
+  --archive /absolute/path/to/unitares-chatgpt.zip
+```
+
+The generated package copies the canonical skills but never includes local
+hooks, scripts, credentials, or skill attestations. ChatGPT therefore uses the
+explicit lifecycle described by the server and skills. See the
+[ChatGPT package guide](docs/chatgpt.md) for both connection modes and server
+requirements.
 
 ## Core workflow
 
@@ -160,6 +179,7 @@ install lifecycle automation.
 | Guide | Read it for |
 |---|---|
 | [Codex quickstart](CODEX_START.md) | Setup, explicit workflow, and continuity caches |
+| [ChatGPT package](docs/chatgpt.md) | Build a hook-free portable plugin for a registered app or hosted OAuth MCP server |
 | [Configuration](docs/configuration.md) | Authentication, remote servers, environment variables, and kill switches |
 | [Adapter reference](docs/adapters.md) | Host contracts, Claude/Codex differences, sidecar, and wrapper |
 | [Check-ins](docs/check-ins.md) | Automatic versus agent-authored records, triggers, logs, and upgrades |
