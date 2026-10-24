@@ -1471,7 +1471,8 @@ def test_cmd_list_returns_slot_inventory_newest_first(tmp_path: Path) -> None:
     # pattern misuse; the surface explicitly steers toward declared lineage.
     assert "uuid" not in entries[0]
     assert "client_session_id" not in entries[0]
-    assert "prior_client_session_id" in entries[0]
+    assert "prior_client_session_id" not in entries[0]
+    assert "client_session_id" not in entries[0]
 
 
 def test_cmd_list_filters_null_identity_entries(tmp_path: Path) -> None:

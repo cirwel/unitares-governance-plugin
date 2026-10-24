@@ -38,9 +38,9 @@ Contract:
 - Denies proofless identity() in an already-bound current-process slot. The
   server promotes that apparently read-shaped call to force_new=true, so
   letting it through would silently replace the slot's working identity.
-- Skips when the call already carries any identity proof field
-  (client_session_id, continuity_token, agent_uuid, agent_id) — explicit
-  caller intent always wins.
+- Preserves explicit identity fields only when they do not conflict with the
+  protected current-slot binding. A foreign client_session_id or any cached-
+  slot continuity_token is denied before the call can override attribution.
 - Reads ONLY the slot-scoped session cache (slot = Claude session_id via
   _session_lookup; no workspace-flat fallback). With the post-identity
   subagent guard, the slot cache holds the driver's identity.
@@ -141,6 +141,7 @@ GATEWAY_SUFFIXES = frozenset({"use_tool"})
 ANCHORED_MINT_SUFFIXES = frozenset({"onboard", "start_session"})
 IDENTITY_ASSERT_SUFFIXES = frozenset({"identity"})
 PROOF_FIELDS = ("client_session_id", "continuity_token", "agent_uuid", "agent_id")
+SLOT_BOUND_PROOF_FIELDS = ("client_session_id", "continuity_token")
 # spawn_reason values that declare a deliberate new identity inside an already
 # bound slot. "new_session" and an absent reason do not: a process that is
 # already bound is not a new session.
@@ -291,6 +292,33 @@ def _env_anchor() -> str:
     return value.strip()
 
 
+def _foreign_slot_proof_reason(tool_input: dict, raw: str) -> str | None:
+    """Reject proof that conflicts with this host slot's protected owner."""
+    try:
+        from _session_lookup import load_usable_session_for_hook
+
+        session = load_usable_session_for_hook(Path.cwd(), raw)
+    except Exception:
+        session = {}
+    if not session:
+        return None
+    for field in SLOT_BOUND_PROOF_FIELDS:
+        value = tool_input.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            continue
+        expected = session.get(field)
+        if (
+            not isinstance(value, str)
+            or not isinstance(expected, str)
+            or value.strip() != expected.strip()
+        ):
+            return (
+                f"Refusing {field} that conflicts with the protected current-slot "
+                "identity. Use the active slot binding or start a new governed session."
+            )
+    return None
+
+
 def _gateway_target_injectable(tool_input: dict) -> bool:
     """Whether a use_tool call may carry the cached session to its target.
 
@@ -350,6 +378,14 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if suffix in GATEWAY_SUFFIXES and not _gateway_target_injectable(tool_input):
+        nested = tool_input.get("arguments")
+        mismatch = (
+            _foreign_slot_proof_reason(nested, raw)
+            if isinstance(nested, dict)
+            else None
+        )
+        if mismatch:
+            print(json.dumps(_deny_output(mismatch)))
         return 0
 
     if suffix in IDENTITY_ASSERT_SUFFIXES:
@@ -360,6 +396,11 @@ def main(argv: list[str] | None = None) -> int:
 
     updated = dict(tool_input)
     changed = False
+
+    mismatch = _foreign_slot_proof_reason(tool_input, raw)
+    if mismatch:
+        print(json.dumps(_deny_output(mismatch)))
+        return 0
 
     if suffix in ANCHORED_MINT_SUFFIXES:
         # Anchored dispatch/beam conversations provide a stable per-thread

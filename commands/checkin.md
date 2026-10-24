@@ -2,22 +2,26 @@
 description: "Manual UNITARES governance check-in for the current turn"
 ---
 
-Before calling tools, check for slot-scoped session caches in the current workspace.
+Use only the binding already attached to this live process. Do not scan
+workspace cache inventory, pick the newest slot, or copy a
+`client_session_id` from another cache: workspace files are lineage hints, not
+identity proof. A host hook may read the protected HOME binding for its exact
+current session slot; an interactive command must not guess that slot.
 
-Use the shared helper in this plugin repo:
-
-- `scripts/session_cache.py list --workspace "$PWD"` — slot inventory sorted newest-first; pick the entry whose `slot` matches your current `client_session_id`, or the newest entry if you do not have one yet
-- `scripts/session_cache.py get session --slot=<slot>` — read that specific cache
-
-Bare `get session` (no `--slot`) returns the legacy flat `session.json`, which under S20 is read-only-legacy — do not write back to it and do not assume it corresponds to this process-instance.
-
-If a matching cache exists:
+If the current process already has a binding:
 
 - use `uuid` as the expected local identity anchor, not proof by itself
 - rely on the active session binding or `client_session_id` for ordinary check-ins
 - do not pass `continuity_token` to `process_agent_update`; it is reserved for explicit PATH 0 ownership rebinds
 
-If current binding is unclear, call `identity(client_session_id=<your client_session_id>)` to inspect the active binding. Never call `identity()` with no arguments: a call carrying no proof argument is gated to a fresh mint, so it reports on a newly created identity instead of yours. Trust the answer only when `identity_assurance.caller_proven` is true.
+If the current binding is unclear or no exact current-process
+`client_session_id` is available, use `/governance-start`; do not adopt one
+from cache inventory. When a live proof is available, call
+`identity(client_session_id=<your client_session_id>)` to inspect the active
+binding. Never call `identity()` with no arguments: a call carrying no proof
+argument is gated to a fresh mint, so it reports on a newly created identity
+instead of yours. Trust the answer only when
+`identity_assurance.caller_proven` is true.
 
 If you must rebind to a cached UUID, include a matching live `continuity_token`
 from the same process response: `identity(agent_uuid=<uuid>,

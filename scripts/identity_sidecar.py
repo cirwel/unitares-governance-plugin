@@ -77,6 +77,10 @@ class RequestBodyError(ValueError):
         self.status = status
 
 
+class ForeignSlotProofError(ValueError):
+    """A caller tried to route a slot-bound sidecar through another identity."""
+
+
 class BoundedThreadingHTTPServer(ThreadingHTTPServer):
     """Threaded loopback server with a hard cap on active handlers."""
 
@@ -174,17 +178,6 @@ def _handler_base_url(handler: BaseHTTPRequestHandler) -> str:
         address = handler.server.server_address
         host = f"{address[0]}:{address[1]}"
     return f"{scheme}://{host}".rstrip("/")
-
-
-def _has_proof_field(arguments: dict[str, Any]) -> bool:
-    for field in PROOF_FIELDS:
-        value = arguments.get(field)
-        if value is None:
-            continue
-        if isinstance(value, str) and not value.strip():
-            continue
-        return True
-    return False
 
 
 def _post_json(url: str, payload: dict[str, Any], timeout: float, token: str | None) -> tuple[dict[str, Any], int, str | None]:
@@ -446,11 +439,32 @@ class IdentitySidecar:
             arguments.setdefault("force_new", True)
             arguments.setdefault("name", self.agent_name)
             arguments.setdefault("model_type", self.model_type)
-        elif name in INJECT_SUFFIXES and not _has_proof_field(arguments):
+        elif name in INJECT_SUFFIXES:
             ensured = self.ensure_session(slot)
             lifecycle["ensure_session"] = {k: v for k, v in ensured.items() if k != "session"}
             sid = ensured.get("client_session_id")
-            if isinstance(sid, str) and sid.strip():
+            authority = ensured.get("session")
+            if not isinstance(authority, dict):
+                authority = ensured
+            provided = {
+                field: value
+                for field in PROOF_FIELDS
+                if (value := arguments.get(field)) is not None
+                and (not isinstance(value, str) or value.strip())
+            }
+            mismatched = [
+                field
+                for field, value in provided.items()
+                if not isinstance(value, str)
+                or not isinstance(authority.get(field), str)
+                or value.strip() != str(authority.get(field)).strip()
+            ]
+            if mismatched:
+                raise ForeignSlotProofError(
+                    "sidecar proof does not match its configured slot binding: "
+                    + ", ".join(sorted(mismatched))
+                )
+            if isinstance(sid, str) and sid.strip() and not provided:
                 arguments["client_session_id"] = sid.strip()
                 lifecycle["session_proof_injected"] = True
         return arguments, lifecycle
@@ -486,11 +500,14 @@ class IdentitySidecar:
         if not isinstance(arguments, dict):
             return 400, {"success": False, "error": "arguments must be an object"}
         slot = self.slot_from(body, headers)
-        arguments, lifecycle = self.prepare_tool_arguments(
-            name=name,
-            arguments=arguments,
-            slot=slot,
-        )
+        try:
+            arguments, lifecycle = self.prepare_tool_arguments(
+                name=name,
+                arguments=arguments,
+                slot=slot,
+            )
+        except ForeignSlotProofError as exc:
+            return 409, {"success": False, "error": str(exc)}
         identity_generation = None
         if name in IDENTITY_TOOL_NAMES:
             _session, identity_generation = _read_cache_snapshot(self.workspace, slot)
@@ -548,11 +565,18 @@ class IdentitySidecar:
                     name = params.get("name")
                     arguments = params.get("arguments")
                     if isinstance(name, str):
-                        prepared, lifecycle = self.prepare_tool_arguments(
-                            name=name,
-                            arguments=arguments if isinstance(arguments, dict) else {},
-                            slot=slot,
-                        )
+                        try:
+                            prepared, lifecycle = self.prepare_tool_arguments(
+                                name=name,
+                                arguments=arguments if isinstance(arguments, dict) else {},
+                                slot=slot,
+                            )
+                        except ForeignSlotProofError as exc:
+                            return 409, {
+                                "jsonrpc": "2.0",
+                                "id": req.get("id"),
+                                "error": {"code": -32001, "message": str(exc)},
+                            }
                         new_params = dict(params)
                         new_params["arguments"] = prepared
                         req["params"] = new_params

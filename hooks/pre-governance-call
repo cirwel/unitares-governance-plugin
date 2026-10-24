@@ -94,10 +94,15 @@ fi
 if [[ -n "${CHECKIN_TOOL_USE_ID}" \
       && -n "${HOOK_SLOT}" \
       && -f "${SESSION_CACHE_HELPER}" ]]; then
-  python3 "${SESSION_CACHE_HELPER}" snapshot-milestone \
-    --workspace "${PWD}" \
-    --event-id "${CHECKIN_TOOL_USE_ID}" \
-    --slot "${HOOK_SLOT}" >/dev/null 2>&1 || true
+  if python3 "${SESSION_CACHE_HELPER}" snapshot-session \
+      --workspace "${PWD}" \
+      --event-id "${CHECKIN_TOOL_USE_ID}" \
+      --slot "${HOOK_SLOT}" >/dev/null 2>&1; then
+    python3 "${SESSION_CACHE_HELPER}" snapshot-milestone \
+      --workspace "${PWD}" \
+      --event-id "${CHECKIN_TOOL_USE_ID}" \
+      --slot "${HOOK_SLOT}" >/dev/null 2>&1 || true
+  fi
 fi
 if [[ -n "${IDENTITY_TOOL_USE_ID}" \
       && -n "${HOOK_SLOT}" \

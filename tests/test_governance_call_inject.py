@@ -143,7 +143,11 @@ class TestInjection:
         _write_cache(tmp_path)
         result = _run(_hook_input("mcp__unitares-governance__use_tool", {
             "tool_name": "check_working_state", "arguments": {field: "explicit"}}), tmp_path)
-        assert _updated_input(result) is None
+        if field in {"client_session_id", "continuity_token"}:
+            decision = json.loads(result.stdout)["hookSpecificOutput"]
+            assert decision["permissionDecision"] == "deny"
+        else:
+            assert _updated_input(result) is None
 
     @pytest.mark.parametrize("tool_input", [
         {"arguments": {}},                                    # no target named
@@ -454,14 +458,23 @@ class TestExclusions:
         assert result.stdout.strip() == ""
 
 
-class TestProofFieldsWin:
+class TestProofFieldsRespectSlotAuthority:
 
-    def test_explicit_client_session_id_wins(self, tmp_path):
+    def test_matching_explicit_client_session_id_passes(self, tmp_path):
         _write_cache(tmp_path)
         result = _run(_hook_input(
             "mcp__unitares-governance__process_agent_update",
-            {"client_session_id": "agent-explicit-111"}), tmp_path)
+            {"client_session_id": SID}), tmp_path)
         assert result.stdout.strip() == ""
+
+    def test_foreign_explicit_client_session_id_is_denied(self, tmp_path):
+        _write_cache(tmp_path)
+        result = _run(_hook_input(
+            "mcp__unitares-governance__process_agent_update",
+            {"client_session_id": "agent-foreign-111"}), tmp_path)
+        decision = json.loads(result.stdout)["hookSpecificOutput"]
+        assert decision["permissionDecision"] == "deny"
+        assert "protected current-slot identity" in decision["permissionDecisionReason"]
 
     def test_explicit_agent_id_wins(self, tmp_path):
         # A call naming its target carries its own proof signal — a
@@ -688,12 +701,12 @@ class TestDuplicateMintGuard:
         result = _run(_hook_input("mcp__unitares-governance__start_session", {}), tmp_path)
         assert result.stdout.strip() == ""
 
-    def test_explicit_proof_field_passes(self, tmp_path):
+    def test_foreign_proof_field_is_denied(self, tmp_path):
         _write_cache(tmp_path)
         result = _run(_hook_input(
             "mcp__unitares-governance__start_session",
             {"force_new": True, "client_session_id": "agent-other"}), tmp_path)
-        assert result.stdout.strip() == ""
+        assert self._decision(result)["permissionDecision"] == "deny"
 
     def test_codex_host_denies_too(self, tmp_path):
         _write_cache(tmp_path)
