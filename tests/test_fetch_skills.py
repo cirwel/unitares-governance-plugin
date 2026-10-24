@@ -26,6 +26,8 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "_fetch_skills.py"
+sys.path.insert(0, str(ROOT / "scripts"))
+import _fetch_skills  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -216,7 +218,10 @@ def test_fresh_fetch_writes_cache_at_mode_0600(
     result = _run(plugin_root=fake_plugin_root, server_url=mock_server["url"])
     assert result.returncode == 0
 
-    cache_file = isolated_cache / "governance-fundamentals.json"
+    cache_file = _fetch_skills._cache_path_for(
+        "governance-fundamentals",
+        mock_server["url"],
+    )
     assert cache_file.exists()
     import stat as _stat
     assert _stat.S_IMODE(os.stat(cache_file).st_mode) == 0o600
@@ -472,7 +477,7 @@ def test_cache_filename_is_identity_blind(
     subprocess.run(cmd, env=env_b, capture_output=True, check=True)
 
     files = sorted(p.name for p in isolated_cache.iterdir())
-    assert files == ["governance-fundamentals.json"], (
+    assert len(files) == 1 and files[0].startswith("governance-fundamentals-"), (
         f"Cache directory must contain exactly one file (identity-blind); "
         f"got {files}"
     )
@@ -628,7 +633,10 @@ def test_concurrent_writes_do_not_corrupt_cache(
     rcs = [p.wait(timeout=20) for p in procs]
     assert all(rc == 0 for rc in rcs), f"some procs failed: {rcs}"
 
-    cache_file = isolated_cache / "governance-fundamentals.json"
+    cache_file = _fetch_skills._cache_path_for(
+        "governance-fundamentals",
+        mock_server["url"],
+    )
     assert cache_file.exists()
     cached = json.loads(cache_file.read_text())  # must parse, no corruption
     assert "rendered" in cached
@@ -698,7 +706,10 @@ def test_future_fetched_at_does_not_pin_cache_eternally(
     fetched_at < ttl` check would otherwise return True forever. The
     fix floors the delta at zero so future timestamps trigger a
     refetch instead of pinning the cache as eternally fresh."""
-    cache_file = isolated_cache / "governance-fundamentals.json"
+    cache_file = _fetch_skills._cache_path_for(
+        "governance-fundamentals",
+        mock_server["url"],
+    )
     cache_file.parent.mkdir(parents=True, exist_ok=True)
     cache_file.write_text(
         json.dumps(
@@ -707,6 +718,7 @@ def test_future_fetched_at_does_not_pin_cache_eternally(
                 "registry_hash": "sha256:poison",
                 "registry_version": "stale",
                 "content_hash": "sha256:poison",
+                "source_origin": _fetch_skills._normalized_origin(mock_server["url"]),
                 # 9999s in the future — without the floor, this would satisfy
                 # `delta < 300` and replay the poisoned content forever.
                 "fetched_at": int(time.time()) + 9999,
@@ -726,6 +738,28 @@ def test_future_fetched_at_does_not_pin_cache_eternally(
     assert "fresh server content" in result.stdout
     # And exactly one HTTP call landed.
     assert len(MockHandler.requests) == 1
+
+
+def test_cache_is_never_reused_after_server_origin_changes(
+    mock_server,
+    isolated_cache,
+    fake_plugin_root,
+) -> None:
+    MockHandler.response_payload = _server_response("# origin A content\n")
+    first = _run(plugin_root=fake_plugin_root, server_url=mock_server["url"])
+    assert first.returncode == 0
+    assert "origin A content" in first.stdout
+
+    second = _run(
+        plugin_root=fake_plugin_root,
+        server_url="http://127.0.0.1:1",
+        timeout=0.1,
+    )
+
+    assert second.returncode == 0
+    assert "origin A content" not in second.stdout
+    assert "Bundled mirror content" in second.stdout
+    assert "[FETCH_SKILLS_OFFLINE_CACHE]" not in second.stderr
 
 
 def test_write_cache_unlinks_tmp_on_replace_failure(
@@ -754,7 +788,11 @@ def test_write_cache_unlinks_tmp_on_replace_failure(
     monkeypatch.setattr(mod.os, "replace", boom)
 
     with pytest.raises(PermissionError):
-        mod._write_cache("governance-fundamentals", {"rendered": "x"})
+        mod._write_cache(
+            "governance-fundamentals",
+            "https://governance.example",
+            {"rendered": "x"},
+        )
 
     # No leftover tmp files. Without the fix, mkstemp left a
     # `.governance-fundamentals-XXXX.tmp` in the cache dir.

@@ -59,6 +59,8 @@ if [[ -n "${SERVER_URL_OVERRIDE}" ]]; then
 fi
 
 SERVER_URL="${UNITARES_SERVER_URL:-http://localhost:8767}"
+HEALTH_LOG="${UNITARES_SESSION_START_LOG:-${HOME}/.unitares/session-start.log}"
+SAFE_LOG_APPEND="${PLUGIN_ROOT}/scripts/safe_append_log.py"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -68,6 +70,14 @@ escape_for_json() {
 import json, sys
 print(json.dumps(sys.argv[1])[1:-1])
 " "$1"
+}
+
+append_health_log() {
+  if [[ -f "${SAFE_LOG_APPEND}" ]]; then
+    python3 "${SAFE_LOG_APPEND}" --path "${HEALTH_LOG}" >/dev/null 2>&1 || true
+  else
+    cat >/dev/null
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -134,7 +144,7 @@ elif [[ -f "${FETCH_SKILLS_HELPER}" ]]; then
     # full breadcrumb stream in HEALTH_LOG when they need it.
     SKILL_SOURCE=$(grep -E '^source=' "${SKILL_STDERR_FILE}" 2>/dev/null | tail -1 | sed -e 's/^source=//' || true)
     if [[ -n "${HEALTH_LOG:-}" ]]; then
-      cat "${SKILL_STDERR_FILE}" >>"${HEALTH_LOG}" 2>/dev/null || true
+      append_health_log <"${SKILL_STDERR_FILE}"
     fi
     rm -f "${SKILL_STDERR_FILE}"
   else
@@ -597,10 +607,10 @@ fi
 # ---------------------------------------------------------------------------
 # Ping governance server
 # ---------------------------------------------------------------------------
-HEALTH_LOG="${UNITARES_SESSION_START_LOG:-/tmp/unitares-session-start.log}"
 HEALTH_EXIT=0
-HEALTH_STATUS=$(curl -sS --max-time 3 "${SERVER_URL}/health" 2>>"${HEALTH_LOG}") || HEALTH_EXIT=$?
-printf '[%s] curl exit=%d len=%d url=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${HEALTH_EXIT}" "${#HEALTH_STATUS}" "${SERVER_URL}/health" >> "${HEALTH_LOG}" 2>/dev/null || true
+HEALTH_STATUS=$(curl -sS --max-time 3 "${SERVER_URL}/health" \
+  2> >(append_health_log)) || HEALTH_EXIT=$?
+printf '[%s] curl exit=%d len=%d url=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${HEALTH_EXIT}" "${#HEALTH_STATUS}" "${SERVER_URL}/health" | append_health_log
 
 ORCHESTRATED_MODE="$(printf '%s' "${UNITARES_ORCHESTRATED:-0}" | tr '[:upper:]' '[:lower:]')"
 ANCHOR_RESUME_ENABLED=0
@@ -994,7 +1004,7 @@ if [[ "${KG_RECALL_ALREADY_SHOWN}" != "1" ]]; then
           SHOULD_WRITE_KG_RECALL_MARKER=1
         fi
         KG_RECALL_CONTEXT=$(python3 "${KG_RECALL_HELPER}" "${KG_RECALL_ARGS[@]}" \
-          2>>"${HEALTH_LOG}" || true)
+          2> >(append_health_log) || true)
       fi
       ;;
     hint)
