@@ -34,9 +34,11 @@ def test_post_edit_routes_through_checkin_py_with_plugin_hook_metadata(tmp_path)
     # cache `slot` field), so the slotted cache filename and the stdin slot
     # must match for the hook to find the cache.
     slot = "edit-slot"
-    unitares_dir = tmp_path / ".unitares"
-    unitares_dir.mkdir()
-    session_cache = unitares_dir / f"session-{slot}.json"
+    workspace = tmp_path / "work');__import__('pathlib').Path('.injected').write_text('owned');#"
+    workspace.mkdir()
+    home_unitares = tmp_path / ".unitares"
+    home_unitares.mkdir()
+    session_cache = home_unitares / f"session-{slot}.json"
     session_cache.write_text(json.dumps({
         "uuid": "86ae619f-87e0-4040-8f29-eacece0c7904",
         "client_session_id": "agent-edit-test",
@@ -45,7 +47,9 @@ def test_post_edit_routes_through_checkin_py_with_plugin_hook_metadata(tmp_path)
         "last_checkin_ts": int(time.time()) - 10_000,  # long past threshold
     }))
     session_cache.chmod(0o600)
-    (unitares_dir / "last-milestone.json").write_text(json.dumps({
+    workspace_unitares = workspace / ".unitares"
+    workspace_unitares.mkdir()
+    (workspace_unitares / "last-milestone.json").write_text(json.dumps({
         "edit_count": 10,  # well past default threshold of 5
         "files_touched": ["a.py", "b.py"],
         "last_edit_ts": int(time.time()),
@@ -58,7 +62,7 @@ def test_post_edit_routes_through_checkin_py_with_plugin_hook_metadata(tmp_path)
         "hook_event_name": "PostToolUse",
         "session_id": slot,
         "tool_name": "Edit",
-        "tool_input": {"file_path": str(tmp_path / "c.py")},
+        "tool_input": {"file_path": str(workspace / "c.py")},
     })
 
     try:
@@ -69,7 +73,7 @@ def test_post_edit_routes_through_checkin_py_with_plugin_hook_metadata(tmp_path)
             "UNITARES_CHECKIN_LOG": str(tmp_path / "cl.log"),
             "UNITARES_AUTO_CHECKIN_ENABLED": "1",
             "CLAUDE_PLUGIN_ROOT": str(PLUGIN_ROOT),
-            "PWD": str(tmp_path),
+            "PWD": str(workspace),
         }
         hook = PLUGIN_ROOT / "hooks" / "post-edit"
         subprocess.run(
@@ -79,7 +83,7 @@ def test_post_edit_routes_through_checkin_py_with_plugin_hook_metadata(tmp_path)
             text=True,
             timeout=15,
             check=False,
-            cwd=str(tmp_path),
+            cwd=str(workspace),
         )
     finally:
         srv.shutdown()
@@ -98,3 +102,4 @@ def test_post_edit_routes_through_checkin_py_with_plugin_hook_metadata(tmp_path)
     assert auto_edit[0]["arguments"]["metadata"]["source"] == "plugin_hook"
     assert auto_edit[0]["arguments"]["epistemic_class"] == "substrate_interpretation"
     assert "continuity_token" not in auto_edit[0]["arguments"]
+    assert not (workspace / ".injected").exists()
