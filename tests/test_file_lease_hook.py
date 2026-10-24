@@ -15,8 +15,12 @@ from scripts import file_lease_hook
 
 
 @pytest.fixture(autouse=True)
-def _allow_explicit_test_loopback_http(monkeypatch: pytest.MonkeyPatch) -> None:
+def _allow_explicit_test_loopback_http(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     monkeypatch.setenv("UNITARES_ALLOW_INSECURE_LOOPBACK_LEASE_HTTP", "1")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
 
 
 class _ReusableTCPServer(socketserver.TCPServer):
@@ -146,6 +150,40 @@ def _lease_env(monkeypatch, lease_server):
     monkeypatch.setenv("UNITARES_SECRETS_ENV", "/dev/null")
 
 
+def _seed_state(
+    workspace: Path,
+    slot: str,
+    tool_use_id: str,
+    leases: dict[str, dict],
+    *,
+    holder_uuid: str = "33333333-3333-4333-8333-333333333333",
+) -> Path:
+    bound_leases = {}
+    for surface, row in leases.items():
+        bound_leases[surface] = {
+            **row,
+            "surface_id": surface,
+            "holder_uuid": holder_uuid,
+            "tool_use_id": tool_use_id,
+        }
+    state = {
+        "version": file_lease_hook.STATE_VERSION,
+        "slot": slot,
+        "workspace": str(workspace.resolve()),
+        "tool_use_id": tool_use_id,
+        "holder_uuid": holder_uuid,
+        "leases": bound_leases,
+    }
+    file_lease_hook._save_state(
+        workspace,
+        slot,
+        state,
+        tool_use_id,
+        token="lease-token",
+    )
+    return file_lease_hook._state_path(workspace, slot, tool_use_id)
+
+
 def test_configured_loopback_bearer_is_withheld_without_explicit_opt_in(
     tmp_path,
     monkeypatch,
@@ -202,7 +240,15 @@ def test_pre_edit_acquires_file_lease_and_records_state(tmp_path, monkeypatch, l
     state = json.loads(
         file_lease_hook._state_path(tmp_path, "slot-1", tool_use_id).read_text()
     )
-    assert state["version"] == 1
+    assert state["version"] == file_lease_hook.STATE_VERSION
+    assert len(state["integrity"]) == 64
+    state_path = file_lease_hook._state_path(tmp_path, "slot-1", tool_use_id)
+    assert state_path != file_lease_hook._legacy_state_path(
+        tmp_path, "slot-1", tool_use_id
+    )
+    assert "file-lease-state" in state_path.parts
+    if file_lease_hook.os.name != "nt":
+        assert state_path.stat().st_mode & 0o077 == 0
     assert state["leases"]["file:///tmp/example.py"]["lease_id"] == "11111111-1111-4111-8111-111111111111"
 
 
@@ -317,25 +363,16 @@ def test_heartbeat_session_is_compatibility_noop(tmp_path, monkeypatch, lease_se
 
 def test_release_session_releases_and_removes_state(tmp_path, monkeypatch, lease_server):
     _lease_env(monkeypatch, lease_server)
-    lease_dir = tmp_path / ".unitares"
-    lease_dir.mkdir()
-    state_path = lease_dir / "file-leases-slot-1.json"
-    state_path.write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "slot": "slot-1",
-                "workspace": str(tmp_path),
-                "holder_uuid": "33333333-3333-4333-8333-333333333333",
-                "leases": {
-                    "file:///tmp/example.py": {
-                        "lease_id": "11111111-1111-4111-8111-111111111111",
-                        "path": "a.py",
-                        "surface_id": "file:///tmp/example.py",
-                    }
-                },
+    state_path = _seed_state(
+        tmp_path,
+        "slot-1",
+        "",
+        {
+            "file:///tmp/example.py": {
+                "lease_id": "11111111-1111-4111-8111-111111111111",
+                "path": "a.py",
             }
-        )
+        },
     )
 
     rc = file_lease_hook.main(["release-session", "--workspace", str(tmp_path)], stdin_text=_payload())
@@ -347,34 +384,21 @@ def test_release_session_releases_and_removes_state(tmp_path, monkeypatch, lease
 
 def test_release_edit_releases_only_edited_file_and_keeps_others(tmp_path, monkeypatch, lease_server):
     _lease_env(monkeypatch, lease_server)
-    lease_dir = tmp_path / ".unitares"
-    lease_dir.mkdir()
     tool_use_id = "toolu_release"
-    state_path = file_lease_hook._state_path(tmp_path, "slot-1", tool_use_id)
-    state_path.write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "slot": "slot-1",
-                "tool_use_id": tool_use_id,
-                "workspace": str(tmp_path),
-                "holder_uuid": "33333333-3333-4333-8333-333333333333",
-                "leases": {
-                    "file:///tmp/a.py": {
-                        "lease_id": "11111111-1111-4111-8111-111111111111",
-                        "path": "a.py",
-                        "surface_id": "file:///tmp/a.py",
-                        "tool_use_id": tool_use_id,
-                    },
-                    "file:///tmp/b.py": {
-                        "lease_id": "22222222-2222-4222-8222-222222222222",
-                        "path": "b.py",
-                        "surface_id": "file:///tmp/b.py",
-                        "tool_use_id": tool_use_id,
-                    },
-                },
-            }
-        )
+    state_path = _seed_state(
+        tmp_path,
+        "slot-1",
+        tool_use_id,
+        {
+            "file:///tmp/a.py": {
+                "lease_id": "11111111-1111-4111-8111-111111111111",
+                "path": "a.py",
+            },
+            "file:///tmp/b.py": {
+                "lease_id": "22222222-2222-4222-8222-222222222222",
+                "path": "b.py",
+            },
+        },
     )
 
     rc = file_lease_hook.main(
@@ -394,27 +418,17 @@ def test_release_edit_releases_only_edited_file_and_keeps_others(tmp_path, monke
 
 def test_release_edit_noop_when_file_not_leased(tmp_path, monkeypatch, lease_server):
     _lease_env(monkeypatch, lease_server)
-    lease_dir = tmp_path / ".unitares"
-    lease_dir.mkdir()
     tool_use_id = "toolu_unleased"
-    file_lease_hook._state_path(tmp_path, "slot-1", tool_use_id).write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "slot": "slot-1",
-                "tool_use_id": tool_use_id,
-                "workspace": str(tmp_path),
-                "holder_uuid": "33333333-3333-4333-8333-333333333333",
-                "leases": {
-                    "file:///tmp/b.py": {
-                        "lease_id": "22222222-2222-4222-8222-222222222222",
-                        "path": "b.py",
-                        "surface_id": "file:///tmp/b.py",
-                        "tool_use_id": tool_use_id,
-                    }
-                },
+    _seed_state(
+        tmp_path,
+        "slot-1",
+        tool_use_id,
+        {
+            "file:///tmp/b.py": {
+                "lease_id": "22222222-2222-4222-8222-222222222222",
+                "path": "b.py",
             }
-        )
+        },
     )
 
     rc = file_lease_hook.main(
@@ -426,12 +440,12 @@ def test_release_edit_noop_when_file_not_leased(tmp_path, monkeypatch, lease_ser
     assert LeaseHandler.calls == []  # nothing released for an unleased file
 
 
-def test_release_edit_adopts_exact_legacy_session_state(
+def test_release_edit_does_not_adopt_workspace_legacy_state(
     tmp_path, monkeypatch, lease_server
 ):
     _lease_env(monkeypatch, lease_server)
-    legacy_path = file_lease_hook._state_path(tmp_path, "slot-1")
-    legacy_path.parent.mkdir()
+    legacy_path = file_lease_hook._legacy_state_path(tmp_path, "slot-1")
+    legacy_path.parent.mkdir(parents=True)
     legacy_path.write_text(
         json.dumps(
             {
@@ -455,15 +469,98 @@ def test_release_edit_adopts_exact_legacy_session_state(
     )
 
     assert rc == 0
-    assert [call["path"] for call in LeaseHandler.calls] == ["/v1/lease/release"]
-    assert not legacy_path.exists()
+    assert LeaseHandler.calls == []
+    assert legacy_path.exists()
+
+
+def test_workspace_state_cannot_substitute_foreign_lease(
+    tmp_path, monkeypatch, lease_server
+):
+    _lease_env(monkeypatch, lease_server)
+    tool_use_id = "toolu_workspace_substitution"
+    owned_id = "11111111-1111-4111-8111-111111111111"
+    foreign_id = "22222222-2222-4222-8222-222222222222"
+    _seed_state(
+        tmp_path,
+        "slot-1",
+        tool_use_id,
+        {
+            "file:///tmp/a.py": {
+                "lease_id": owned_id,
+                "path": "a.py",
+            }
+        },
+    )
+    workspace_state = file_lease_hook._legacy_state_path(
+        tmp_path, "slot-1", tool_use_id
+    )
+    workspace_state.parent.mkdir(parents=True, exist_ok=True)
+    workspace_state.write_text(
+        json.dumps(
+            {
+                "version": file_lease_hook.STATE_VERSION,
+                "slot": "slot-1",
+                "workspace": str(tmp_path),
+                "tool_use_id": tool_use_id,
+                "holder_uuid": "foreign-holder",
+                "leases": {
+                    "file:///tmp/a.py": {
+                        "lease_id": foreign_id,
+                        "path": "a.py",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    rc = file_lease_hook.main(
+        ["release-edit", "--workspace", str(tmp_path)],
+        stdin_text=_payload(path="a.py", tool_use_id=tool_use_id),
+    )
+
+    assert rc == 0
+    assert [call["body"]["lease_id"] for call in LeaseHandler.calls] == [owned_id]
+    assert workspace_state.exists()
+
+
+def test_tampered_protected_row_cannot_release_foreign_lease(
+    tmp_path, monkeypatch, lease_server
+):
+    _lease_env(monkeypatch, lease_server)
+    tool_use_id = "toolu_tampered_row"
+    state_path = _seed_state(
+        tmp_path,
+        "slot-1",
+        tool_use_id,
+        {
+            "file:///tmp/a.py": {
+                "lease_id": "11111111-1111-4111-8111-111111111111",
+                "path": "a.py",
+            }
+        },
+    )
+    tampered = json.loads(state_path.read_text(encoding="utf-8"))
+    tampered["leases"]["file:///tmp/a.py"]["lease_id"] = (
+        "22222222-2222-4222-8222-222222222222"
+    )
+    file_lease_hook._write_json(state_path, tampered)
+
+    rc = file_lease_hook.main(
+        ["release-edit", "--workspace", str(tmp_path)],
+        stdin_text=_payload(path="a.py", tool_use_id=tool_use_id),
+    )
+
+    assert rc == 0
+    assert LeaseHandler.calls == []
+    assert state_path.exists()
 
 
 def test_unknown_state_version_is_preserved(tmp_path, monkeypatch, lease_server):
     _lease_env(monkeypatch, lease_server)
     tool_use_id = "toolu_future_state"
     state_path = file_lease_hook._state_path(tmp_path, "slot-1", tool_use_id)
-    state_path.parent.mkdir()
+    state_path.parent.mkdir(parents=True)
     original = {
         "version": 99,
         "slot": "slot-1",
@@ -817,9 +914,10 @@ def test_claude_sync_release_allows_next_tool_holder(tmp_path, monkeypatch):
 
 
 def _edit_lock_sidecars(workspace: Path) -> list[str]:
+    state_dir = file_lease_hook._state_path(workspace, "probe").parent
     return sorted(
         p.name
-        for p in (workspace / ".unitares").glob("file-leases-*-edit-*.lock")
+        for p in state_dir.glob("file-leases-*-edit-*.lock")
     )
 
 
@@ -954,26 +1052,17 @@ def test_claude_batch_releases_only_completed_edit_tool_ids(tmp_path, monkeypatc
     slot = "shared-driver-slot"
 
     def seed(tool_use_id: str, lease_id: str, path: str) -> Path:
-        state_path = file_lease_hook._state_path(tmp_path, slot, tool_use_id)
-        state_path.parent.mkdir(parents=True, exist_ok=True)
-        state_path.write_text(
-            json.dumps(
-                {
-                    "version": 1,
-                    "slot": slot,
-                    "workspace": str(tmp_path),
-                    "tool_use_id": tool_use_id,
-                    "leases": {
-                        f"file://{tmp_path / path}": {
-                            "lease_id": lease_id,
-                            "path": path,
-                        }
-                    },
+        return _seed_state(
+            tmp_path,
+            slot,
+            tool_use_id,
+            {
+                f"file://{tmp_path / path}": {
+                    "lease_id": lease_id,
+                    "path": path,
                 }
-            ),
-            encoding="utf-8",
+            },
         )
-        return state_path
 
     completed = seed("toolu_completed", "lease-completed", "done.py")
     still_running = seed("toolu_background", "lease-background", "active.py")
@@ -1024,36 +1113,27 @@ def test_state_discovery_rejects_sanitized_slot_collision(tmp_path):
     legacy.write_text(json.dumps({"version": 1, "slot": slot_b, "leases": {}}))
 
     assert legacy not in file_lease_hook._state_paths(tmp_path, slot_a)
-    assert legacy in file_lease_hook._state_paths(tmp_path, slot_b)
+    assert legacy not in file_lease_hook._state_paths(tmp_path, slot_b)
 
 
 def test_codex_post_edit_releases_every_patch_path(tmp_path, monkeypatch):
     monkeypatch.setenv("LEASE_PLANE_BEARER_TOKEN", "lease-token")
     monkeypatch.setenv("UNITARES_SECRETS_ENV", "/dev/null")
     tool_use_id = "call_release_all"
-    state_path = file_lease_hook._state_path(tmp_path, "codex-slot", tool_use_id)
-    state_path.parent.mkdir()
-    state_path.write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "slot": "codex-slot",
-                "workspace": str(tmp_path),
-                "tool_use_id": tool_use_id,
-                "leases": {
-                    f"file://{tmp_path / 'a.py'}": {
-                        "lease_id": "lease-a",
-                        "path": "a.py",
-                        "surface_id": f"file://{tmp_path / 'a.py'}",
-                    },
-                    f"file://{tmp_path / 'b.py'}": {
-                        "lease_id": "lease-b",
-                        "path": "b.py",
-                        "surface_id": f"file://{tmp_path / 'b.py'}",
-                    },
-                },
-            }
-        )
+    state_path = _seed_state(
+        tmp_path,
+        "codex-slot",
+        tool_use_id,
+        {
+            f"file://{tmp_path / 'a.py'}": {
+                "lease_id": "lease-a",
+                "path": "a.py",
+            },
+            f"file://{tmp_path / 'b.py'}": {
+                "lease_id": "lease-b",
+                "path": "b.py",
+            },
+        },
     )
     released = []
 
@@ -1226,20 +1306,17 @@ def test_release_edit_path_setup_obeys_codex_deadline(tmp_path, monkeypatch):
     monkeypatch.setenv("UNITARES_SECRETS_ENV", "/dev/null")
     tool_use_id = "call_release_deadline"
     paths = tuple(f"/outside/repo-{index}/f.py" for index in range(256))
-    state_path = file_lease_hook._state_path(tmp_path, "codex-slot", tool_use_id)
-    state_path.parent.mkdir()
-    state_path.write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "slot": "codex-slot",
-                "tool_use_id": tool_use_id,
-                "leases": {
-                    f"file://legacy/{index}": {"lease_id": f"lease-{index}"}
-                    for index in range(256)
-                },
+    _seed_state(
+        tmp_path,
+        "codex-slot",
+        tool_use_id,
+        {
+            f"file://legacy/{index}": {
+                "lease_id": f"lease-{index}",
+                    "path": f"unrelated-{index}.py",
             }
-        )
+                for index, _path in enumerate(paths)
+        },
     )
     clock = [0.0]
     root_calls = []
@@ -1274,20 +1351,18 @@ def test_release_session_discovery_obeys_codex_deadline(tmp_path, monkeypatch):
     monkeypatch.setenv("UNITARES_SECRETS_ENV", "/dev/null")
     monkeypatch.setenv("UNITARES_FILE_LEASE_BATCH_TIMEOUT_S", "0.3")
     slot = "codex-many-states"
-    state_dir = tmp_path / ".unitares"
-    state_dir.mkdir()
+    state_dir = file_lease_hook._state_path(tmp_path, slot).parent
     for index in range(50):
-        file_lease_hook._state_path(tmp_path, slot, f"call-{index}").write_text(
-            json.dumps(
-                {
-                    "version": 1,
-                    "slot": slot,
-                    "tool_use_id": f"call-{index}",
-                    "leases": {
-                        f"file://repo/f-{index}.py": {"lease_id": f"lease-{index}"}
-                    },
+        _seed_state(
+            tmp_path,
+            slot,
+            f"call-{index}",
+            {
+                f"file://repo/f-{index}.py": {
+                    "lease_id": f"lease-{index}",
+                    "path": f"f-{index}.py",
                 }
-            )
+            },
         )
 
     clock = [0.0]
@@ -1321,18 +1396,11 @@ def test_release_session_discovery_obeys_codex_deadline(tmp_path, monkeypatch):
 
 
 def test_release_state_lock_wait_is_bounded_by_cleanup_deadline(tmp_path, monkeypatch):
-    state_path = file_lease_hook._state_path(tmp_path, "slot-lock", "call-lock")
-    state_path.parent.mkdir()
-    state_path.write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "slot": "slot-lock",
-                "tool_use_id": "call-lock",
-                "leases": {"file://repo/a.py": {"lease_id": "lease-lock"}},
-            }
-        ),
-        encoding="utf-8",
+    state_path = _seed_state(
+        tmp_path,
+        "slot-lock",
+        "call-lock",
+        {"file://repo/a.py": {"lease_id": "lease-lock", "path": "a.py"}},
     )
     monkeypatch.setattr(
         file_lease_hook,
@@ -1344,6 +1412,7 @@ def test_release_state_lock_wait_is_bounded_by_cleanup_deadline(tmp_path, monkey
         started = time.monotonic()
         deadline_reached = file_lease_hook._release_state_file(
             state_path,
+            workspace=tmp_path,
             token="lease-token",
             deadline=started + 0.08,
             expected_slot="slot-lock",

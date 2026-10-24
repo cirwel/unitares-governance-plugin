@@ -286,6 +286,7 @@ def test_windows_hook_wrapper_propagates_exit_codes_and_fails_required_edits_clo
     assert "exit /b !ERRORLEVEL!" in wrapper
     assert "exit /b %ERRORLEVEL%" not in wrapper
     assert "Git Bash is required" in wrapper
+    assert "where bash" not in wrapper
     for required in ("1", "true", "on", "yes"):
         assert f'"%UNITARES_FILE_LEASES_REQUIRED%"=="{required}"' in wrapper
     assert '"permissionDecision":"deny"' in wrapper
@@ -347,6 +348,38 @@ def test_unix_hook_wrapper_finds_bash_when_path_omits_bin(tmp_path: Path):
 
     assert result.returncode == 0, result.stderr
     assert result.stdout == "{}\n"
+
+
+def test_unix_hook_wrapper_ignores_inherited_path_executables(tmp_path: Path):
+    hook_dir = tmp_path / "hooks"
+    hook_dir.mkdir()
+    wrapper = hook_dir / "run-hook.cmd"
+    wrapper.write_bytes((ROOT / "hooks" / "run-hook.cmd").read_bytes())
+    target = hook_dir / "probe"
+    target.write_text(
+        'printf "%s\\n" "$PATH"\npython3 -c \'print("trusted-python")\'\n',
+        encoding="utf-8",
+    )
+    counterfeit = tmp_path / "counterfeit"
+    counterfeit.mkdir()
+    fake_python = counterfeit / "python3"
+    fake_python.write_text('#!/bin/sh\necho counterfeit-python\n', encoding="utf-8")
+    fake_python.chmod(0o755)
+
+    result = subprocess.run(
+        ["/bin/sh", str(wrapper), target.name],
+        env={**os.environ, "PATH": str(counterfeit)},
+        text=True,
+        capture_output=True,
+        timeout=5,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == [
+        "/usr/bin:/bin:/usr/sbin:/sbin",
+        "trusted-python",
+    ]
 
 
 def test_pre_edit_blocks_when_required_lease_helper_is_missing(tmp_path: Path):

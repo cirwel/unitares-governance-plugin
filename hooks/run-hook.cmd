@@ -27,11 +27,6 @@ if exist "C:\Program Files (x86)\Git\bin\bash.exe" (
     "C:\Program Files (x86)\Git\bin\bash.exe" "%HOOK_DIR%%~1" %2 %3 %4 %5 %6 %7 %8 %9
     exit /b !ERRORLEVEL!
 )
-where bash >nul 2>nul
-if !ERRORLEVEL! equ 0 (
-    bash "%HOOK_DIR%%~1" %2 %3 %4 %5 %6 %7 %8 %9
-    exit /b !ERRORLEVEL!
-)
 echo run-hook.cmd: Git Bash is required to run UNITARES hooks >&2
 if /I "%~1"=="pre-edit" (
     if /I "%UNITARES_FILE_LEASES_REQUIRED%"=="1" goto required_lease_bash
@@ -45,8 +40,10 @@ echo {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"d
 exit /b 0
 CMDBLOCK
 
-# Unix: run the named script directly
-PATH="${PATH:+${PATH}:}/usr/bin:/bin:/usr/sbin:/sbin"
+# Unix: hooks are an automatic security boundary. Do not inherit executable
+# search prefixes from the editor/session: a workspace-writable directory in
+# PATH must never supply python3, git, curl, bash, or another hook utility.
+PATH="/usr/bin:/bin:/usr/sbin:/sbin"
 export PATH
 # `claude plugin eval` strips every env var except EVAL_*, so the usual
 # UNITARES_* opt-outs cannot reach an eval child, while its hooks still run
@@ -77,7 +74,7 @@ if [ -x /bin/bash ]; then
 elif [ -x /usr/bin/bash ]; then
     BASH_BIN=/usr/bin/bash
 else
-    BASH_BIN="$(command -v bash 2>/dev/null || true)"
+    BASH_BIN=""
 fi
 if [ -z "$BASH_BIN" ]; then
     echo "run-hook.cmd: Bash is required to run UNITARES hooks" >&2
