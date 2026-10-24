@@ -292,7 +292,22 @@ def _bearer_token_with_source() -> tuple[str, str]:
     "compose_default" (loopback lease plane, nothing configured) or "none"."""
     token = _configured_bearer_token()
     if token:
-        return token, "configured"
+        url = _base_url()
+        try:
+            scheme = urllib.parse.urlsplit(url).scheme.lower()
+        except ValueError:
+            scheme = ""
+        insecure_loopback_opt_in = os.environ.get(
+            "UNITARES_ALLOW_INSECURE_LOOPBACK_LEASE_HTTP",
+            "0",
+        ).strip().lower() in {"1", "true", "on", "yes"}
+        if scheme == "https" or (
+            scheme == "http"
+            and _is_loopback_url(url)
+            and insecure_loopback_opt_in
+        ):
+            return token, "configured"
+        return "", "insecure_transport"
     # Required mode is an explicit fail-closed policy; it names its bearer
     # rather than inheriting a development default.
     if _is_loopback_url(_base_url()) and not _required():
@@ -803,6 +818,11 @@ def _cmd_pre_edit_locked(args: argparse.Namespace, stdin_text: str) -> int:
         rollback()
         return _fail_open_or_block("batch lease deadline reached during path setup")
     roots = _worktree_roots(workspace, timeout_s=roots_timeout)
+    if roots is None and _required():
+        rollback()
+        return _fail_open_or_block(
+            "required lease mode could not verify the repository/worktree namespace"
+        )
     root_cache: list[tuple[Path, Path]] = []
     targets_by_surface: dict[str, str] = {}
     for file_path in payload.paths:
@@ -1297,7 +1317,8 @@ def _lease_status_unbounded(timeout_s: float) -> dict[str, Any]:
         return {"state": "disabled", "url": url}
     token, source = _bearer_token_with_source()
     if not token:
-        return {"state": "off", "reason": "no_bearer", "url": url, "bearer": source}
+        reason = "insecure_transport" if source == "insecure_transport" else "no_bearer"
+        return {"state": "off", "reason": reason, "url": url, "bearer": source}
     request = urllib.request.Request(
         url + "/v1/health",
         headers={"Accept": "application/json", "Authorization": f"Bearer {token}"},
@@ -1362,6 +1383,12 @@ def _status_line(status: dict[str, Any]) -> str:
         why = f"no bearer is configured for the lease plane at {url}"
         fix = (
             f"Set LEASE_PLANE_BEARER_TOKEN in {_secrets_env_path()} or the environment."
+        )
+    elif reason == "insecure_transport":
+        why = f"the configured bearer would cross unauthenticated HTTP at {url}"
+        fix = (
+            "Use HTTPS (recommended), local authenticated IPC, or explicitly opt in "
+            "to insecure loopback development transport."
         )
     elif reason == "not_a_lease_plane":
         why = f"the service at {url} does not answer as a v1 lease plane"

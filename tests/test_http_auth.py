@@ -14,10 +14,42 @@ sys.path.insert(0, str(SCRIPTS))
 
 from _http_auth import (  # noqa: E402
     _AuthorizationSafeRedirectHandler,
+    InsecureBearerTransportError,
     ResponseTooLargeError,
+    authorization_safe_urlopen,
     governance_json_headers,
     read_limited_response,
 )
+
+
+@pytest.mark.parametrize("url", ["http://192.0.2.1/v1", "http://example.test/v1"])
+def test_bearer_request_rejects_non_loopback_cleartext_before_socket(
+    monkeypatch: pytest.MonkeyPatch,
+    url: str,
+) -> None:
+    request = urllib.request.Request(url, headers={"Authorization": "Bearer secret"})
+
+    def unexpected_open(*_args, **_kwargs):
+        pytest.fail("unsafe bearer request reached the network opener")
+
+    monkeypatch.setattr("_http_auth._AUTHORIZATION_SAFE_OPENER.open", unexpected_open)
+    with pytest.raises(InsecureBearerTransportError):
+        authorization_safe_urlopen(request, timeout=1)
+
+
+@pytest.mark.parametrize("url", ["http://localhost:8767/v1", "http://127.0.0.1:8767/v1"])
+def test_bearer_request_allows_loopback_development_transport(
+    monkeypatch: pytest.MonkeyPatch,
+    url: str,
+) -> None:
+    sentinel = object()
+    monkeypatch.setattr(
+        "_http_auth._AUTHORIZATION_SAFE_OPENER.open",
+        lambda *_args, **_kwargs: sentinel,
+    )
+
+    request = urllib.request.Request(url, headers={"Authorization": "Bearer secret"})
+    assert authorization_safe_urlopen(request, timeout=1) is sentinel
 
 
 def test_json_headers_omit_authorization_without_token(monkeypatch):

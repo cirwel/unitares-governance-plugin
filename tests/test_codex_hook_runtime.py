@@ -178,6 +178,7 @@ def test_codex_release_handler_does_not_depend_on_session_cache(tmp_path: Path):
         ),
         "LEASE_PLANE_BEARER_TOKEN": "lease-token",
         "UNITARES_SECRETS_ENV": "/dev/null",
+            "UNITARES_ALLOW_INSECURE_LOOPBACK_LEASE_HTTP": "1",
     }
 
     try:

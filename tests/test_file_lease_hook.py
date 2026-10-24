@@ -14,6 +14,11 @@ import pytest
 from scripts import file_lease_hook
 
 
+@pytest.fixture(autouse=True)
+def _allow_explicit_test_loopback_http(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("UNITARES_ALLOW_INSECURE_LOOPBACK_LEASE_HTTP", "1")
+
+
 class _ReusableTCPServer(socketserver.TCPServer):
     allow_reuse_address = True
 
@@ -139,6 +144,43 @@ def _lease_env(monkeypatch, lease_server):
     monkeypatch.setenv("LEASE_PLANE_BASE_URL", f"http://127.0.0.1:{lease_server.server_address[1]}")
     monkeypatch.setenv("LEASE_PLANE_BEARER_TOKEN", "lease-token")
     monkeypatch.setenv("UNITARES_SECRETS_ENV", "/dev/null")
+
+
+def test_configured_loopback_bearer_is_withheld_without_explicit_opt_in(
+    tmp_path,
+    monkeypatch,
+    lease_server,
+):
+    _lease_env(monkeypatch, lease_server)
+    monkeypatch.delenv("UNITARES_ALLOW_INSECURE_LOOPBACK_LEASE_HTTP", raising=False)
+
+    rc = file_lease_hook.main(
+        ["pre-edit", "--workspace", str(tmp_path)],
+        stdin_text=_payload(tool_use_id="toolu_untrusted_loopback"),
+    )
+
+    assert rc == 0
+    assert LeaseHandler.calls == []
+
+
+def test_required_mode_blocks_when_worktree_namespace_probe_fails(
+    tmp_path,
+    monkeypatch,
+    lease_server,
+    capsys,
+):
+    _lease_env(monkeypatch, lease_server)
+    monkeypatch.setenv("UNITARES_FILE_LEASES_REQUIRED", "1")
+    monkeypatch.setattr(file_lease_hook, "_worktree_roots", lambda *_args, **_kwargs: None)
+
+    rc = file_lease_hook.main(
+        ["pre-edit", "--workspace", str(tmp_path)],
+        stdin_text=_payload(tool_use_id="toolu_no_namespace"),
+    )
+
+    assert rc == 2
+    assert "could not verify the repository/worktree namespace" in capsys.readouterr().err
+    assert LeaseHandler.calls == []
 
 
 def test_pre_edit_acquires_file_lease_and_records_state(tmp_path, monkeypatch, lease_server):
@@ -592,6 +634,11 @@ def test_acquire_persistence_failure_releases_and_applies_required_policy(
 
     monkeypatch.setattr(file_lease_hook, "_http_json", fake_http)
     monkeypatch.setattr(file_lease_hook, "_save_state", fail_save)
+    monkeypatch.setattr(
+        file_lease_hook,
+        "_worktree_roots",
+        lambda *_args, **_kwargs: (tmp_path, tmp_path),
+    )
 
     rc = file_lease_hook.main(
         ["pre-edit", "--workspace", str(tmp_path), "--host", "codex"],
@@ -1476,6 +1523,7 @@ def test_session_start_adds_nothing_when_file_leases_work(tmp_path, lease_server
             "UNITARES_FILE_LEASES_ENABLED": "1",
             "LEASE_PLANE_BASE_URL": f"http://127.0.0.1:{lease_server.server_address[1]}",
             "LEASE_PLANE_BEARER_TOKEN": "lease-token",
+            "UNITARES_ALLOW_INSECURE_LOOPBACK_LEASE_HTTP": "1",
         },
     )
     assert "File leases" not in context

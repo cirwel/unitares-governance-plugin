@@ -54,16 +54,9 @@ def test_override_base_url_still_gets_mcp_suffix():
     assert expanded == "https://gov.example.org/mcp/"
 
 
-def test_claude_mcp_uses_optional_bearer_header_expansion():
+def test_claude_mcp_bundled_transport_never_sends_a_bearer():
     server = _load_mcp()["mcpServers"]["unitares-governance"]
-    authorization = server["headers"]["Authorization"]
-
-    assert authorization == "Bearer ${UNITARES_HTTP_API_TOKEN:-}"
-    assert _expand(authorization, env={}) == "Bearer "
-    assert _expand(
-        authorization,
-        env={"UNITARES_HTTP_API_TOKEN": "client-token"},
-    ) == "Bearer client-token"
+    assert "headers" not in server
 
 
 @pytest.mark.parametrize(
