@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Check skill freshness against source file modification times."""
+"""Check skill freshness against proven attestations and source digests."""
 
+import ast
 import hashlib
 import json
 import os
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -70,6 +72,8 @@ def load_source_files(skill_dir: Path, frontmatter_sources: list[str]) -> list[s
 
 # Hex characters of sha256 kept per digest, matching unitares.
 DIGEST_HEX = 16
+ATTESTATION_SCHEMA = "unitares.skill_attestation.v1"
+HEX_DIGEST = re.compile(rf"^[0-9a-f]{{{DIGEST_HEX}}}$")
 
 
 def skill_text_digest(skill_md: Path) -> str:
@@ -77,53 +81,208 @@ def skill_text_digest(skill_md: Path) -> str:
     return hashlib.sha256(skill_md.read_bytes()).hexdigest()[:DIGEST_HEX]
 
 
-def load_attestations(skills_dir: Path, name: str) -> list[dict]:
-    """Every readable attestation synced from unitares for a skill, newest first.
+def _valid_attestation(data: object, name: str) -> bool:
+    if not isinstance(data, dict):
+        return False
+    if data.get("schema") != ATTESTATION_SCHEMA or data.get("skill") != name:
+        return False
+    if not isinstance(data.get("verifier"), str) or not data["verifier"].strip():
+        return False
+    if not isinstance(data.get("skill_digest"), str) or not HEX_DIGEST.fullmatch(
+        data["skill_digest"]
+    ):
+        return False
+    source_digests = data.get("source_digests")
+    if not isinstance(source_digests, dict) or not source_digests:
+        return False
+    if any(
+        not isinstance(source, str)
+        or not source
+        or not isinstance(digest, str)
+        or not HEX_DIGEST.fullmatch(digest)
+        for source, digest in source_digests.items()
+    ):
+        return False
+    try:
+        verified_at = datetime.strptime(
+            data.get("verified_at", ""), "%Y-%m-%dT%H:%M:%SZ"
+        ).replace(tzinfo=timezone.utc)
+        verified_date = datetime.strptime(
+            data.get("verified_date", ""), "%Y-%m-%d"
+        ).date()
+    except (TypeError, ValueError):
+        return False
+    return verified_date == verified_at.date() and verified_at <= datetime.now(
+        timezone.utc
+    )
 
-    Re-verifying a skill in unitares writes a new file under
-    skills/.attestations/<skill>/<YYYYMMDDTHHMMSSffffffZ>-<8 hex>.json instead
-    of editing SKILL.md (so concurrent stamping PRs cannot conflict); the format
-    is defined in unitares scripts/client/_check_freshness.py. The file name
-    leads with a microsecond UTC timestamp, so the lexically last is the newest.
-    Unreadable files and records without a `source_digests` map are skipped.
-    """
+
+def load_attestations(
+    skills_dir: Path,
+    name: str,
+    canonical_skills_dir: Path | None,
+) -> tuple[list[dict], list[str]]:
+    """Load only strict, byte-proven canonical attestations, newest first."""
     adir = skills_dir / ".attestations" / name
-    if not adir.is_dir():
-        return []
     records: list[dict] = []
+    errors: list[str] = []
+    canonical_adir = (
+        canonical_skills_dir / ".attestations" / name
+        if canonical_skills_dir is not None
+        else None
+    )
+    if canonical_adir is not None and canonical_adir.is_dir():
+        local_names = (
+            {path.name for path in adir.glob("*.json")} if adir.is_dir() else set()
+        )
+        for canonical in canonical_adir.glob("*.json"):
+            if canonical.name not in local_names:
+                relative = canonical.relative_to(canonical_skills_dir)
+                errors.append(f"{relative}: missing from the plugin mirror")
+    if not adir.is_dir():
+        return records, errors
     for path in sorted(adir.glob("*.json"), reverse=True):
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        relative = path.relative_to(skills_dir)
+        canonical = (
+            canonical_skills_dir / relative
+            if canonical_skills_dir is not None
+            else None
+        )
+        if canonical is None or not canonical.is_file():
+            errors.append(f"{relative}: absent from canonical skills provenance")
             continue
-        if isinstance(data, dict) and isinstance(data.get("source_digests"), dict):
-            records.append(data)
-    return records
+        try:
+            raw = path.read_bytes()
+            if raw != canonical.read_bytes():
+                errors.append(f"{relative}: differs from canonical skills provenance")
+                continue
+            data = json.loads(raw)
+        except (OSError, ValueError):
+            errors.append(f"{relative}: unreadable attestation")
+            continue
+        if not _valid_attestation(data, name):
+            errors.append(f"{relative}: malformed, empty, mismatched, or future-dated")
+            continue
+        records.append(data)
+    return records, errors
 
 
-def attested_date(skills_dir: Path, name: str, skill_digest: str) -> str | None:
-    """Newest `verified_date` among the attestations that vouch for the skill
-    text on disk, or None.
+def attested_records(records: list[dict], skill_digest: str) -> list[dict]:
+    """Records that certify exactly the current skill text, newest first."""
+    return sorted(
+        (r for r in records if r.get("skill_digest") == skill_digest),
+        key=lambda r: r["verified_at"],
+        reverse=True,
+    )
 
-    Mirrors unitares src/skill_attestations.py (THE RULE): if any attestation
-    certified the current text (its `skill_digest` equals ``skill_digest``),
-    exactly those vouch, whatever their age. Otherwise the current text was
-    never certified and the newest attestation alone vouches. A stamp for other
-    skill text from a stale branch must not reset AGING for the text actually
-    on disk, even when it sorts newest.
+
+def attested_date(
+    skills_dir: Path,
+    name: str,
+    skill_digest: str,
+    canonical_skills_dir: Path | None = None,
+    *,
+    records: list[dict] | None = None,
+) -> str | None:
+    """Newest date that canonically certifies exactly the current skill text.
+
+    The first three parameters preserve the helper API introduced with the
+    attestation-date rule. Hardened callers also supply canonical provenance;
+    the checker passes its already validated records to avoid a second read.
     """
-    records = load_attestations(skills_dir, name)
-    certified = [r for r in records if r.get("skill_digest") == skill_digest]
-    date = None
-    for record in certified or records[:1]:
-        verified = record.get("verified_date")
-        if isinstance(verified, str) and verified and (date is None or verified > date):
-            date = verified
-    return date
+    if records is None:
+        records, _ = load_attestations(skills_dir, name, canonical_skills_dir)
+    certified = attested_records(records, skill_digest)
+    return max((record["verified_date"] for record in certified), default=None)
 
 
-def check_skills(plugin_root: str, projects_root: str) -> int:
+def split_source_reference(source: str) -> tuple[str, str | None]:
+    """Split a supported path[#symbol] reference, failing closed on ambiguity."""
+    if source.count("#") > 1:
+        raise ValueError("multiple fragment separators")
+    path_text, separator, anchor = source.partition("#")
+    path = Path(path_text)
+    if not path_text or path.is_absolute() or ".." in path.parts:
+        raise ValueError("source path must be a safe relative path")
+    if separator and not anchor:
+        raise ValueError("empty source fragment")
+    if anchor and path.suffix not in {".py", ".md", ".markdown"}:
+        raise ValueError("fragments are supported only for Python and Markdown")
+    return path_text, anchor or None
+
+
+def _python_fragment(text: str, anchor: str) -> str | None:
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return None
+    lines = text.splitlines(keepends=True)
+
+    def find(body: list[ast.stmt], name: str) -> ast.AST | None:
+        for node in body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                if node.name == name:
+                    return node
+            elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                if any(isinstance(target, ast.Name) and target.id == name for target in targets):
+                    return node
+        return None
+
+    node: ast.AST | None = None
+    body = tree.body
+    for part in anchor.split("."):
+        node = find(body, part)
+        if node is None:
+            return None
+        body = getattr(node, "body", [])
+    start = node.lineno
+    for decorator in getattr(node, "decorator_list", []):
+        start = min(start, decorator.lineno)
+    return "".join(lines[start - 1 : node.end_lineno])
+
+
+def _markdown_fragment(text: str, anchor: str) -> str | None:
+    lines = text.splitlines(keepends=True)
+    heading = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
+    start = level = None
+    for index, line in enumerate(lines):
+        match = heading.match(line)
+        if not match:
+            continue
+        if start is None:
+            if match.group(2).strip() == anchor:
+                start, level = index, len(match.group(1))
+        elif len(match.group(1)) <= level:
+            return "".join(lines[start:index])
+    return "".join(lines[start:]) if start is not None else None
+
+
+def source_digest(path: Path, anchor: str | None) -> str | None:
+    if anchor is None:
+        content = path.read_bytes()
+    else:
+        text = path.read_text(encoding="utf-8", errors="replace")
+        fragment = (
+            _python_fragment(text, anchor)
+            if path.suffix == ".py"
+            else _markdown_fragment(text, anchor)
+        )
+        if fragment is None:
+            return None
+        content = fragment.encode("utf-8")
+    return hashlib.sha256(content).hexdigest()[:DIGEST_HEX]
+
+
+def check_skills(
+    plugin_root: str,
+    projects_root: str,
+    canonical_skills_root: str | None = None,
+) -> int:
     skills_dir = Path(plugin_root) / "skills"
+    canonical_skills_dir = (
+        Path(canonical_skills_root).resolve() if canonical_skills_root else None
+    )
     has_stale = False
 
     for skill_dir in sorted(skills_dir.iterdir()):
@@ -134,9 +293,23 @@ def check_skills(plugin_root: str, projects_root: str) -> int:
         skill_name = skill_dir.name
         content = skill_file.read_text()
         meta = parse_frontmatter(content)
+        records, errors = load_attestations(
+            skills_dir, skill_name, canonical_skills_dir
+        )
+        for error in errors:
+            print(f"  [{RED}UNTRUSTED{NC}] {skill_name}: {error}")
+            has_stale = True
+        certified: list[dict] = []
         if meta:
-            # Effective date: the later of the frontmatter and the vouching attestations.
-            attested = attested_date(skills_dir, skill_name, skill_text_digest(skill_file))
+            current_skill_digest = skill_text_digest(skill_file)
+            certified = attested_records(records, current_skill_digest)
+            attested = attested_date(
+                skills_dir,
+                skill_name,
+                current_skill_digest,
+                canonical_skills_dir,
+                records=records,
+            )
             if attested and attested > meta["last_verified"]:
                 meta["last_verified"] = attested
 
@@ -144,33 +317,52 @@ def check_skills(plugin_root: str, projects_root: str) -> int:
             print(f"  [{YELLOW}-{NC}] {skill_name}: no freshness metadata")
             continue
 
-        # Anchor everything to UTC so a CI runner (UTC) and a local machine
-        # (e.g. Mountain Time) agree about day boundaries — otherwise the same
-        # source mtime can read FRESH locally but STALE in CI near midnight.
-        verified_date = datetime.strptime(meta["last_verified"], "%Y-%m-%d").replace(
-            hour=23, minute=59, second=59, tzinfo=timezone.utc
-        )
+        # Anchor everything to UTC so CI and local runs agree about day boundaries.
         max_days = max(meta["freshness_days"], FRESHNESS_FLOOR_DAYS)
-        verified_date_start = datetime.strptime(meta["last_verified"], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        verified_date_start = datetime.strptime(
+            meta["last_verified"], "%Y-%m-%d"
+        ).replace(tzinfo=timezone.utc)
         age_days = (datetime.now(timezone.utc) - verified_date_start).days
 
         source_files = load_source_files(skill_dir, meta.get("source_files", []))
         source_modified = False
         modified_file = ""
         for src in source_files:
-            full_path = Path(projects_root) / src
-            if full_path.exists():
-                mtime = datetime.fromtimestamp(os.path.getmtime(full_path), tz=timezone.utc)
-                if mtime > verified_date:
-                    source_modified = True
-                    modified_file = f"{src} (modified {mtime.strftime('%Y-%m-%d')})"
-                    break
+            try:
+                path_text, anchor = split_source_reference(src)
+            except ValueError as exc:
+                source_modified = True
+                modified_file = f"{src} (invalid source reference: {exc})"
+                break
+            full_path = Path(projects_root) / path_text
+            if not full_path.is_file():
+                source_modified = True
+                modified_file = f"{src} (source file is missing)"
+                break
+            current_digest = source_digest(full_path, anchor)
+            recorded_digests = {
+                record["source_digests"].get(src) for record in certified
+            }
+            if current_digest is None:
+                source_modified = True
+                modified_file = f"{src} (fragment does not resolve)"
+                break
+            if current_digest not in recorded_digests:
+                source_modified = True
+                modified_file = f"{src} (current digest is not attested)"
+                break
 
         if source_modified:
-            print(f"  [{RED}STALE{NC}] {skill_name}: verified {meta['last_verified']}, but {modified_file}")
+            print(
+                f"  [{RED}STALE{NC}] {skill_name}: "
+                f"verified {meta['last_verified']}, but {modified_file}"
+            )
             has_stale = True
         elif age_days > max_days:
-            print(f"  [{YELLOW}AGING{NC}] {skill_name}: verified {age_days} days ago (threshold: {max_days})")
+            print(
+                f"  [{YELLOW}AGING{NC}] {skill_name}: verified {age_days} days ago "
+                f"(threshold: {max_days})"
+            )
             has_stale = True
         else:
             print(f"  [{GREEN}FRESH{NC}] {skill_name}: verified {age_days} days ago")
@@ -185,4 +377,5 @@ def check_skills(plugin_root: str, projects_root: str) -> int:
 if __name__ == "__main__":
     plugin_root = sys.argv[1]
     projects_root = sys.argv[2]
-    sys.exit(check_skills(plugin_root, projects_root))
+    canonical_skills_root = sys.argv[3] if len(sys.argv) > 3 else None
+    sys.exit(check_skills(plugin_root, projects_root, canonical_skills_root))

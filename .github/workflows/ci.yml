@@ -37,7 +37,18 @@ jobs:
       - name: Check documented helper commands
         run: python scripts/dev/lint-doc-command-examples.py
 
+      - name: Check out canonical skill provenance
+        uses: actions/checkout@v7
+        with:
+          repository: cirwel/unitares
+          ref: master
+          path: canonical-projects/unitares
+          persist-credentials: false
+
       - name: Check skill freshness metadata
+        env:
+          UNITARES_PROJECTS_ROOT: ${{ github.workspace }}/canonical-projects
+          UNITARES_CANONICAL_SKILLS_ROOT: ${{ github.workspace }}/canonical-projects/unitares/skills
         run: ./scripts/check-skill-freshness.sh
 
       - name: Check skills parity with canonical fingerprint
