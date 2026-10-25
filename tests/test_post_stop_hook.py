@@ -294,3 +294,194 @@ def test_codex_host_ignores_an_inherited_claude_project_dir(tmp_path):
     onboard = [c for c in LazyOnboardHandler.calls if c.get("name") == "onboard"]
     assert onboard, LazyOnboardHandler.calls
     assert onboard[0]["arguments"]["name"].split("#", 1)[0] == "codex-codexwork"
+
+
+def test_agy_post_stop_recovers_transcript_onboard_without_duplicate_mint(tmp_path):
+    """When an agy session already called start_session via call_mcp_tool,
+    post-stop --host agy recovers that identity from transcript.jsonl, does not
+    lazy-onboard a duplicate, posts one turn_stop check-in, and emits byte-exact
+    {}\\n on stdout."""
+    LazyOnboardHandler.calls = []
+    srv = _ReusableTCPServer(("127.0.0.1", 0), LazyOnboardHandler)
+    port = srv.server_address[1]
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+
+    ws = tmp_path / "agy-work"
+    ws.mkdir()
+    conv_id = "6dafb6a1-3e48-4229-92ce-7b6dc6f5756a"
+    brain_dir = tmp_path / "brain" / conv_id
+    logs_dir = brain_dir / ".system_generated" / "logs"
+    logs_dir.mkdir(parents=True)
+    transcript = logs_dir / "transcript.jsonl"
+    transcript.write_text(
+        "\n".join(
+            json.dumps(e)
+            for e in [
+                {"step_index": 0, "type": "USER_INPUT", "content": "analyze"},
+                {
+                    "step_index": 1,
+                    "type": "PLANNER_RESPONSE",
+                    "status": "DONE",
+                    "tool_calls": [
+                        {
+                            "name": "call_mcp_tool",
+                            "args": {
+                                "Arguments": '{"client_hint":"antigravity","force_new":true,"model_type":"gemini-4-argon"}',
+                                "ServerName": '"unitares-governance"',
+                                "ToolName": '"start_session"',
+                            },
+                        }
+                    ],
+                },
+                {
+                    "step_index": 2,
+                    "type": "GENERIC",
+                    "status": "DONE",
+                    "content": (
+                        "Created At: 2026-10-25T12:00:14-06:00\n"
+                        '{"success":true,"tool":"start_session",'
+                        '"client_session_id":"agent-536907ac-e3b-pxdvtl3cyn3ospu7suu2",'
+                        '"agent_uuid":"536907ac-e3b1-4a65-88eb-694bc59e9b02",'
+                        '"agent_id":"Antigravity_Gemini_4_Argon_20261025",'
+                        '"display_name":"antigravity-gemini-4-argon_536907ac"}'
+                    ),
+                },
+                {
+                    "step_index": 3,
+                    "type": "PLANNER_RESPONSE",
+                    "status": "DONE",
+                    "content": "Completed the Antigravity analysis.",
+                },
+            ]
+        )
+        + "\n"
+    )
+    stop_payload = json.dumps(
+        {
+            "conversationId": conv_id,
+            "workspacePaths": [str(ws)],
+            "artifactDirectoryPath": str(brain_dir),
+            "modelName": "gemini-4-argon",
+            "terminationReason": "NO_TOOL_CALL",
+        }
+    )
+
+    try:
+        env = {
+            "PATH": "/usr/bin:/bin:/usr/local/bin",
+            "HOME": str(tmp_path),
+            "UNITARES_SERVER_URL": f"http://127.0.0.1:{port}",
+            "UNITARES_CHECKIN_LOG": str(tmp_path / "checkins.log"),
+            "UNITARES_AUTO_ONBOARD": "on",
+            "CLAUDE_PLUGIN_ROOT": str(PLUGIN_ROOT),
+            "PLUGIN_ROOT": str(PLUGIN_ROOT),
+            "PWD": str(tmp_path),
+        }
+        res = subprocess.run(
+            [str(PLUGIN_ROOT / "hooks" / "post-stop"), "--host", "agy"],
+            env=env,
+            cwd=str(tmp_path),
+            input=stop_payload,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    finally:
+        srv.shutdown()
+        thread.join(timeout=2)
+
+    assert res.returncode == 0
+    assert res.stdout == "{}\n"
+    tool_names = [c.get("name") for c in LazyOnboardHandler.calls]
+    assert tool_names == ["process_agent_update"]
+    checkin = LazyOnboardHandler.calls[0]["arguments"]
+    assert checkin["client_session_id"] == "agent-536907ac-e3b-pxdvtl3cyn3ospu7suu2"
+    assert "Completed the Antigravity analysis" in checkin["response_text"]
+    assert "1 tool calls (call_mcp_tool)" in checkin["response_text"]
+    runtime = checkin["provenance_context"]["runtime_provenance"]
+    assert runtime["model"]["identifier"] == "gemini-4-argon"
+    assert runtime["harness"]["type"] == "antigravity"
+
+
+def test_agy_post_stop_emits_exact_json_stdout_on_invalid_input(tmp_path):
+    res = subprocess.run(
+        [str(PLUGIN_ROOT / "hooks" / "post-stop"), "--host", "agy"],
+        env={"PATH": "/usr/bin:/bin:/usr/local/bin", "HOME": str(tmp_path)},
+        cwd=str(tmp_path),
+        input="{not-json",
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+    assert res.returncode == 0
+    assert res.stdout == "{}\n"
+
+
+def test_agy_post_stop_skips_unbound_invoke_subagent_child(tmp_path):
+    LazyOnboardHandler.calls = []
+    srv = _ReusableTCPServer(("127.0.0.1", 0), LazyOnboardHandler)
+    port = srv.server_address[1]
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+
+    sub_id = "25f6617b-f0fa-4c1a-858a-dcc0496f36ac"
+    brain_dir = tmp_path / "brain" / sub_id
+    logs_dir = brain_dir / ".system_generated" / "logs"
+    logs_dir.mkdir(parents=True)
+    transcript = logs_dir / "transcript.jsonl"
+    transcript.write_text(
+        "\n".join(
+            json.dumps(e)
+            for e in [
+                {"step_index": 0, "type": "SYSTEM_MESSAGE", "content": "subagent task"},
+                {
+                    "step_index": 1,
+                    "type": "PLANNER_RESPONSE",
+                    "status": "DONE",
+                    "content": "Subagent review done.",
+                    "tool_calls": [{"name": "read_file"}],
+                },
+            ]
+        )
+        + "\n"
+    )
+    stop_payload = json.dumps(
+        {
+            "conversationId": sub_id,
+            "workspacePaths": [],
+            "artifactDirectoryPath": str(brain_dir),
+            "modelName": "gemini-4-argon",
+        }
+    )
+
+    try:
+        env = {
+            "PATH": "/usr/bin:/bin:/usr/local/bin",
+            "HOME": str(tmp_path),
+            "UNITARES_SERVER_URL": f"http://127.0.0.1:{port}",
+            "UNITARES_CHECKIN_LOG": str(tmp_path / "checkins.log"),
+            "UNITARES_AUTO_ONBOARD": "on",
+            "CLAUDE_PLUGIN_ROOT": str(PLUGIN_ROOT),
+            "PLUGIN_ROOT": str(PLUGIN_ROOT),
+            "PWD": str(tmp_path),
+        }
+        res = subprocess.run(
+            [str(PLUGIN_ROOT / "hooks" / "post-stop"), "--host", "agy"],
+            env=env,
+            cwd=str(tmp_path),
+            input=stop_payload,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    finally:
+        srv.shutdown()
+        thread.join(timeout=2)
+
+    assert res.returncode == 0
+    assert res.stdout == "{}\n"
+    assert LazyOnboardHandler.calls == []
