@@ -838,6 +838,7 @@ def test_agy_subagent_with_large_prompt_and_current_turn_upgrade(
     ]
     long_transcript = _transcript(long_dir, entries)
     from scripts._session_lookup import load_usable_session_for_hook
+    from scripts.binding_activity import mark as mark_binding_activity, touch as touch_binding_activity
     from scripts.onboard_helper import _update_cache_transaction
 
     _update_cache_transaction(
@@ -852,10 +853,18 @@ def test_agy_subagent_with_large_prompt_and_current_turn_upgrade(
         },
         conv_id,
     )
+    # Simulate the back-dated activity stamp left when mark() set prior_process=True.
+    touch_binding_activity(
+        conv_id,
+        "44444444-4444-4444-8444-444444444444",
+        "long-turn-csid",
+        at=1.0,
+    )
     payload = {"conversationId": conv_id, "transcriptPath": long_transcript}
     assert stop_hook_event.recover_agy_identity_from_transcript(
         payload, workspace=ws, slot=conv_id
     )
+    assert mark_binding_activity(str(ws), json.dumps(payload)) == "touched"
     bound = load_usable_session_for_hook(ws, json.dumps(payload))
     assert bound["uuid"] == "44444444-4444-4444-8444-444444444444"
     assert bound["client_session_id"] == "long-turn-csid"

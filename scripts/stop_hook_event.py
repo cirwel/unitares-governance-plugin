@@ -711,6 +711,14 @@ def recover_agy_identity_from_transcript(
         _commit_if_eligible,
         slot_clean,
     )
+    if committed:
+        try:
+            from binding_activity import touch as _touch_binding_activity
+        except ModuleNotFoundError:
+            from scripts.binding_activity import touch as _touch_binding_activity
+        _touch_binding_activity(
+            slot_clean, recovered["uuid"], recovered["client_session_id"]
+        )
     return bool(
         committed
         or (
