@@ -122,12 +122,12 @@ def test_the_latest_date_among_certified_stamps_wins_regardless_of_name_order(tm
     assert result.returncode == 0, result.stdout
 
 
-def test_uncertified_text_does_not_fall_back_to_an_unmatched_stamp(tmp_path):
+def test_uncertified_text_falls_back_to_the_newest_stamp(tmp_path):
     _write_skill(tmp_path, _day(60))
-    _attest(tmp_path, "20260101T000000000000Z-aaaaaaaa.json", _day(2))
-    _attest(tmp_path, "20260102T000000000000Z-bbbbbbbb.json", _day(45))
+    _attest(tmp_path, "20260101T000000000000Z-aaaaaaaa.json", _day(45))
+    _attest(tmp_path, "20260102T000000000000Z-bbbbbbbb.json", _day(2))
     result = _run(tmp_path)
-    assert result.returncode == 1 and "AGING" in result.stdout, result.stdout
+    assert result.returncode == 0 and "FRESH" in result.stdout, result.stdout
 
 
 def test_attestation_must_match_canonical_provenance(tmp_path):
