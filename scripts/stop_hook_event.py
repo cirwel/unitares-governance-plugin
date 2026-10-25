@@ -323,19 +323,24 @@ def _open_regular_transcript_fd(path: str) -> int | None:
         return None
 
 
+_SUBAGENT_STEP0_RE = re.compile(
+    rb'^\s*\{(?=[^\n]{0,512}"step_index"\s*:\s*0\b)(?=[^\n]{0,512}"type"\s*:\s*"SYSTEM_MESSAGE")'
+)
+
+
 def _is_subagent_first_line(first_line: bytes) -> bool:
     """Return True if step 0 of an agy transcript is a SYSTEM_MESSAGE (invoke_subagent)."""
     if not first_line.strip():
         return False
     try:
         entry = json.loads(first_line)
+        return (
+            isinstance(entry, dict)
+            and entry.get("step_index") == 0
+            and entry.get("type") == "SYSTEM_MESSAGE"
+        )
     except ValueError:
-        return False
-    return (
-        isinstance(entry, dict)
-        and entry.get("step_index") == 0
-        and entry.get("type") == "SYSTEM_MESSAGE"
-    )
+        return bool(_SUBAGENT_STEP0_RE.search(first_line[:512]))
 
 
 def _read_agy_transcript_tail(
@@ -350,7 +355,7 @@ def _read_agy_transcript_tail(
         try:
             size = os.lseek(fd, 0, os.SEEK_END)
             os.lseek(fd, 0, os.SEEK_SET)
-            head_peek = os.read(fd, 4096)
+            head_peek = os.read(fd, 65536)
             first_line = head_peek.split(b"\n", 1)[0]
             start = max(0, size - window)
             os.lseek(fd, start, os.SEEK_SET)
@@ -633,11 +638,35 @@ def recover_agy_identity_from_transcript(
                 head_bytes = os.read(fd, window)
                 head_lines = head_bytes.split(b"\n")[:-1]
                 tail_start = size - window
+                gap_has_user_input = False
+                gap_pos = max(0, window - 512)
+                os.lseek(fd, gap_pos, os.SEEK_SET)
+                carry = b""
+                while gap_pos < tail_start:
+                    chunk = os.read(fd, min(65536, tail_start - gap_pos + 512))
+                    if not chunk:
+                        break
+                    buf = carry + chunk
+                    if b'"USER_INPUT"' in buf:
+                        for gline in buf.split(b"\n")[1:-1]:
+                            if b'"USER_INPUT"' not in gline:
+                                continue
+                            try:
+                                gitem = json.loads(gline)
+                            except ValueError:
+                                continue
+                            if isinstance(gitem, dict) and gitem.get("type") == "USER_INPUT":
+                                gap_has_user_input = True
+                                break
+                    if gap_has_user_input:
+                        break
+                    carry = buf[-512:] if len(buf) > 512 else buf
+                    gap_pos += len(chunk)
                 os.lseek(fd, tail_start, os.SEEK_SET)
                 tail_bytes = os.read(fd, window)
                 tail_lines = tail_bytes.split(b"\n")[1:]
                 raw_segments.append((head_lines, False))
-                raw_segments.append((tail_lines, True))
+                raw_segments.append((tail_lines, gap_has_user_input))
         except OSError:
             continue
         finally:
@@ -646,7 +675,7 @@ def recover_agy_identity_from_transcript(
             except OSError:
                 pass
         seen_indices: set[int] = set()
-        for raw_lines, seg_truncated in raw_segments:
+        for raw_lines, reset_turn_before_seg in raw_segments:
             seg_entries: list[dict[str, Any]] = []
             for raw_line in raw_lines:
                 if not raw_line.strip():
@@ -663,8 +692,8 @@ def recover_agy_identity_from_transcript(
                         continue
                     seen_indices.add(idx)
                 seg_entries.append(item)
-            if seg_entries:
-                segments.append((seg_entries, seg_truncated))
+            if seg_entries or reset_turn_before_seg:
+                segments.append((seg_entries, reset_turn_before_seg))
         transcript_path_used = path
         break
 
@@ -673,10 +702,10 @@ def recover_agy_identity_from_transcript(
 
     recovered_any: dict[str, Any] | None = None
     recovered_current_turn: dict[str, Any] | None = None
-    for seg_entries, seg_truncated in segments:
+    for seg_entries, reset_turn_before_seg in segments:
         pending_offsets: set[int] = set()
         generic_idx = 0
-        if seg_truncated:
+        if reset_turn_before_seg:
             recovered_current_turn = None
         for entry in seg_entries:
             step_type = entry.get("type")
@@ -693,10 +722,13 @@ def recover_agy_identity_from_transcript(
                         recovered_current_turn = candidate
                     pending_offsets.discard(generic_idx)
                 generic_idx += 1
-            elif step_type in ("USER_INPUT", "SYSTEM_MESSAGE"):
+            elif step_type == "USER_INPUT":
                 pending_offsets = set()
                 generic_idx = 0
                 recovered_current_turn = None
+            elif step_type == "SYSTEM_MESSAGE":
+                pending_offsets = set()
+                generic_idx = 0
 
     if recovered_any is None:
         return False
@@ -719,23 +751,6 @@ def recover_agy_identity_from_transcript(
         cur_uuid = str(current.get("uuid") or "").strip()
         cur_csid = str(current.get("client_session_id") or "").strip()
         if not cur_uuid or not cur_csid:
-            return {**current, **_build_cache(recovered_any)}
-        if current.get("prior_process"):
-            if (
-                recovered_current_turn is not None
-                and (
-                    recovered_current_turn["uuid"],
-                    recovered_current_turn["client_session_id"],
-                )
-                != (cur_uuid, cur_csid)
-            ):
-                return {**current, **_build_cache(recovered_current_turn)}
-            return None
-        if (
-            current.get("onboard_origin") == "harness_backstop"
-            and (recovered_any["uuid"], recovered_any["client_session_id"])
-            != (cur_uuid, cur_csid)
-        ):
             return {**current, **_build_cache(recovered_any)}
         if (
             recovered_current_turn is not None

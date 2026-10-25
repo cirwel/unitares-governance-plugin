@@ -737,3 +737,125 @@ def test_agy_transcript_identity_recovery_positional_batch_and_prior_process_gua
         payload, workspace=ws, slot=conv_id
     )
     assert load_usable_session_for_hook(ws, json.dumps(payload)) == {}
+
+    # When post-stop then lazy-onboards a fresh harness_backstop identity B, a
+    # subsequent Stop on Turn 2 or Turn 3 must NOT overwrite B with stale Turn-1 identity A.
+    _update_cache_transaction(
+        ws,
+        lambda cur: {
+            **cur,
+            "uuid": "33333333-3333-4333-8333-333333333333",
+            "client_session_id": "backstop-csid-turn2",
+            "onboard_origin": "harness_backstop",
+            "prior_process": False,
+        },
+        conv_id,
+    )
+    assert stop_hook_event.recover_agy_identity_from_transcript(
+        payload, workspace=ws, slot=conv_id
+    )
+    bound_after_backstop = load_usable_session_for_hook(ws, json.dumps(payload))
+    assert bound_after_backstop["uuid"] == "33333333-3333-4333-8333-333333333333"
+    assert bound_after_backstop["client_session_id"] == "backstop-csid-turn2"
+
+
+def test_agy_subagent_with_large_prompt_and_long_turn_head_tail_recovery(
+    tmp_path, monkeypatch
+):
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+    ws = tmp_path / "ws"
+    ws.mkdir()
+
+    # P2: subagent step_index=0 SYSTEM_MESSAGE > 64 KB must still be detected as is_subagent.
+    sub_dir = tmp_path / "sub_large"
+    sub_dir.mkdir()
+    sub_transcript = _transcript(
+        sub_dir,
+        [
+            {
+                "step_index": 0,
+                "type": "SYSTEM_MESSAGE",
+                "content": "prompt " + ("x" * 100_000),
+            },
+            {
+                "step_index": 1,
+                "type": "PLANNER_RESPONSE",
+                "content": "Done.",
+                "tool_calls": [{"name": "read_file"}],
+            },
+        ],
+    )
+    sub_event = stop_hook_event.normalize_stop_hook(
+        {"conversationId": "sub-large", "transcriptPath": sub_transcript},
+        host="agy",
+    )
+    assert sub_event.is_subagent is True
+
+    # P3: transcript > 2 * window where the current turn started in head with start_session
+    # and no later USER_INPUT occurred in the gap or tail must preserve recovered_current_turn.
+    monkeypatch.setattr(stop_hook_event, "_AGY_TRANSCRIPT_TAIL_BYTES", 2048)
+    long_dir = tmp_path / "long_turn"
+    long_dir.mkdir()
+    conv_id = "conv-long-turn"
+    entries = [
+        {"step_index": 0, "type": "USER_INPUT", "content": "long turn start"},
+        {
+            "step_index": 1,
+            "type": "PLANNER_RESPONSE",
+            "status": "DONE",
+            "tool_calls": [
+                {
+                    "name": "call_mcp_tool",
+                    "args": {
+                        "Arguments": '{"force_new":true}',
+                        "ServerName": '"unitares-governance"',
+                        "ToolName": '"start_session"',
+                    },
+                }
+            ],
+        },
+        {
+            "step_index": 2,
+            "type": "GENERIC",
+            "status": "DONE",
+            "content": (
+                '{"success":true,"client_session_id":"long-turn-csid",'
+                '"agent_uuid":"44444444-4444-4444-8444-444444444444"}'
+            ),
+        },
+    ]
+    for i in range(3, 25):
+        entries.append(
+            {
+                "step_index": i,
+                "type": "PLANNER_RESPONSE",
+                "status": "DONE",
+                "content": "y" * 400,
+                "tool_calls": [{"name": "read_file"}],
+            }
+        )
+    long_transcript = _transcript(long_dir, entries)
+    from scripts._session_lookup import load_usable_session_for_hook
+    from scripts.onboard_helper import _update_cache_transaction
+
+    _update_cache_transaction(
+        ws,
+        lambda cur: {
+            **cur,
+            "uuid": "00000000-0000-4000-8000-000000000000",
+            "client_session_id": "expired-csid",
+            "prior_process": True,
+            "schema_version": 2,
+            "slot": conv_id,
+        },
+        conv_id,
+    )
+    payload = {"conversationId": conv_id, "transcriptPath": long_transcript}
+    assert stop_hook_event.recover_agy_identity_from_transcript(
+        payload, workspace=ws, slot=conv_id
+    )
+    bound = load_usable_session_for_hook(ws, json.dumps(payload))
+    assert bound["uuid"] == "44444444-4444-4444-8444-444444444444"
+    assert bound["client_session_id"] == "long-turn-csid"
