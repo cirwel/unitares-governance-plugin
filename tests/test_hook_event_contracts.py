@@ -844,8 +844,8 @@ def test_agy_subagent_with_large_prompt_and_current_turn_upgrade(
         ws,
         lambda cur: {
             **cur,
-            "uuid": "00000000-0000-4000-8000-000000000000",
-            "client_session_id": "expired-csid",
+            "uuid": "44444444-4444-4444-8444-444444444444",
+            "client_session_id": "long-turn-csid",
             "prior_process": True,
             "schema_version": 2,
             "slot": conv_id,
@@ -859,3 +859,4 @@ def test_agy_subagent_with_large_prompt_and_current_turn_upgrade(
     bound = load_usable_session_for_hook(ws, json.dumps(payload))
     assert bound["uuid"] == "44444444-4444-4444-8444-444444444444"
     assert bound["client_session_id"] == "long-turn-csid"
+    assert bound["prior_process"] is False

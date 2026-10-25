@@ -697,9 +697,12 @@ def recover_agy_identity_from_transcript(
     def _commit_if_eligible(current: dict[str, Any]) -> dict[str, Any] | None:
         cur_uuid = str(current.get("uuid") or "").strip()
         cur_csid = str(current.get("client_session_id") or "").strip()
-        if not cur_uuid or not cur_csid:
-            return {**current, **new_cache}
-        if (recovered["uuid"], recovered["client_session_id"]) != (cur_uuid, cur_csid):
+        if (
+            not cur_uuid
+            or not cur_csid
+            or current.get("prior_process")
+            or (recovered["uuid"], recovered["client_session_id"]) != (cur_uuid, cur_csid)
+        ):
             return {**current, **new_cache}
         return None
 
