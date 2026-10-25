@@ -184,16 +184,41 @@ def attested_date(
     *,
     records: list[dict] | None = None,
 ) -> str | None:
-    """Newest date that canonically certifies exactly the current skill text.
+    """Newest date among the attestations that canonically vouch for the text.
 
     The first three parameters preserve the helper API introduced with the
     attestation-date rule. Hardened callers also supply canonical provenance;
     the checker passes its already validated records to avoid a second read.
+
+    Canonical ``src/skill_attestations.py`` uses every record that certifies
+    the current text. If none does, it preserves the pre-digest rule by using
+    the lexically newest attestation only.
     """
     if records is None:
-        records, _ = load_attestations(skills_dir, name, canonical_skills_dir)
-    certified = attested_records(records, skill_digest)
-    return max((record["verified_date"] for record in certified), default=None)
+        # This helper is also the standalone port compared directly with
+        # canonical ``src/skill_attestations.py``. Keep its reader equally
+        # permissive; the actual plugin check passes the stricter,
+        # provenance-validated records from ``load_attestations`` below.
+        records = []
+        adir = skills_dir / ".attestations" / name
+        for path in sorted(adir.glob("*.json"), reverse=True) if adir.is_dir() else []:
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if isinstance(data, dict) and isinstance(data.get("source_digests"), dict):
+                records.append(data)
+        certified = [
+            record for record in records if record.get("skill_digest") == skill_digest
+        ]
+    else:
+        certified = attested_records(records, skill_digest)
+    date = None
+    for record in certified or records[:1]:
+        verified = record.get("verified_date")
+        if isinstance(verified, str) and verified and (date is None or verified > date):
+            date = verified
+    return date
 
 
 def split_source_reference(source: str) -> tuple[str, str | None]:
