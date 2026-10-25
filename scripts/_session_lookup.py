@@ -151,8 +151,9 @@ def resolve_proof_session_file(slot: Optional[str]) -> Optional[Path]:
 def _extract_slot(stdin_payload: str) -> Optional[str]:
     """Extract the slot identifier from hook stdin JSON.
 
-    Prefer raw ``session_id`` to preserve the existing Claude convention. If
-    absent, use stable Codex fields hashed into safe slot names.
+    Prefer raw ``session_id`` to preserve the existing Claude convention, then
+    Antigravity's ``conversationId`` sanitized to a safe slot key. If absent,
+    use stable Codex fields hashed into safe slot names.
     """
     if not stdin_payload:
         return None
@@ -165,6 +166,10 @@ def _extract_slot(stdin_payload: str) -> Optional[str]:
     sid = data.get("session_id")
     if isinstance(sid, str) and sid.strip():
         return sid
+    cid = data.get("conversationId")
+    if isinstance(cid, str) and cid.strip():
+        safe = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in cid.strip())
+        return safe[:64] or None
     return _codex_fallback_slot(data)
 
 

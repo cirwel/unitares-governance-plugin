@@ -16,19 +16,20 @@ HOOK_HOST="claude"
 if [[ "${1:-}" == "--host" && -n "${2:-}" ]]; then
   HOOK_HOST="$2"
 fi
-if [[ "${HOOK_HOST}" != "claude" && "${HOOK_HOST}" != "codex" ]]; then
+if [[ "${HOOK_HOST}" != "claude" && "${HOOK_HOST}" != "codex" && "${HOOK_HOST}" != "agy" ]]; then
   exit 0
 fi
-# Codex treats empty or plain-text stdout from a successful Stop hook as an
-# invalid response. Emit one neutral JSON object on every Codex exit path;
-# Claude's asynchronous Stop hook remains silent.
+# Codex and Antigravity (agy) treat empty or plain-text stdout from a
+# successful Stop hook as an invalid response. Emit one neutral JSON object on
+# every synchronous host exit path; Claude's asynchronous Stop hook remains silent.
 _emit_codex_stop_output() {
-  [[ "${HOOK_HOST}" == "codex" ]] && printf '{}\n'
+  [[ "${HOOK_HOST}" == "codex" || "${HOOK_HOST}" == "agy" ]] && printf '{}\n'
 }
 trap _emit_codex_stop_output EXIT
 
 HOST_MODEL_TYPE="codex"
 [[ "${HOOK_HOST}" == "claude" ]] && HOST_MODEL_TYPE="claude-code"
+[[ "${HOOK_HOST}" == "agy" ]] && HOST_MODEL_TYPE="antigravity"
 
 # Codex Stop has a 30-second outer timeout. Keep network work at or below
 # 20 seconds so payload normalization, cache I/O, and process startup retain
@@ -100,11 +101,15 @@ if [[ -n "${AGENT_PREFIX_OVERRIDE}" ]]; then
   UNITARES_AGENT_PREFIX="${AGENT_PREFIX_OVERRIDE}"
 elif [[ "${HOOK_HOST}" == "codex" ]]; then
   UNITARES_AGENT_PREFIX="codex"
+elif [[ "${HOOK_HOST}" == "agy" ]]; then
+  UNITARES_AGENT_PREFIX="agy"
 fi
 if [[ -n "${MODEL_TYPE_OVERRIDE}" ]]; then
   UNITARES_MODEL_TYPE="${MODEL_TYPE_OVERRIDE}"
 elif [[ "${HOOK_HOST}" == "codex" ]]; then
   UNITARES_MODEL_TYPE="codex"
+elif [[ "${HOOK_HOST}" == "agy" ]]; then
+  UNITARES_MODEL_TYPE="antigravity"
 fi
 if [[ -n "${AUTO_ONBOARD_TIMEOUT_OVERRIDE}" ]]; then
   UNITARES_AUTO_ONBOARD_TIMEOUT="${AUTO_ONBOARD_TIMEOUT_OVERRIDE}"
@@ -112,7 +117,7 @@ fi
 SERVER_URL="${UNITARES_SERVER_URL:-http://localhost:8767}"
 ONBOARD_TIMEOUT="${UNITARES_AUTO_ONBOARD_TIMEOUT:-10}"
 CHECKIN_TIMEOUT="${UNITARES_CHECKIN_TIMEOUT:-20}"
-if [[ "${HOOK_HOST}" == "codex" ]]; then
+if [[ "${HOOK_HOST}" == "codex" || "${HOOK_HOST}" == "agy" ]]; then
   ONBOARD_TIMEOUT="$(_timeout_at_most "${ONBOARD_TIMEOUT}" "${CODEX_ONBOARD_TIMEOUT_CAP}")"
   CHECKIN_TIMEOUT="$(_timeout_at_most "${CHECKIN_TIMEOUT}" "${CODEX_CHECKIN_TIMEOUT_CAP}")"
 fi
@@ -148,7 +153,39 @@ SESSION_LOOKUP="${PLUGIN_ROOT}/scripts/_session_lookup.py"
 if [[ ! -f "${SESSION_LOOKUP}" ]]; then
   exit 0
 fi
-eval "$(printf '%s' "${PAYLOAD}" | python3 "${SESSION_LOOKUP}" --workspace "${PWD}")"
+AGY_WORKSPACE=""
+AGY_IS_SUBAGENT="false"
+if [[ "${HOOK_HOST}" == "agy" ]]; then
+  AGY_WORKSPACE="$(_stop_field workspace_dir)"
+  AGY_IS_SUBAGENT="$(_stop_field is_subagent)"
+  LOOKUP_WORKSPACE="${AGY_WORKSPACE:-${HOME}}"
+else
+  LOOKUP_WORKSPACE="${PWD}"
+fi
+eval "$(printf '%s' "${PAYLOAD}" | python3 "${SESSION_LOOKUP}" --workspace "${LOOKUP_WORKSPACE}")"
+
+# Antigravity's PostToolUse payload does not carry MCP tool_response on stdin,
+# so an explicit start_session/onboard call during the turn is recorded in the
+# conversation transcript before it reaches the slot cache. Recover or upgrade
+# it before deciding whether the slot is unbound.
+if [[ "${HOOK_HOST}" == "agy" && -n "${RAW_SLOT:-}" ]]; then
+  if printf '%s' "${PAYLOAD}" | python3 "${STOP_EVENT_HELPER}" \
+      --host agy \
+      --recover-agy-identity \
+      --workspace "${LOOKUP_WORKSPACE}" \
+      --slot "${RAW_SLOT}" >/dev/null 2>&1; then
+    eval "$(printf '%s' "${PAYLOAD}" | python3 "${SESSION_LOOKUP}" --workspace "${LOOKUP_WORKSPACE}")"
+  fi
+fi
+
+# Antigravity invoke_subagent child conversations start at step_index 0 with a
+# SYSTEM_MESSAGE and share the user's HOME hooks. Do not lazy-onboard a
+# harness_backstop identity or emit unbound floor telemetry for an internal
+# subagent that did not explicitly bind its own governance session.
+if [[ "${HOOK_HOST}" == "agy" && -z "${CSID:-}" \
+      && ( "${AGY_IS_SUBAGENT}" == "True" || "${AGY_IS_SUBAGENT}" == "true" ) ]]; then
+  exit 0
+fi
 
 # Codex has no failed-tool post hook. Reclaim only this session's unused
 # PreToolUse check-in snapshots at the synchronous turn boundary; snapshots
@@ -193,10 +230,19 @@ if [[ -z "${CSID:-}" && -n "${RAW_SLOT:-}" \
     # the Claude host: a Codex session can inherit it from a Claude-managed
     # environment, and must keep its own $PWD.
     WORKSPACE_DIR="${PWD}"
+    WORKSPACE_NAME="$(basename "${WORKSPACE_DIR}")"
     if [[ "${HOOK_HOST}" == "claude" && -n "${CLAUDE_PROJECT_DIR:-}" ]]; then
       WORKSPACE_DIR="${CLAUDE_PROJECT_DIR}"
+      WORKSPACE_NAME="$(basename "${WORKSPACE_DIR}")"
+    elif [[ "${HOOK_HOST}" == "agy" ]]; then
+      if [[ -n "${AGY_WORKSPACE:-}" ]]; then
+        WORKSPACE_DIR="${AGY_WORKSPACE}"
+        WORKSPACE_NAME="$(basename "${WORKSPACE_DIR}")"
+      else
+        WORKSPACE_DIR="${HOME}"
+        WORKSPACE_NAME="antigravity"
+      fi
     fi
-    WORKSPACE_NAME="$(basename "${WORKSPACE_DIR}")"
     AGENT_NAME="${UNITARES_AGENT_NAME:-${UNITARES_AGENT_PREFIX:-${HOOK_HOST}}-${WORKSPACE_NAME}}"
     MODEL_TYPE="${UNITARES_MODEL_TYPE:-${HOST_MODEL_TYPE}}"
     # Resume anchor (UNITARES_CLIENT_SESSION_ID, e.g. "agent:/thread-<id>") is
@@ -208,12 +254,12 @@ if [[ -z "${CSID:-}" && -n "${RAW_SLOT:-}" \
       --server-url "${SERVER_URL}" \
       --name "${AGENT_NAME}" \
       --model-type "${MODEL_TYPE}" \
-      --workspace "${PWD}" \
+      --workspace "${LOOKUP_WORKSPACE}" \
       --slot "${RAW_SLOT}" \
       --client-session-id "${UNITARES_CLIENT_SESSION_ID:-}" \
       --timeout "${ONBOARD_TIMEOUT}" \
       >/dev/null 2>&1 || true
-    eval "$(printf '%s' "${PAYLOAD}" | python3 "${SESSION_LOOKUP}" --workspace "${PWD}")"
+    eval "$(printf '%s' "${PAYLOAD}" | python3 "${SESSION_LOOKUP}" --workspace "${LOOKUP_WORKSPACE}")"
   fi
 fi
 
@@ -223,7 +269,7 @@ fi
 # minted its own identity yet (scripts/binding_activity.py).
 if [[ -n "${CSID:-}" && -f "${PLUGIN_ROOT}/scripts/binding_activity.py" ]]; then
   printf '%s' "${PAYLOAD}" | python3 "${PLUGIN_ROOT}/scripts/binding_activity.py" mark \
-    --workspace "${PWD}" >/dev/null 2>&1 || true
+    --workspace "${LOOKUP_WORKSPACE}" >/dev/null 2>&1 || true
 fi
 
 # The opt-in continuity question asked at a compaction is answered at the end

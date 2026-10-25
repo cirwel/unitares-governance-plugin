@@ -427,3 +427,17 @@ def test_home_flat_not_reachable_even_when_workspace_is_home(tmp_path, monkeypat
 
     result = resolve_session_file(fake_home, None)
     assert result is None
+
+
+def test_extract_slot_supports_agy_conversation_id_and_preserves_session_id_precedence():
+    assert (
+        _extract_slot('{"conversationId":"6dafb6a1-3e48-4229-92ce-7b6dc6f5756a"}')
+        == "6dafb6a1-3e48-4229-92ce-7b6dc6f5756a"
+    )
+    assert (
+        _extract_slot(
+            '{"session_id":"claude-slot","conversationId":"6dafb6a1-3e48-4229-92ce-7b6dc6f5756a"}'
+        )
+        == "claude-slot"
+    )
+    assert _extract_slot('{"conversationId":"../bad/slot"}') == "___bad_slot"

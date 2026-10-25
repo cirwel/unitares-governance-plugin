@@ -49,9 +49,13 @@ def slot_from_payload(payload: str) -> str:
         return ""
     if not isinstance(data, dict):
         return ""
-    sid = (data.get("session_id") or "").strip()
-    if sid:
-        return _safe_slot(sid)
+    sid = data.get("session_id")
+    if isinstance(sid, str) and sid.strip():
+        return _safe_slot(sid.strip())
+
+    cid = data.get("conversationId")
+    if isinstance(cid, str) and cid.strip():
+        return _safe_slot(cid.strip())
 
     for field in ("thread_id", "conversation_id", "transcript_path"):
         value = data.get(field)

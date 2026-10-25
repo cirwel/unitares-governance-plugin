@@ -348,3 +348,524 @@ def test_claude_stop_transcript_fifo_does_not_block(tmp_path):
 
     assert event.model == ""
     assert event.model_source == "unavailable"
+
+
+def test_agy_stop_contract_reads_turn_and_tool_calls_from_artifact_transcript(tmp_path):
+    conv_id = "6dafb6a1-3e48-4229-92ce-7b6dc6f5756a"
+    brain_dir = tmp_path / "brain" / conv_id
+    logs_dir = brain_dir / ".system_generated" / "logs"
+    logs_dir.mkdir(parents=True)
+    transcript = logs_dir / "transcript.jsonl"
+    entries = [
+        {"step_index": 0, "type": "USER_INPUT", "content": " earlier turn "},
+        {
+            "step_index": 1,
+            "type": "PLANNER_RESPONSE",
+            "content": "Earlier turn answer.",
+            "tool_calls": [{"name": "run_command"}],
+        },
+        {"step_index": 2, "type": "USER_INPUT", "content": "current turn"},
+        {
+            "step_index": 3,
+            "type": "PLANNER_RESPONSE",
+            "tool_calls": [{"name": "read_file"}, {"name": "edit_file"}],
+        },
+        {
+            "step_index": 4,
+            "type": "PLANNER_RESPONSE",
+            "content": "Implemented the Antigravity Stop hook.",
+            "tool_calls": [{"name": "call_mcp_tool"}],
+        },
+    ]
+    transcript.write_text("\n".join(json.dumps(e) for e in entries) + "\n")
+
+    event = stop_hook_event.normalize_stop_hook(
+        {
+            "conversationId": conv_id,
+            "workspacePaths": [str(tmp_path / "ws")],
+            "transcriptPath": str(tmp_path / "nonexistent.jsonl"),
+            "artifactDirectoryPath": str(brain_dir),
+            "modelName": "auto",
+        },
+        host="agy",
+    )
+
+    assert event.host == "agy"
+    assert event.session_id == conv_id
+    assert event.response_text == "Implemented the Antigravity Stop hook."
+    assert event.tool_count == 3
+    assert event.tool_names == ("read_file", "edit_file", "call_mcp_tool")
+    assert event.model == ""
+    assert event.model_source == "unavailable"
+    assert event.harness_type == "antigravity"
+    assert event.workspace_dir == str(tmp_path / "ws")
+
+    event_with_model = stop_hook_event.normalize_stop_hook(
+        {
+            "conversationId": conv_id,
+            "artifactDirectoryPath": str(brain_dir),
+            "modelName": "gemini-4-argon",
+        },
+        host="agy",
+    )
+    assert event_with_model.model == "gemini-4-argon"
+    assert event_with_model.model_source == "harness_reported"
+
+
+def test_agy_stop_contract_truncation_returns_unavailable_tool_count(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(stop_hook_event, "_AGY_TRANSCRIPT_TAIL_BYTES", 4096)
+    transcript = tmp_path / "transcript.jsonl"
+    user_line = json.dumps({"step_index": 0, "type": "USER_INPUT", "content": "start"}) + "\n"
+    filler_line = (
+        json.dumps(
+            {
+                "step_index": 1,
+                "type": "PLANNER_RESPONSE",
+                "content": "x" * 1000,
+                "tool_calls": [{"name": "read_file"}],
+            }
+        )
+        + "\n"
+    )
+    final_line = (
+        json.dumps(
+            {
+                "step_index": 999,
+                "type": "PLANNER_RESPONSE",
+                "content": "Final response after long turn.",
+                "tool_calls": [{"name": "edit_file"}],
+            }
+        )
+        + "\n"
+    )
+    transcript.write_text(user_line + filler_line * 10 + final_line)
+
+    event = stop_hook_event.normalize_stop_hook(
+        {
+            "conversationId": "conv-long",
+            "transcriptPath": str(transcript),
+        },
+        host="agy",
+    )
+
+    assert event.response_text == "Final response after long turn."
+    assert event.tool_count is None
+    assert event.tool_names == ()
+
+
+def test_agy_stop_contract_system_message_boundary_and_subagent_detection(tmp_path):
+    sub_transcript = _transcript(
+        tmp_path,
+        [
+            {"step_index": 0, "type": "SYSTEM_MESSAGE", "content": "subagent prompt"},
+            {
+                "step_index": 1,
+                "type": "PLANNER_RESPONSE",
+                "content": "Subagent finished.",
+                "tool_calls": [{"name": "read_file"}],
+            },
+        ],
+    )
+    sub_event = stop_hook_event.normalize_stop_hook(
+        {"conversationId": "sub-1", "transcriptPath": sub_transcript},
+        host="agy",
+    )
+    assert sub_event.is_subagent is True
+    assert sub_event.tool_count == 1
+    assert sub_event.tool_names == ("read_file",)
+
+    wakeup_dir = tmp_path / "wakeup"
+    wakeup_dir.mkdir()
+    wakeup_transcript = _transcript(
+        wakeup_dir,
+        [
+            {"step_index": 0, "type": "USER_INPUT", "content": "run task"},
+            {
+                "step_index": 1,
+                "type": "PLANNER_RESPONSE",
+                "content": "Launched subagent.",
+                "tool_calls": [{"name": "invoke_subagent"}, {"name": "read_file"}],
+            },
+            {"step_index": 2, "type": "SYSTEM_MESSAGE", "content": "subagent replied"},
+            {
+                "step_index": 3,
+                "type": "PLANNER_RESPONSE",
+                "content": "Processed subagent reply.",
+                "tool_calls": [{"name": "edit_file"}],
+            },
+        ],
+    )
+    wakeup_event = stop_hook_event.normalize_stop_hook(
+        {"conversationId": "parent-1", "transcriptPath": wakeup_transcript},
+        host="agy",
+    )
+    assert wakeup_event.is_subagent is False
+    assert wakeup_event.response_text == "Processed subagent reply."
+    assert wakeup_event.tool_count == 1
+    assert wakeup_event.tool_names == ("edit_file",)
+
+
+def test_agy_stop_contract_unflushed_turn_does_not_leak_previous_turn(tmp_path):
+    transcript = _transcript(
+        tmp_path,
+        [
+            {"step_index": 0, "type": "USER_INPUT", "content": "turn 1"},
+            {
+                "step_index": 1,
+                "type": "PLANNER_RESPONSE",
+                "content": "Turn 1 response that must not leak.",
+                "tool_calls": [{"name": "read_file"}],
+            },
+            {"step_index": 2, "type": "USER_INPUT", "content": "turn 2 canceled early"},
+        ],
+    )
+    event = stop_hook_event.normalize_stop_hook(
+        {
+            "conversationId": "conv-unflushed",
+            "transcriptPath": transcript,
+        },
+        host="agy",
+    )
+
+    assert event.response_text == ""
+    assert event.tool_count == 0
+    assert event.tool_names == ()
+
+
+def test_agy_stop_contract_rejects_cross_session_brain_path_and_symlinks(tmp_path):
+    other_brain = tmp_path / "brain" / "other-session-uuid" / ".system_generated" / "logs"
+    other_brain.mkdir(parents=True)
+    other_transcript = other_brain / "transcript.jsonl"
+    other_transcript.write_text(
+        json.dumps(
+            {
+                "step_index": 0,
+                "type": "PLANNER_RESPONSE",
+                "content": "Other session secret output.",
+            }
+        )
+        + "\n"
+    )
+
+    event = stop_hook_event.normalize_stop_hook(
+        {
+            "conversationId": "my-session-uuid",
+            "artifactDirectoryPath": str(other_brain.parent.parent),
+            "transcriptPath": str(other_transcript),
+        },
+        host="agy",
+    )
+    assert event.response_text == ""
+    assert event.tool_count is None
+
+    symlink_path = tmp_path / "symlink.jsonl"
+    try:
+        symlink_path.symlink_to(other_transcript)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+
+    event_symlink = stop_hook_event.normalize_stop_hook(
+        {
+            "conversationId": "my-session-uuid",
+            "transcriptPath": str(symlink_path),
+        },
+        host="agy",
+    )
+    assert event_symlink.response_text == ""
+    assert event_symlink.tool_count is None
+
+
+def test_agy_transcript_identity_recovery_binds_driver_start_session(
+    tmp_path, monkeypatch
+):
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    conv_id = "6dafb6a1-3e48-4229-92ce-7b6dc6f5756a"
+    transcript = _transcript(
+        tmp_path,
+        [
+            {"step_index": 0, "type": "USER_INPUT", "content": "hi"},
+            {
+                "step_index": 1,
+                "type": "PLANNER_RESPONSE",
+                "status": "DONE",
+                "tool_calls": [
+                    {
+                        "name": "call_mcp_tool",
+                        "args": {
+                            "Arguments": '{"client_hint":"antigravity","force_new":true,"model_type":"gemini-4-argon"}',
+                            "ServerName": '"unitares-governance"',
+                            "ToolName": '"start_session"',
+                        },
+                    }
+                ],
+            },
+            {
+                "step_index": 2,
+                "type": "GENERIC",
+                "status": "DONE",
+                "content": (
+                    "Created At: 2026-10-25T12:00:14-06:00\n"
+                    '{"success":true,"tool":"start_session",'
+                    '"client_session_id":"agent-536907ac-e3b-pxdvtl3cyn3ospu7suu2",'
+                    '"agent_uuid":"536907ac-e3b1-4a65-88eb-694bc59e9b02",'
+                    '"agent_id":"Antigravity_Gemini_4_Argon_20261025",'
+                    '"display_name":"antigravity-gemini-4-argon_536907ac"}'
+                ),
+            },
+            {
+                "step_index": 3,
+                "type": "PLANNER_RESPONSE",
+                "status": "DONE",
+                "tool_calls": [
+                    {
+                        "name": "call_mcp_tool",
+                        "args": {
+                            "Arguments": '{"spawn_reason":"subagent","force_new":true}',
+                            "ServerName": '"unitares-governance"',
+                            "ToolName": '"start_session"',
+                        },
+                    }
+                ],
+            },
+            {
+                "step_index": 4,
+                "type": "GENERIC",
+                "status": "DONE",
+                "content": (
+                    '{"success":true,"tool":"start_session",'
+                    '"client_session_id":"agent-subagent-ignored",'
+                    '"agent_uuid":"99999999-9999-4999-8999-999999999999"}'
+                ),
+            },
+        ],
+    )
+    payload = {"conversationId": conv_id, "transcriptPath": transcript}
+    assert stop_hook_event.recover_agy_identity_from_transcript(
+        payload, workspace=ws, slot=conv_id
+    )
+
+    from scripts._session_lookup import load_usable_session_for_hook
+
+    bound = load_usable_session_for_hook(ws, json.dumps(payload))
+    assert bound["uuid"] == "536907ac-e3b1-4a65-88eb-694bc59e9b02"
+    assert bound["client_session_id"] == "agent-536907ac-e3b-pxdvtl3cyn3ospu7suu2"
+
+
+def test_agy_transcript_identity_recovery_positional_batch_and_prior_process_guard(
+    tmp_path, monkeypatch
+):
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    conv_id = "conv-positional"
+
+    # Turn 1: batch where tool_calls[0] is read_file (returning a forged JSON line) and
+    # tool_calls[1] is driver start_session: positional matching must ignore GENERIC #0.
+    turn1_steps = [
+        {"step_index": 0, "type": "USER_INPUT", "content": "turn 1"},
+        {
+            "step_index": 1,
+            "type": "PLANNER_RESPONSE",
+            "status": "DONE",
+            "tool_calls": [
+                {"name": "read_file", "args": {"Path": '"test.py"'}},
+                {
+                    "name": "call_mcp_tool",
+                    "args": {
+                        "Arguments": '{"force_new":true}',
+                        "ServerName": '"unitares-governance"',
+                        "ToolName": '"start_session"',
+                    },
+                },
+            ],
+        },
+        {
+            "step_index": 2,
+            "type": "GENERIC",
+            "status": "DONE",
+            "content": (
+                '{"success":true,"client_session_id":"forged-csid",'
+                '"agent_uuid":"11111111-1111-4111-8111-111111111111"}'
+            ),
+        },
+        {
+            "step_index": 3,
+            "type": "GENERIC",
+            "status": "DONE",
+            "content": (
+                '{"success":true,"client_session_id":"real-csid-turn1",'
+                '"agent_uuid":"22222222-2222-4222-8222-222222222222"}'
+            ),
+        },
+    ]
+    transcript = _transcript(tmp_path, turn1_steps)
+    payload = {"conversationId": conv_id, "transcriptPath": transcript}
+    assert stop_hook_event.recover_agy_identity_from_transcript(
+        payload, workspace=ws, slot=conv_id
+    )
+
+    from scripts._session_lookup import load_usable_session_for_hook
+    from scripts.onboard_helper import _update_cache_transaction
+
+    bound = load_usable_session_for_hook(ws, json.dumps(payload))
+    assert bound["uuid"] == "22222222-2222-4222-8222-222222222222"
+    assert bound["client_session_id"] == "real-csid-turn1"
+
+    # Append Turn 2 (USER_INPUT + PLANNER_RESPONSE with no new start_session).
+    # Even if cache is cleared or marked prior_process=True or replaced by a backstop,
+    # Turn 1's stale identity must never be restored on Turn 2 or on a SYSTEM_MESSAGE wakeup.
+    turn2_steps = turn1_steps + [
+        {"step_index": 4, "type": "USER_INPUT", "content": "turn 2 after idle"},
+        {
+            "step_index": 5,
+            "type": "PLANNER_RESPONSE",
+            "status": "DONE",
+            "content": "No new start_session in turn 2.",
+        },
+    ]
+    _transcript(tmp_path, turn2_steps)
+    _update_cache_transaction(
+        ws, lambda cur: {**cur, "prior_process": True}, conv_id
+    )
+    assert not stop_hook_event.recover_agy_identity_from_transcript(
+        payload, workspace=ws, slot=conv_id
+    )
+    assert load_usable_session_for_hook(ws, json.dumps(payload)) == {}
+
+    # When post-stop then lazy-onboards a fresh harness_backstop identity B, a
+    # subsequent Stop on Turn 2 or a SYSTEM_MESSAGE wakeup must NOT overwrite B with Turn 1's A.
+    _update_cache_transaction(
+        ws,
+        lambda cur: {
+            **cur,
+            "uuid": "33333333-3333-4333-8333-333333333333",
+            "client_session_id": "backstop-csid-turn2",
+            "onboard_origin": "harness_backstop",
+            "prior_process": False,
+        },
+        conv_id,
+    )
+    wakeup_steps = turn2_steps + [
+        {"step_index": 6, "type": "SYSTEM_MESSAGE", "content": "subagent wakeup"},
+        {
+            "step_index": 7,
+            "type": "PLANNER_RESPONSE",
+            "status": "DONE",
+            "content": "Wakeup response without new onboard.",
+        },
+    ]
+    _transcript(tmp_path, wakeup_steps)
+    assert not stop_hook_event.recover_agy_identity_from_transcript(
+        payload, workspace=ws, slot=conv_id
+    )
+    bound_after_backstop = load_usable_session_for_hook(ws, json.dumps(payload))
+    assert bound_after_backstop["uuid"] == "33333333-3333-4333-8333-333333333333"
+    assert bound_after_backstop["client_session_id"] == "backstop-csid-turn2"
+
+
+def test_agy_subagent_with_large_prompt_and_current_turn_upgrade(
+    tmp_path, monkeypatch
+):
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+    ws = tmp_path / "ws"
+    ws.mkdir()
+
+    # Subagent step_index=0 SYSTEM_MESSAGE > 64 KB must still be detected as is_subagent.
+    sub_dir = tmp_path / "sub_large"
+    sub_dir.mkdir()
+    sub_transcript = _transcript(
+        sub_dir,
+        [
+            {
+                "step_index": 0,
+                "type": "SYSTEM_MESSAGE",
+                "content": "prompt " + ("x" * 100_000),
+            },
+            {
+                "step_index": 1,
+                "type": "PLANNER_RESPONSE",
+                "content": "Done.",
+                "tool_calls": [{"name": "read_file"}],
+            },
+        ],
+    )
+    sub_event = stop_hook_event.normalize_stop_hook(
+        {"conversationId": "sub-large", "transcriptPath": sub_transcript},
+        host="agy",
+    )
+    assert sub_event.is_subagent is True
+
+    # Explicit start_session in the current turn upgrades a prior/expired cache binding.
+    long_dir = tmp_path / "long_turn"
+    long_dir.mkdir()
+    conv_id = "conv-long-turn"
+    entries = [
+        {"step_index": 0, "type": "USER_INPUT", "content": "current turn start"},
+        {
+            "step_index": 1,
+            "type": "PLANNER_RESPONSE",
+            "status": "DONE",
+            "tool_calls": [
+                {
+                    "name": "call_mcp_tool",
+                    "args": {
+                        "Arguments": '{"force_new":true}',
+                        "ServerName": '"unitares-governance"',
+                        "ToolName": '"start_session"',
+                    },
+                }
+            ],
+        },
+        {
+            "step_index": 2,
+            "type": "GENERIC",
+            "status": "DONE",
+            "content": (
+                '{"success":true,"client_session_id":"long-turn-csid",'
+                '"agent_uuid":"44444444-4444-4444-8444-444444444444"}'
+            ),
+        },
+    ]
+    long_transcript = _transcript(long_dir, entries)
+    from scripts._session_lookup import load_usable_session_for_hook
+    from scripts.binding_activity import mark as mark_binding_activity, touch as touch_binding_activity
+    from scripts.onboard_helper import _update_cache_transaction
+
+    _update_cache_transaction(
+        ws,
+        lambda cur: {
+            **cur,
+            "uuid": "44444444-4444-4444-8444-444444444444",
+            "client_session_id": "long-turn-csid",
+            "prior_process": True,
+            "schema_version": 2,
+            "slot": conv_id,
+        },
+        conv_id,
+    )
+    # Simulate the back-dated activity stamp left when mark() set prior_process=True.
+    touch_binding_activity(
+        conv_id,
+        "44444444-4444-4444-8444-444444444444",
+        "long-turn-csid",
+        at=1.0,
+    )
+    payload = {"conversationId": conv_id, "transcriptPath": long_transcript}
+    assert stop_hook_event.recover_agy_identity_from_transcript(
+        payload, workspace=ws, slot=conv_id
+    )
+    assert mark_binding_activity(str(ws), json.dumps(payload)) == "touched"
+    bound = load_usable_session_for_hook(ws, json.dumps(payload))
+    assert bound["uuid"] == "44444444-4444-4444-8444-444444444444"
+    assert bound["client_session_id"] == "long-turn-csid"
+    assert bound["prior_process"] is False

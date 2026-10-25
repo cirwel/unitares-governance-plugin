@@ -114,3 +114,17 @@ def test_cli_matches_session_lookup_slot_filename():
     derived = slot_from_payload(json.dumps({"session_id": raw}))
     expected_filename = _slot_filename(raw)
     assert expected_filename == f"session-{derived}.json"
+
+
+def test_agy_conversation_id_extracts_and_yields_to_session_id():
+    assert (
+        slot_from_payload('{"conversationId":"6dafb6a1-3e48-4229-92ce-7b6dc6f5756a"}')
+        == "6dafb6a1-3e48-4229-92ce-7b6dc6f5756a"
+    )
+    assert (
+        slot_from_payload(
+            '{"session_id":"claude-slot","conversationId":"6dafb6a1-3e48-4229-92ce-7b6dc6f5756a"}'
+        )
+        == "claude-slot"
+    )
+    assert slot_from_payload('{"conversationId":"../bad/slot"}') == "___bad_slot"
