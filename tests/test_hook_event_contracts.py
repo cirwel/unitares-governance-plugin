@@ -667,55 +667,46 @@ def test_agy_transcript_identity_recovery_positional_batch_and_prior_process_gua
     ws.mkdir()
     conv_id = "conv-positional"
 
-    # Batch where tool_calls[0] is read_file (returning a forged JSON line) and
+    # Turn 1: batch where tool_calls[0] is read_file (returning a forged JSON line) and
     # tool_calls[1] is driver start_session: positional matching must ignore GENERIC #0.
-    transcript = _transcript(
-        tmp_path,
-        [
-            {"step_index": 0, "type": "USER_INPUT", "content": "turn 1"},
-            {
-                "step_index": 1,
-                "type": "PLANNER_RESPONSE",
-                "status": "DONE",
-                "tool_calls": [
-                    {"name": "read_file", "args": {"Path": '"test.py"'}},
-                    {
-                        "name": "call_mcp_tool",
-                        "args": {
-                            "Arguments": '{"force_new":true}',
-                            "ServerName": '"unitares-governance"',
-                            "ToolName": '"start_session"',
-                        },
+    turn1_steps = [
+        {"step_index": 0, "type": "USER_INPUT", "content": "turn 1"},
+        {
+            "step_index": 1,
+            "type": "PLANNER_RESPONSE",
+            "status": "DONE",
+            "tool_calls": [
+                {"name": "read_file", "args": {"Path": '"test.py"'}},
+                {
+                    "name": "call_mcp_tool",
+                    "args": {
+                        "Arguments": '{"force_new":true}',
+                        "ServerName": '"unitares-governance"',
+                        "ToolName": '"start_session"',
                     },
-                ],
-            },
-            {
-                "step_index": 2,
-                "type": "GENERIC",
-                "status": "DONE",
-                "content": (
-                    '{"success":true,"client_session_id":"forged-csid",'
-                    '"agent_uuid":"11111111-1111-4111-8111-111111111111"}'
-                ),
-            },
-            {
-                "step_index": 3,
-                "type": "GENERIC",
-                "status": "DONE",
-                "content": (
-                    '{"success":true,"client_session_id":"real-csid-turn1",'
-                    '"agent_uuid":"22222222-2222-4222-8222-222222222222"}'
-                ),
-            },
-            {"step_index": 4, "type": "USER_INPUT", "content": "turn 2 after idle"},
-            {
-                "step_index": 5,
-                "type": "PLANNER_RESPONSE",
-                "status": "DONE",
-                "content": "No new start_session in turn 2.",
-            },
-        ],
-    )
+                },
+            ],
+        },
+        {
+            "step_index": 2,
+            "type": "GENERIC",
+            "status": "DONE",
+            "content": (
+                '{"success":true,"client_session_id":"forged-csid",'
+                '"agent_uuid":"11111111-1111-4111-8111-111111111111"}'
+            ),
+        },
+        {
+            "step_index": 3,
+            "type": "GENERIC",
+            "status": "DONE",
+            "content": (
+                '{"success":true,"client_session_id":"real-csid-turn1",'
+                '"agent_uuid":"22222222-2222-4222-8222-222222222222"}'
+            ),
+        },
+    ]
+    transcript = _transcript(tmp_path, turn1_steps)
     payload = {"conversationId": conv_id, "transcriptPath": transcript}
     assert stop_hook_event.recover_agy_identity_from_transcript(
         payload, workspace=ws, slot=conv_id
@@ -728,8 +719,19 @@ def test_agy_transcript_identity_recovery_positional_batch_and_prior_process_gua
     assert bound["uuid"] == "22222222-2222-4222-8222-222222222222"
     assert bound["client_session_id"] == "real-csid-turn1"
 
-    # Mark the binding prior_process=True (as binding_activity.py does after 24h idle).
-    # Re-running recovery on Turn 2 (which has no new start_session) must NOT resurrect Turn 1.
+    # Append Turn 2 (USER_INPUT + PLANNER_RESPONSE with no new start_session).
+    # Even if cache is cleared or marked prior_process=True or replaced by a backstop,
+    # Turn 1's stale identity must never be restored on Turn 2 or on a SYSTEM_MESSAGE wakeup.
+    turn2_steps = turn1_steps + [
+        {"step_index": 4, "type": "USER_INPUT", "content": "turn 2 after idle"},
+        {
+            "step_index": 5,
+            "type": "PLANNER_RESPONSE",
+            "status": "DONE",
+            "content": "No new start_session in turn 2.",
+        },
+    ]
+    _transcript(tmp_path, turn2_steps)
     _update_cache_transaction(
         ws, lambda cur: {**cur, "prior_process": True}, conv_id
     )
@@ -739,7 +741,7 @@ def test_agy_transcript_identity_recovery_positional_batch_and_prior_process_gua
     assert load_usable_session_for_hook(ws, json.dumps(payload)) == {}
 
     # When post-stop then lazy-onboards a fresh harness_backstop identity B, a
-    # subsequent Stop on Turn 2 or Turn 3 must NOT overwrite B with stale Turn-1 identity A.
+    # subsequent Stop on Turn 2 or a SYSTEM_MESSAGE wakeup must NOT overwrite B with Turn 1's A.
     _update_cache_transaction(
         ws,
         lambda cur: {
@@ -751,7 +753,17 @@ def test_agy_transcript_identity_recovery_positional_batch_and_prior_process_gua
         },
         conv_id,
     )
-    assert stop_hook_event.recover_agy_identity_from_transcript(
+    wakeup_steps = turn2_steps + [
+        {"step_index": 6, "type": "SYSTEM_MESSAGE", "content": "subagent wakeup"},
+        {
+            "step_index": 7,
+            "type": "PLANNER_RESPONSE",
+            "status": "DONE",
+            "content": "Wakeup response without new onboard.",
+        },
+    ]
+    _transcript(tmp_path, wakeup_steps)
+    assert not stop_hook_event.recover_agy_identity_from_transcript(
         payload, workspace=ws, slot=conv_id
     )
     bound_after_backstop = load_usable_session_for_hook(ws, json.dumps(payload))
@@ -759,7 +771,7 @@ def test_agy_transcript_identity_recovery_positional_batch_and_prior_process_gua
     assert bound_after_backstop["client_session_id"] == "backstop-csid-turn2"
 
 
-def test_agy_subagent_with_large_prompt_and_long_turn_head_tail_recovery(
+def test_agy_subagent_with_large_prompt_and_current_turn_upgrade(
     tmp_path, monkeypatch
 ):
     fake_home = tmp_path / "home"
@@ -768,7 +780,7 @@ def test_agy_subagent_with_large_prompt_and_long_turn_head_tail_recovery(
     ws = tmp_path / "ws"
     ws.mkdir()
 
-    # P2: subagent step_index=0 SYSTEM_MESSAGE > 64 KB must still be detected as is_subagent.
+    # Subagent step_index=0 SYSTEM_MESSAGE > 64 KB must still be detected as is_subagent.
     sub_dir = tmp_path / "sub_large"
     sub_dir.mkdir()
     sub_transcript = _transcript(
@@ -793,14 +805,12 @@ def test_agy_subagent_with_large_prompt_and_long_turn_head_tail_recovery(
     )
     assert sub_event.is_subagent is True
 
-    # P3: transcript > 2 * window where the current turn started in head with start_session
-    # and no later USER_INPUT occurred in the gap or tail must preserve recovered_current_turn.
-    monkeypatch.setattr(stop_hook_event, "_AGY_TRANSCRIPT_TAIL_BYTES", 2048)
+    # Explicit start_session in the current turn upgrades a prior/expired cache binding.
     long_dir = tmp_path / "long_turn"
     long_dir.mkdir()
     conv_id = "conv-long-turn"
     entries = [
-        {"step_index": 0, "type": "USER_INPUT", "content": "long turn start"},
+        {"step_index": 0, "type": "USER_INPUT", "content": "current turn start"},
         {
             "step_index": 1,
             "type": "PLANNER_RESPONSE",
@@ -826,16 +836,6 @@ def test_agy_subagent_with_large_prompt_and_long_turn_head_tail_recovery(
             ),
         },
     ]
-    for i in range(3, 25):
-        entries.append(
-            {
-                "step_index": i,
-                "type": "PLANNER_RESPONSE",
-                "status": "DONE",
-                "content": "y" * 400,
-                "tool_calls": [{"name": "read_file"}],
-            }
-        )
     long_transcript = _transcript(long_dir, entries)
     from scripts._session_lookup import load_usable_session_for_hook
     from scripts.onboard_helper import _update_cache_transaction

@@ -613,7 +613,7 @@ def recover_agy_identity_from_transcript(
     workspace: str | Path,
     slot: str,
 ) -> bool:
-    """Recover an agent-minted start_session/onboard binding from an agy transcript."""
+    """Recover an agent-minted start_session/onboard binding from the current agy turn."""
     slot_clean = (slot or "").strip()
     if not slot_clean:
         return False
@@ -621,52 +621,17 @@ def recover_agy_identity_from_transcript(
     session_id = str(payload.get("conversationId") or payload.get("session_id") or "").strip()
 
     window = _AGY_TRANSCRIPT_TAIL_BYTES
-    segments: list[tuple[list[dict[str, Any]], bool]] = []
+    turn_entries_reversed: list[dict[str, Any]] = []
     transcript_path_used = ""
     for path in _agy_transcript_candidates(payload, session_id):
         fd = _open_regular_transcript_fd(path)
         if fd is None:
             continue
-        raw_segments: list[tuple[list[bytes], bool]] = []
         try:
             size = os.lseek(fd, 0, os.SEEK_END)
-            os.lseek(fd, 0, os.SEEK_SET)
-            if size <= 2 * window:
-                full_bytes = os.read(fd, 2 * window)
-                raw_segments.append((full_bytes.split(b"\n"), False))
-            else:
-                head_bytes = os.read(fd, window)
-                head_lines = head_bytes.split(b"\n")[:-1]
-                tail_start = size - window
-                gap_has_user_input = False
-                gap_pos = max(0, window - 512)
-                os.lseek(fd, gap_pos, os.SEEK_SET)
-                carry = b""
-                while gap_pos < tail_start:
-                    chunk = os.read(fd, min(65536, tail_start - gap_pos + 512))
-                    if not chunk:
-                        break
-                    buf = carry + chunk
-                    if b'"USER_INPUT"' in buf:
-                        for gline in buf.split(b"\n")[1:-1]:
-                            if b'"USER_INPUT"' not in gline:
-                                continue
-                            try:
-                                gitem = json.loads(gline)
-                            except ValueError:
-                                continue
-                            if isinstance(gitem, dict) and gitem.get("type") == "USER_INPUT":
-                                gap_has_user_input = True
-                                break
-                    if gap_has_user_input:
-                        break
-                    carry = buf[-512:] if len(buf) > 512 else buf
-                    gap_pos += len(chunk)
-                os.lseek(fd, tail_start, os.SEEK_SET)
-                tail_bytes = os.read(fd, window)
-                tail_lines = tail_bytes.split(b"\n")[1:]
-                raw_segments.append((head_lines, False))
-                raw_segments.append((tail_lines, gap_has_user_input))
+            start = max(0, size - window)
+            os.lseek(fd, start, os.SEEK_SET)
+            data = os.read(fd, window)
         except OSError:
             continue
         finally:
@@ -674,63 +639,46 @@ def recover_agy_identity_from_transcript(
                 os.close(fd)
             except OSError:
                 pass
-        seen_indices: set[int] = set()
-        for raw_lines, reset_turn_before_seg in raw_segments:
-            seg_entries: list[dict[str, Any]] = []
-            for raw_line in raw_lines:
-                if not raw_line.strip():
-                    continue
-                try:
-                    item = json.loads(raw_line)
-                except ValueError:
-                    continue
-                if not isinstance(item, dict):
-                    continue
-                idx = item.get("step_index")
-                if isinstance(idx, int):
-                    if idx in seen_indices:
-                        continue
-                    seen_indices.add(idx)
-                seg_entries.append(item)
-            if seg_entries or reset_turn_before_seg:
-                segments.append((seg_entries, reset_turn_before_seg))
+        lines = data.split(b"\n")
+        if start > 0:
+            lines = lines[1:]
+        for raw_line in reversed(lines):
+            if not raw_line.strip():
+                continue
+            try:
+                item = json.loads(raw_line)
+            except ValueError:
+                continue
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") in ("USER_INPUT", "SYSTEM_MESSAGE"):
+                break
+            turn_entries_reversed.append(item)
         transcript_path_used = path
         break
 
-    if not segments:
+    if not turn_entries_reversed:
         return False
 
-    recovered_any: dict[str, Any] | None = None
-    recovered_current_turn: dict[str, Any] | None = None
-    for seg_entries, reset_turn_before_seg in segments:
-        pending_offsets: set[int] = set()
-        generic_idx = 0
-        if reset_turn_before_seg:
-            recovered_current_turn = None
-        for entry in seg_entries:
-            step_type = entry.get("type")
-            if step_type == "PLANNER_RESPONSE":
-                pending_offsets = _agy_driver_onboard_call_offsets(entry)
-                generic_idx = 0
-            elif step_type == "GENERIC":
-                if generic_idx in pending_offsets:
-                    candidate = _extract_onboard_response_from_generic(
-                        entry, transcript_path_used
-                    )
-                    if candidate is not None:
-                        recovered_any = candidate
-                        recovered_current_turn = candidate
-                    pending_offsets.discard(generic_idx)
-                generic_idx += 1
-            elif step_type == "USER_INPUT":
-                pending_offsets = set()
-                generic_idx = 0
-                recovered_current_turn = None
-            elif step_type == "SYSTEM_MESSAGE":
-                pending_offsets = set()
-                generic_idx = 0
+    recovered: dict[str, Any] | None = None
+    pending_offsets: set[int] = set()
+    generic_idx = 0
+    for entry in reversed(turn_entries_reversed):
+        step_type = entry.get("type")
+        if step_type == "PLANNER_RESPONSE":
+            pending_offsets = _agy_driver_onboard_call_offsets(entry)
+            generic_idx = 0
+        elif step_type == "GENERIC":
+            if generic_idx in pending_offsets:
+                candidate = _extract_onboard_response_from_generic(
+                    entry, transcript_path_used
+                )
+                if candidate is not None:
+                    recovered = candidate
+                pending_offsets.discard(generic_idx)
+            generic_idx += 1
 
-    if recovered_any is None:
+    if recovered is None:
         return False
 
     try:
@@ -738,29 +686,21 @@ def recover_agy_identity_from_transcript(
     except ModuleNotFoundError:
         from scripts.onboard_helper import _update_cache_transaction
 
-    def _build_cache(rec: dict[str, Any]) -> dict[str, Any]:
-        return {
-            **rec,
-            "continuity_token": "",
-            "prior_process": False,
-            "schema_version": 2,
-            "slot": slot_clean,
-        }
+    new_cache = {
+        **recovered,
+        "continuity_token": "",
+        "prior_process": False,
+        "schema_version": 2,
+        "slot": slot_clean,
+    }
 
     def _commit_if_eligible(current: dict[str, Any]) -> dict[str, Any] | None:
         cur_uuid = str(current.get("uuid") or "").strip()
         cur_csid = str(current.get("client_session_id") or "").strip()
         if not cur_uuid or not cur_csid:
-            return {**current, **_build_cache(recovered_any)}
-        if (
-            recovered_current_turn is not None
-            and (
-                recovered_current_turn["uuid"],
-                recovered_current_turn["client_session_id"],
-            )
-            != (cur_uuid, cur_csid)
-        ):
-            return {**current, **_build_cache(recovered_current_turn)}
+            return {**current, **new_cache}
+        if (recovered["uuid"], recovered["client_session_id"]) != (cur_uuid, cur_csid):
+            return {**current, **new_cache}
         return None
 
     _auth, committed = _update_cache_transaction(
