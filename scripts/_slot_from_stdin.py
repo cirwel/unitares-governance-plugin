@@ -65,8 +65,43 @@ def slot_from_payload(payload: str) -> str:
     return ""
 
 
+_HOST_SESSION_ID_CHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._:-"
+)
+
+
+def host_session_id_from_payload(payload: str) -> str:
+    """The host's own session id, unsanitized, or "" when there is none.
+
+    Unlike the slot, this is never hashed, truncated or rewritten: it is the
+    id the vendor resumes by. Only an explicit ``session_id`` (or
+    Antigravity's ``conversationId``) counts; the hashed fallback slots name
+    a cache file, not a resumable session. Ids outside a conservative
+    character set are dropped rather than rewritten.
+    """
+    try:
+        data = json.loads(payload) if payload else None
+    except Exception:
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    for field in ("session_id", "conversationId"):
+        value = data.get(field)
+        if isinstance(value, str) and value.strip():
+            value = value.strip()
+            if (len(value) <= 128 and value[0].isalnum()
+                    and set(value) <= _HOST_SESSION_ID_CHARS):
+                return value
+            return ""
+    return ""
+
+
 def main() -> int:
-    print(slot_from_payload(sys.stdin.read()))
+    payload = sys.stdin.read()
+    if sys.argv[1:] == ["--host-session-id"]:
+        print(host_session_id_from_payload(payload))
+    else:
+        print(slot_from_payload(payload))
     return 0
 
 

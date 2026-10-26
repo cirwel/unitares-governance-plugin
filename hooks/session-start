@@ -752,6 +752,7 @@ elif [[ -n "${HEALTH_STATUS}" \
     --workspace "${PWD}" \
     --slot "${HOST_SESSION_ID}" \
     --host-harness "${EAGER_MODEL_TYPE}" \
+    --host-session-id "$(printf '%s' "${SESSION_START_STDIN}" | python3 "${PLUGIN_ROOT}/scripts/_slot_from_stdin.py" --host-session-id 2>/dev/null || true)" \
     --host-session-dir "${EAGER_WORKSPACE_DIR}" \
     --timeout "${UNITARES_EAGER_BIND_TIMEOUT:-5}" \
     >/dev/null 2>&1 || true

@@ -95,8 +95,10 @@ treat the default cohort as inferred rather than verified authorship. Deploy
 this marker-producing helper before the Core consumer during a staged upgrade.
 
 The helper's fresh mints also declare which vendor session the identity lives
-in: `host_session = {harness, session_id, workspace}`, where `session_id` is
-the slot (the host's own session id) and `workspace` is the directory the
+in: `host_session = {harness, session_id, workspace}`. `session_id` is the
+host's own session id taken unchanged from the hook payload (`session_id`, or
+Antigravity's `conversationId`), never the cache slot, which can be a hashed
+fallback; without one nothing is declared. `workspace` is the directory the
 session resumes from. The server stores it once on the new identity so a
 reader such as a hub can offer to resume that session (Core interface contract
 2.2.0). Orchestrated resumes never send it. It is descriptive context only. A

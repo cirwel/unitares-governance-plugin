@@ -1,10 +1,10 @@
 """Fresh mints declare which vendor session they live in (portal hub H0).
 
-The slot is the host's own session id. With --host-harness, a fresh mint sends
-`host_session = {harness, session_id: slot, workspace}` so the server can
-record which vendor session to resume and where. An orchestrated resume never
-sends it, and nothing is sent without a harness or with a slot that does not
-look like a session id.
+With --host-harness and --host-session-id (the host's own, unsanitized id, not
+the cache slot), a fresh mint sends `host_session = {harness, session_id,
+workspace}` so the server can record which vendor session to resume and where.
+An orchestrated resume never sends it, and nothing is sent without a harness or
+with an id that does not look like a session id.
 """
 
 from __future__ import annotations
@@ -58,7 +58,8 @@ def _run(tmp_path: Path, **kwargs: Any) -> _FakeTransport:
 def test_fresh_mint_declares_host_session(tmp_path: Path) -> None:
     project = tmp_path / "project"
     transport = _run(
-        tmp_path, slot=SESSION, host_harness="claude-code", host_session_dir=project,
+        tmp_path, slot="cache-slot", host_harness="claude-code",
+        host_session_id=SESSION, host_session_dir=project,
     )
     assert transport.args["force_new"] is True
     assert transport.args["host_session"] == {
@@ -67,18 +68,51 @@ def test_fresh_mint_declares_host_session(tmp_path: Path) -> None:
 
 
 def test_workspace_is_optional(tmp_path: Path) -> None:
-    transport = _run(tmp_path, slot=SESSION, host_harness="codex")
+    transport = _run(tmp_path, slot=SESSION, host_harness="codex", host_session_id=SESSION)
     assert transport.args["host_session"] == {"harness": "codex", "session_id": SESSION}
 
 
-def test_nothing_declared_without_harness_or_slot(tmp_path: Path) -> None:
-    assert "host_session" not in _run(tmp_path, slot=SESSION).args
-    assert "host_session" not in _run(tmp_path / "b", host_harness="codex").args
+def test_the_cache_slot_is_never_declared(tmp_path: Path) -> None:
+    """Without the host's own id nothing is declared, even with a slot."""
+    assert "host_session" not in _run(tmp_path, slot=SESSION, host_harness="codex").args
+    assert "host_session" not in _run(tmp_path / "b", host_session_id=SESSION).args
 
 
-def test_odd_slot_is_not_declared(tmp_path: Path) -> None:
-    transport = _run(tmp_path, slot="a slot/with spaces", host_harness="claude-code")
+def test_odd_session_id_is_not_declared(tmp_path: Path) -> None:
+    transport = _run(
+        tmp_path, slot="s", host_harness="claude-code", host_session_id="a b/c",
+    )
     assert "host_session" not in transport.args
+
+
+def test_host_session_id_from_payload() -> None:
+    from _slot_from_stdin import host_session_id_from_payload as raw
+
+    assert raw(json.dumps({"session_id": SESSION})) == SESSION
+    assert raw(json.dumps({"conversationId": "conv-1"})) == "conv-1"
+    # Hashed-fallback fields are cache keys, not resumable ids.
+    assert raw(json.dumps({"thread_id": "thr-1"})) == ""
+    assert raw(json.dumps({"transcript_path": "/x/y.jsonl"})) == ""
+    # Never rewritten: an id the slot rule would sanitize is dropped instead.
+    assert raw(json.dumps({"session_id": "a b"})) == ""
+    assert raw(json.dumps({"session_id": "s" * 129})) == ""
+    assert raw("not json") == "" and raw("") == ""
+
+
+def test_unresolvable_directory_never_blocks_onboarding(tmp_path: Path, monkeypatch) -> None:
+    assert onboard_helper._optional_dir("~no_such_user_zz/x") is None
+    assert onboard_helper._optional_dir("") is None
+    transport = _FakeTransport()
+    monkeypatch.setattr(
+        onboard_helper, "run_onboard",
+        lambda **kw: run_onboard(**{**kw, "post_json": transport}),
+    )
+    onboard_helper.main([
+        "--name", "claude-x", "--workspace", str(tmp_path), "--slot", SESSION,
+        "--host-harness", "claude-code", "--host-session-id", SESSION,
+        "--host-session-dir", "~no_such_user_zz/x",
+    ])
+    assert transport.args["host_session"] == {"harness": "claude-code", "session_id": SESSION}
 
 
 def test_orchestrated_resume_never_declares(tmp_path: Path) -> None:
@@ -88,6 +122,7 @@ def test_orchestrated_resume_never_declares(tmp_path: Path) -> None:
         client_session_id="agent:/thread-x",
         orchestrated=True,
         host_harness="claude-code",
+        host_session_id=SESSION,
         host_session_dir=tmp_path,
     )
     assert "force_new" not in transport.args
@@ -106,6 +141,7 @@ def test_cli_flags_reach_the_request(tmp_path: Path, monkeypatch, capsys) -> Non
         "--workspace", str(tmp_path),
         "--slot", SESSION,
         "--host-harness", "claude-code",
+        "--host-session-id", SESSION,
         "--host-session-dir", str(tmp_path),
     ])
     capsys.readouterr()
