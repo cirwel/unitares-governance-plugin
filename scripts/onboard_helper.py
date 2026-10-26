@@ -28,6 +28,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.request
@@ -365,6 +366,37 @@ def _identity_fingerprint(payload: dict[str, Any]) -> tuple[str, ...]:
 
 # --- Core flow -------------------------------------------------------------
 
+_HOST_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+
+
+def _host_session(
+    harness: str | None, session_id: str | None, session_dir: Path | None
+) -> dict[str, str] | None:
+    """The ``host_session`` declaration for a fresh mint, or None.
+
+    Sent only with a harness and an id that looks like a vendor session id;
+    the server validates again and ignores anything malformed.
+    """
+    harness = (harness or "").strip()
+    session_id = (session_id or "").strip()
+    if not harness or not session_id or not _HOST_SESSION_ID_RE.match(session_id):
+        return None
+    declared = {"harness": harness, "session_id": session_id}
+    if session_dir is not None:
+        declared["workspace"] = str(session_dir)
+    return declared
+
+
+def _optional_dir(value: str) -> Path | None:
+    """Resolve an optional directory; any failure omits it, never raises."""
+    if not value:
+        return None
+    try:
+        return Path(value).expanduser().resolve()
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
 def run_onboard(
     *,
     server_url: str,
@@ -379,6 +411,9 @@ def run_onboard(
     timeout: float = DEFAULT_TIMEOUT,
     initial_state: dict | None = None,
     bootstrap: bool = False,
+    host_harness: str | None = None,
+    host_session_id: str | None = None,
+    host_session_dir: Path | None = None,
     post_json: Callable[[str, dict, float, str | None], dict] = _post_json,
     read_cache: Callable[..., dict] = _read_cache,
     write_cache: Callable[..., None] = _write_cache,
@@ -398,6 +433,14 @@ def run_onboard(
     from normal interactive sessions. A leaked bare anchor on an interactive
     shell must be inert: it falls back to the default fresh-mint path, never
     silently resume-sharing multiple subjects onto one governance UUID.
+
+    ``host_harness`` names the host (``claude-code``, ``codex``, ...). With
+    ``host_session_id`` (the host's own, unsanitized session id, never the
+    cache slot, which may be a hashed fallback) it declares, on a fresh mint
+    only, which vendor session this identity lives in: ``host_session =
+    {harness, session_id, workspace: host_session_dir}``. The server stores it as descriptive
+    context so a reader can tell which session to resume and where; it is
+    never identity proof, and an orchestrated resume never sends it.
     ``force_new`` still overrides the anchor as a deliberate break.
     """
     url = f"{server_url.rstrip('/')}/v1/tools/call"
@@ -448,6 +491,10 @@ def run_onboard(
             initial_state = _default_bootstrap_state()
         if initial_state:
             arguments["initial_state"] = initial_state
+
+        host_session = _host_session(host_harness, host_session_id, host_session_dir)
+        if host_session:
+            arguments["host_session"] = host_session
 
     raw = post_json(url, {"name": "onboard", "arguments": arguments}, timeout, auth_token)
     parsed = unwrap_tool_response(raw)
@@ -589,6 +636,24 @@ def main(argv: list[str] | None = None) -> int:
              "Required for --client-session-id to trigger resume; without it "
              "the anchor is ignored and onboarding mints normally.",
     )
+    parser.add_argument(
+        "--host-harness",
+        default="",
+        help="Host name to declare with the slot as this identity's vendor "
+             "session (claude-code, codex, ...). Fresh mints only.",
+    )
+    parser.add_argument(
+        "--host-session-id",
+        default="",
+        help="The host's own session id, unsanitized (not the cache slot). "
+             "Declared with --host-harness.",
+    )
+    parser.add_argument(
+        "--host-session-dir",
+        default="",
+        help="Directory the host session resumes from (the vendor's project "
+             "directory). Declared with --host-harness.",
+    )
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT)
     args = parser.parse_args(argv)
 
@@ -608,6 +673,9 @@ def main(argv: list[str] | None = None) -> int:
         auth_token=auth_token,
         timeout=args.timeout,
         bootstrap=args.bootstrap,
+        host_harness=(args.host_harness or "").strip() or None,
+        host_session_id=(args.host_session_id or "").strip() or None,
+        host_session_dir=_optional_dir(args.host_session_dir),
     )
     print(json.dumps(result))
     return 0

@@ -261,3 +261,22 @@ def test_codex_host_does_not_write_a_claude_env_file(tmp_path):
     _serve(tmp_path, claude_session_id=SLOT, host="codex",
            extra_env={"CLAUDE_ENV_FILE": str(env_file)})
     assert env_file.read_text() == ""
+
+
+def test_startup_declares_the_host_session(tmp_path):
+    _, onboards = _serve(tmp_path, claude_session_id=SLOT)
+    declared = onboards[0]["arguments"]["host_session"]
+    assert declared["harness"] == "claude-code"
+    assert declared["session_id"] == SLOT
+    assert declared["workspace"]
+
+
+def test_hashed_fallback_slot_declares_no_host_session(tmp_path):
+    """A Codex payload without session_id gets a hashed cache slot. That names
+    a cache file, not a session the vendor can resume, so nothing is declared."""
+    _, onboards = _serve(
+        tmp_path, host="codex",
+        hook_payload={"thread_id": "thr-1", "source": "startup"},
+    )
+    assert len(onboards) == 1
+    assert "host_session" not in onboards[0]["arguments"]

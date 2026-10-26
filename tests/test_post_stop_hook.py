@@ -246,6 +246,13 @@ def test_lazy_onboard_names_the_session_after_its_launch_directory(tmp_path):
     name = onboard[0]["arguments"]["name"]
     assert name.split("#", 1)[0] == "claude-unitares"
     assert "career" not in name
+    # The vendor session is declared with its launch directory, which is
+    # where `claude --resume` must run.
+    assert onboard[0]["arguments"]["host_session"] == {
+        "harness": "claude-code",
+        "session_id": "label-slot-1234",
+        "workspace": str(project.resolve()),
+    }
 
 
 
