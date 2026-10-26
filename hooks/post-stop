@@ -257,6 +257,8 @@ if [[ -z "${CSID:-}" && -n "${RAW_SLOT:-}" \
       --workspace "${LOOKUP_WORKSPACE}" \
       --slot "${RAW_SLOT}" \
       --client-session-id "${UNITARES_CLIENT_SESSION_ID:-}" \
+      --host-harness "${HOST_MODEL_TYPE}" \
+      --host-session-dir "${WORKSPACE_DIR}" \
       --timeout "${ONBOARD_TIMEOUT}" \
       >/dev/null 2>&1 || true
     eval "$(printf '%s' "${PAYLOAD}" | python3 "${SESSION_LOOKUP}" --workspace "${LOOKUP_WORKSPACE}")"

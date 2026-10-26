@@ -751,6 +751,8 @@ elif [[ -n "${HEALTH_STATUS}" \
     --model-type "${UNITARES_MODEL_TYPE:-${EAGER_MODEL_TYPE}}" \
     --workspace "${PWD}" \
     --slot "${HOST_SESSION_ID}" \
+    --host-harness "${EAGER_MODEL_TYPE}" \
+    --host-session-dir "${EAGER_WORKSPACE_DIR}" \
     --timeout "${UNITARES_EAGER_BIND_TIMEOUT:-5}" \
     >/dev/null 2>&1 || true
   EAGER_FIELDS=$(_eager_binding)

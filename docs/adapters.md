@@ -94,6 +94,15 @@ explicit adapter marker from that unmarked-call default; analytics should
 treat the default cohort as inferred rather than verified authorship. Deploy
 this marker-producing helper before the Core consumer during a staged upgrade.
 
+The helper's fresh mints also declare which vendor session the identity lives
+in: `host_session = {harness, session_id, workspace}`, where `session_id` is
+the slot (the host's own session id) and `workspace` is the directory the
+session resumes from. The server stores it once on the new identity so a
+reader such as a hub can offer to resume that session (Core interface contract
+2.2.0). Orchestrated resumes never send it. It is descriptive context only. A
+Core server older than 2.2.0 ignores the unknown field, so the deploy order
+does not matter.
+
 Claude's `PermissionDenied` event covers auto-mode classifier denials, not
 manual permission-dialog denials, deny-rule matches, or a PreToolUse denial.
 Failed edit execution is released by `PostToolUseFailure`; a synchronous
