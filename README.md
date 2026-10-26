@@ -1,7 +1,7 @@
 # UNITARES for Claude Code, Codex, and ChatGPT
 
 [![CI](https://github.com/cirwel/unitares-governance-plugin/actions/workflows/ci.yml/badge.svg)](https://github.com/cirwel/unitares-governance-plugin/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-0.4.22-blue.svg)](.claude-plugin/plugin.json)
+[![Version](https://img.shields.io/badge/version-0.4.23-blue.svg)](.claude-plugin/plugin.json)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
 Connect **Claude Code, Codex, and ChatGPT** to
