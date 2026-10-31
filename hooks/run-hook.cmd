@@ -20,11 +20,11 @@ if "%EVAL_UNITARES_OFFLINE%"=="1" (
     set "UNITARES_FILE_LEASES_REQUIRED=0"
 )
 if exist "C:\Program Files\Git\bin\bash.exe" (
-    "C:\Program Files\Git\bin\bash.exe" "%HOOK_DIR%%~1" %2 %3 %4 %5 %6 %7 %8 %9
+    "C:\Program Files\Git\bin\bash.exe" "%HOOK_DIR%run-hook.cmd" "%~1" %2 %3 %4 %5 %6 %7 %8 %9
     exit /b !ERRORLEVEL!
 )
 if exist "C:\Program Files (x86)\Git\bin\bash.exe" (
-    "C:\Program Files (x86)\Git\bin\bash.exe" "%HOOK_DIR%%~1" %2 %3 %4 %5 %6 %7 %8 %9
+    "C:\Program Files (x86)\Git\bin\bash.exe" "%HOOK_DIR%run-hook.cmd" "%~1" %2 %3 %4 %5 %6 %7 %8 %9
     exit /b !ERRORLEVEL!
 )
 echo run-hook.cmd: Git Bash is required to run UNITARES hooks >&2
@@ -79,5 +79,18 @@ fi
 if [ -z "$BASH_BIN" ]; then
     echo "run-hook.cmd: Bash is required to run UNITARES hooks" >&2
     exit 1
+fi
+HOOK_HOST=""
+PREVIOUS_ARG=""
+for ARG in "$@"; do
+    if [ "$PREVIOUS_ARG" = "--host" ]; then
+        HOOK_HOST="$ARG"
+    fi
+    PREVIOUS_ARG="$ARG"
+done
+REPORTER="${SCRIPT_DIR}/../scripts/hook_invocations.py"
+if [ "$HOOK_HOST" = "codex" ] && [ -f "$REPORTER" ] && command -v python3 >/dev/null 2>&1; then
+    exec python3 "$REPORTER" run --plugin-root "${SCRIPT_DIR}/.." \
+        --hook "$SCRIPT_NAME" -- "$BASH_BIN" "${SCRIPT_DIR}/${SCRIPT_NAME}" "$@"
 fi
 exec "$BASH_BIN" "${SCRIPT_DIR}/${SCRIPT_NAME}" "$@"
