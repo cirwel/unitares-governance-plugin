@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import ntpath
 import os
 import signal
 import subprocess
@@ -53,7 +54,7 @@ def _append(path: Path, record: dict[str, Any]) -> None:
         pass
 
 
-def _version(root: Path) -> tuple[str, str]:
+def _version(root: Path, hook: str) -> tuple[str, str, str]:
     try:
         manifest = json.loads((root / ".codex-plugin" / "plugin.json").read_text())
         version = str(manifest.get("version") or "unknown")[:80]
@@ -63,7 +64,15 @@ def _version(root: Path) -> tuple[str, str]:
         definition = hashlib.sha256((root / "hooks" / "codex-hooks.json").read_bytes()).hexdigest()[:16]
     except OSError:
         definition = "unknown"
-    return version, definition
+    code = hashlib.sha256()
+    try:
+        for path in (root / "hooks" / "run-hook.cmd", root / "hooks" / hook,
+                     root / "scripts" / "hook_invocations.py"):
+            code.update(path.read_bytes())
+        code_hash = code.hexdigest()[:16]
+    except OSError:
+        code_hash = "unknown"
+    return version, definition, code_hash
 
 
 def _configured_timeout(root: Path, hook: str) -> float | None:
@@ -77,7 +86,11 @@ def _configured_timeout(root: Path, hook: str) -> float | None:
         for group in groups:
             for handler in group.get("hooks", []):
                 command = handler.get("command", "")
-                if not isinstance(command, str) or f" {hook} " not in command or " --host codex" not in command:
+                # Match the executable argument, not e.g. --event session-start
+                # in the watcher-context command.
+                if (not isinstance(command, str)
+                        or f'"$_unitares_runner" {hook} ' not in command
+                        or " --host codex" not in command):
                     continue
                 try:
                     times.append(float(handler["timeout"]))
@@ -103,14 +116,52 @@ def _session_id(raw: bytes) -> str:
     return value.strip() if isinstance(value, str) else ""
 
 
-def _stop_process(proc: subprocess.Popen[bytes]) -> None:
+def _kill_process(proc: subprocess.Popen[bytes]) -> None:
     try:
-        if os.name != "nt":
-            os.killpg(proc.pid, signal.SIGKILL)
+        if os.name == "nt":
+            system_root = os.environ.get("SystemRoot") or os.environ.get("WINDIR") or r"C:\Windows"
+            taskkill = ntpath.join(system_root, "System32", "taskkill.exe")
+            subprocess.run([taskkill, "/T", "/F", "/PID", str(proc.pid)],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           timeout=0.25, check=False)
         else:
+            # The child stays in Codex's process group so a host-level kill can
+            # reach it. On our own earlier deadline, kill its process tree
+            # without signaling the host's group.
+            result = subprocess.run(["ps", "-axo", "pid=,ppid="],
+                                    text=True, capture_output=True, timeout=0.25,
+                                    check=False)
+            children: dict[int, list[int]] = defaultdict(list)
+            for line in result.stdout.splitlines():
+                fields = line.split()
+                if len(fields) == 2 and all(field.isdecimal() for field in fields):
+                    children[int(fields[1])].append(int(fields[0]))
+            descendants: list[int] = []
+            pending = [proc.pid]
+            seen = {proc.pid}
+            while pending:
+                parent = pending.pop()
+                for child in children.get(parent, []):
+                    if child not in seen:
+                        seen.add(child)
+                        descendants.append(child)
+                        pending.append(child)
+            for pid in reversed(descendants):
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    try:
+        if proc.poll() is None:
             proc.kill()
     except ProcessLookupError:
         pass
+
+
+def _stop_process(proc: subprocess.Popen[bytes]) -> None:
+    _kill_process(proc)
     proc.communicate()
 
 
@@ -120,7 +171,7 @@ def run(root: Path, hook: str, command: list[str]) -> int:
     raw = sys.stdin.buffer.read()
     session_id = _session_id(raw)
     path = session_path(session_id) if session_id else None
-    version, definition = _version(root)
+    version, definition, code_hash = _version(root, hook)
     hook_name = _label(hook, command)
     timeout = _configured_timeout(root, hook)
     # Let this runner record its own deadline before Codex's outer deadline.
@@ -133,6 +184,7 @@ def run(root: Path, hook: str, command: list[str]) -> int:
         "hook": hook_name,
         "version": version,
         "definition": definition,
+        "code": code_hash,
     }
     if path:
         _append(path, {**base, "phase": "start", "at": time.time()})
@@ -149,19 +201,31 @@ def run(root: Path, hook: str, command: list[str]) -> int:
 
     code = 1
     outcome = "failed"
+    active_proc: subprocess.Popen[bytes] | None = None
+
+    def _on_host_signal(signum: int, _frame: Any) -> None:
+        # Keep the hook in the host's process group. If only the reporter gets
+        # a catchable cancellation signal, stop its child before exiting.
+        if active_proc is not None:
+            _kill_process(active_proc)
+        os._exit(128 + signum)
+
+    for name in ("SIGTERM", "SIGINT", "SIGHUP"):
+        signum = getattr(signal, name, None)
+        if signum is not None:
+            signal.signal(signum, _on_host_signal)
     try:
-        proc = subprocess.Popen(
+        active_proc = subprocess.Popen(
             command,
             stdin=subprocess.PIPE,
             env=child_env,
-            start_new_session=os.name != "nt",
         )
         try:
-            proc.communicate(input=raw, timeout=budget)
-            code = proc.returncode
+            active_proc.communicate(input=raw, timeout=budget)
+            code = active_proc.returncode
             outcome = "succeeded" if code == 0 else "failed"
         except subprocess.TimeoutExpired:
-            _stop_process(proc)
+            _stop_process(active_proc)
             code = 124
             outcome = "timed_out"
     except OSError as exc:
@@ -221,7 +285,10 @@ def report(path: Path, *, json_output: bool) -> int:
         counts["fired"] += 1
         counts[status] += 1
         by_hook[hook][status] += 1
-        versions.add(f"{start.get('version', 'unknown')} ({start.get('definition', 'unknown')})")
+        versions.add(
+            f"{start.get('version', 'unknown')} "
+            f"(definition {start.get('definition', 'unknown')}, code {start.get('code', 'unknown')})"
+        )
     summary = {
         "session": path.stem.removeprefix("codex-"),
         "versions": sorted(versions),
@@ -233,7 +300,7 @@ def report(path: Path, *, json_output: bool) -> int:
         print(json.dumps(summary, indent=2, sort_keys=True))
     else:
         print(f"Codex hook report: session {summary['session']}")
-        print("Plugin version / hook definition: " + ", ".join(summary["versions"]))
+        print("Plugin version / hook definition / direct code: " + ", ".join(summary["versions"]))
         print("  " + "  ".join(f"{name}={counts[name]}" for name in ("fired", *RESULTS)))
         for hook, hook_counts in summary["hooks"].items():
             detail = ", ".join(f"{name}={hook_counts[name]}" for name in RESULTS if hook_counts[name])

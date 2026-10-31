@@ -25,11 +25,9 @@ fi
 
 OBSERVER="${PLUGIN_ROOT}/scripts/activity_observer.py"
 if [[ ! -f "${OBSERVER}" || -t 0 ]]; then
-  if [[ -n "${UNITARES_HOOK_STATUS_FILE:-}" ]]; then
-    printf 'skipped\n' >"${UNITARES_HOOK_STATUS_FILE}" 2>/dev/null || true
-  fi
   exit 0
 fi
 
-python3 "${OBSERVER}" --workspace "${PWD}" --host-pid "${PPID}" >/dev/null 2>&1 || true
+python3 "${OBSERVER}" --workspace "${PWD}" \
+  --host-pid "${UNITARES_HOOK_HOST_PID:-${PPID}}" >/dev/null 2>&1 || true
 exit 0

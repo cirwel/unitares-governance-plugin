@@ -114,9 +114,6 @@ fi
 # than invisibly wrong.
 if [[ -z "${SLOT}" ]]; then
   printf '[SLOTLESS_SKIP] post-checkin: no session_id on stdin; milestone reset and last_checkin_ts not written\n' >&2
-  if [[ -n "${UNITARES_HOOK_STATUS_FILE:-}" ]]; then
-    printf 'skipped\n' >"${UNITARES_HOOK_STATUS_FILE}" 2>/dev/null || true
-  fi
   exit 0
 fi
 

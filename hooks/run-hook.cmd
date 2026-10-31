@@ -90,6 +90,10 @@ for ARG in "$@"; do
 done
 REPORTER="${SCRIPT_DIR}/../scripts/hook_invocations.py"
 if [ "$HOOK_HOST" = "codex" ] && [ -f "$REPORTER" ] && command -v python3 >/dev/null 2>&1; then
+    # The child used to be exec'd directly, so its PPID was the hook host.
+    # Keep that PID available across the reporting process boundary.
+    UNITARES_HOOK_HOST_PID="$PPID"
+    export UNITARES_HOOK_HOST_PID
     exec python3 "$REPORTER" run --plugin-root "${SCRIPT_DIR}/.." \
         --hook "$SCRIPT_NAME" -- "$BASH_BIN" "${SCRIPT_DIR}/${SCRIPT_NAME}" "$@"
 fi
