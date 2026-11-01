@@ -28,5 +28,6 @@ if [[ ! -f "${OBSERVER}" || -t 0 ]]; then
   exit 0
 fi
 
-python3 "${OBSERVER}" --workspace "${PWD}" --host-pid "${PPID}" >/dev/null 2>&1 || true
+python3 "${OBSERVER}" --workspace "${PWD}" \
+  --host-pid "${UNITARES_HOOK_HOST_PID:-${PPID}}" >/dev/null 2>&1 || true
 exit 0

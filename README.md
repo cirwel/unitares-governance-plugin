@@ -176,6 +176,31 @@ Hermes-native lifecycle bindings live in
 Adding a direct MCP connection to Hermes exposes tools but does not by itself
 install lifecycle automation.
 
+## Codex hook report
+
+The installed Codex plugin records a local receipt when one of its hook
+commands starts and when it finishes. To see the most recently observed
+session, run from this checkout or the installed plugin directory:
+
+```bash
+python3 scripts/hook_invocations.py report --latest
+```
+
+Use `--session-id ID` for a specific Codex session, or add `--json` for a
+machine-readable report. Receipts live under `~/.unitares/hook-reports/` with
+hashed session names and contain only hook name, plugin version, hook-definition
+hash, direct hook code hash, timing, and outcome. Set `UNITARES_HOOK_REPORT_DIR`
+to move the directory.
+
+`fired` means the plugin's reporting runner recorded a start. `skipped` counts
+only hooks that explicitly report an internal no-op. `timed_out` means the
+runner's deadline expired before Codex's outer hook deadline. `failed` means a
+nonzero child exit or a failure to launch the hook.
+`incomplete` means a start receipt has no end receipt yet; an active hook,
+host kill, host timeout, and crash cannot be distinguished. Codex may skip
+untrusted or unmatched hooks without invoking the runner, so this report cannot
+count those skips or prove that every configured hook ran.
+
 ## Documentation
 
 | Guide | Read it for |

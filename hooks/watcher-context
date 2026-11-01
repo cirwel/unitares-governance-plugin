@@ -5,6 +5,12 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PLUGIN_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
+_report_skip() {
+  if [[ -n "${UNITARES_HOOK_STATUS_FILE:-}" ]]; then
+    printf 'skipped\n' >"${UNITARES_HOOK_STATUS_FILE}" 2>/dev/null || true
+  fi
+}
+
 EVENT=""
 HOOK_HOST=""
 while [[ $# -gt 0 ]]; do
@@ -34,9 +40,15 @@ if [[ -f "${DEFAULTS}" ]]; then
   source "${DEFAULTS}" 2>/dev/null || true
 fi
 
-[[ "${UNITARES_WATCHER_ENABLED:-0}" == "1" ]] || exit 0
+if [[ "${UNITARES_WATCHER_ENABLED:-0}" != "1" ]]; then
+  _report_skip
+  exit 0
+fi
 WATCHER_AGENT="${UNITARES_WATCHER_AGENT:-}"
-[[ -n "${WATCHER_AGENT}" && -f "${WATCHER_AGENT}" ]] || exit 0
+if [[ -z "${WATCHER_AGENT}" || ! -f "${WATCHER_AGENT}" ]]; then
+  _report_skip
+  exit 0
+fi
 
 if [[ "${EVENT}" == "session-start" ]]; then
   exec python3 "${WATCHER_AGENT}" --print-unresolved
