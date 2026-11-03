@@ -2,84 +2,65 @@
 description: "Show current UNITARES governance state and operator-relevant diagnostics"
 ---
 
-Start by inventorying slot-scoped session caches in the current workspace.
+Inventory workspace session caches with this plugin's helpers:
 
-Use the shared helper in this plugin repo:
+- `scripts/session_cache.py list --workspace "$PWD"` lists slots newest-first.
+- `scripts/session_cache.py get session --slot=<slot>` reads one slot.
 
-- `scripts/session_cache.py list --workspace "$PWD"` — slot inventory sorted newest-first
-- `scripts/session_cache.py get session --slot=<slot>` — read a specific cache
+Bare `get session` reads legacy flat `session.json`: read-only lineage context,
+never current identity. Cached UUIDs are lineage anchors, not ownership proof.
+Ignore all cached `continuity_token` values, including legacy ones; v2 caches
+must not store them. Only a matching token returned to this live process by the
+server permits `identity(agent_uuid=<uuid>, continuity_token=<token>, resume=true)`.
+Never resume by bare UUID.
 
-Bare `get session` (no `--slot`) returns the legacy flat `session.json`, which under S20 is read-only-legacy — surface it only as a lineage candidate, never as the current process's identity.
+If no proof-owned UUID rebind is available, inspect
+`identity(client_session_id=<your client_session_id>)`.
+Never call bare `identity()`: it mints a fresh identity; check
+`identity_assurance.caller_proven` before trusting a result. Without
+`client_session_id`, report identity unknown and suggest `/governance-start`,
+which declares a cached UUID as a parent only for a deliberate handoff from an
+exited process.
 
-If continuity state exists:
+Read `get_governance_metrics` using the same continuity data. This does not
+advance EISV through a new check-in. Use `verbosity="standard"` or `"full"` if
+the compact view lacks needed source or lifecycle detail.
 
-- treat `uuid` as a local identity anchor and lineage candidate
-- ignore any `continuity_token` field in the cache; it is never proof
+Summarize available fields; label missing provenance unknown:
 
-Never take a `continuity_token` from any cache file, whether a legacy v1/flat
-`session.json` or a v2 slot cache: only a token returned to this live process
-counts as proof. v2 slot caches do not persist it, and a token found in a legacy
-file is not a credential.
+- Identity: proof-resumed, fresh, or created with lineage; `identity_status`,
+  `bound_identity`, `session_resolution_source`, `continuity_token_supported`,
+  `identity_assurance`, deprecation warnings, and continuity strength.
+- E/I/S/V, `primary_eisv_source`, and timestamp/freshness labels.
+- Coherence producer/role: `coherence_source` / `coherence_role` or nested
+  `coherence.source` / `coherence.role`.
+- Risk with `risk_score_source`; verdict with `verdict_source` /
+  `verdict_resolution_source`, when returned.
+- `write_gate`: current lifecycle restriction, applied hold, and recovery or
+  expiry details. Distinguish these from inferred recommendations.
+- `next_action`, `memory_suggestions`, `recovery_hint`, summary, mode/basin.
+- Behavioral assessment versus ODE feedback, as identified by the response.
 
-Do not verify by bare UUID resume. If you need to test ownership of a cached UUID, call `identity(agent_uuid=<uuid>, continuity_token=<token>, resume=true)` only when this live process holds a matching token returned to it by the server.
-
-If no proof-owned UUID rebind is available, call `identity(client_session_id=<your client_session_id>)` to inspect current binding. Never call `identity()` with no arguments: with no proof argument the call is gated to a fresh mint and reports on an identity it just created, so read `identity_assurance.caller_proven` before trusting the result. If you have no `client_session_id`, report the identity as unknown and suggest `/governance-start`, which declares the cached uuid as a parent only for a deliberate handoff from an exited process.
-
-Then call `get_governance_metrics` for the current agent using the same continuity data.
-This reads and interprets the available state; it does not advance EISV through
-a new check-in. Use `verbosity="standard"` or `verbosity="full"` when the source
-or lifecycle details needed for the diagnosis are absent from the compact view.
-
-Call `health_check()` only when system health, not agent state, may be part of the issue.
-
-Display:
-
-- whether identity was proof-resumed, freshly created, or created with lineage
-- `identity_status`
-- `bound_identity`
-- `session_resolution_source`
-- `continuity_token_supported`
-- `identity_assurance`
-- deprecation warnings
-- whether continuity looks strong or weak
-- E, I, S, V with `primary_eisv_source` and available timestamp/freshness labels
-- coherence with its producer and role (`coherence_source` / `coherence_role`,
-  or nested `coherence.source` / `coherence.role`)
-- risk score with `risk_score_source` when returned
-- verdict with `verdict_source` / `verdict_resolution_source` when returned
-- `write_gate`, including any applied hold and its available recovery or expiry
-  information; distinguish it from an inferred recommendation
-- `next_action`, `memory_suggestions`, and `recovery_hint` when present
-- summary or mode/basin if available
-- which fields come from behavioral assessment or ODE feedback, as identified
-  by the response; label missing provenance as unknown
-
-The `policy_evaluation` and `enforcement` blocks belong to assessment-bearing
-check-in responses, not this metrics read or a receipt-only retry. Do not infer
-an enforcement posture from a bare verdict. Use the returned `write_gate` for
-the current lifecycle restriction. A high-risk reading is a reason to inspect
-its inputs and relevant task evidence; an applied hold follows its recovery
-contract even when the reading's interpretation is disputed.
-
-Interpret these as defined state indices and policy classifications. The
+`policy_evaluation` and `enforcement` belong to assessment-bearing check-ins,
+not this metrics read or receipt-only retries. A bare verdict does not identify
+enforcement posture. For a high-risk reading, inspect its inputs and relevant
+task evidence; an applied hold follows its recovery contract even when the
+reading's interpretation is disputed. These are defined state indices and
+policy classifications. The
 [computation reference](https://github.com/cirwel/unitares/blob/master/docs/EISV_COMPUTATION.md)
-owns their inputs, intended interpretations, and evidence limits.
+owns their inputs, interpretations, and evidence limits.
 
-If `health_check()` is used, also show:
+Use `health_check()` only if system health may be involved; report overall
+status, degraded checks, and the first operator action.
 
-- overall system status
-- degraded checks
-- first operator action
-
-If the live identity differs from the slot-scoped cache, refresh that slot's cache with the latest identity fields as the payload (without `--json` the helper has nothing to write: it refuses a new slot and only bumps `updated_at` on an existing one):
+If live identity differs from the slot cache, refresh that slot with the latest
+identity fields:
 `scripts/session_cache.py set session --slot=<client_session_id> --merge --stamp --json '{"uuid":"<uuid>","client_session_id":"<client_session_id>","schema_version":2}'`.
-Do not write `continuity_token` to the cache.
+Keep `--json`: without it, the helper refuses new slots and only bumps
+`updated_at` on existing ones. Never cache `continuity_token`.
 
-For a local contract audit, run
-`python3 scripts/audit_identity_contract.py --workspace "$PWD"`. Treat `error`
-findings as cache contract violations. Treat `warning` findings as operator
-signals: weak resolution source, flat legacy cache, floor observation, or
-delivery failure.
+For a local audit, run `python3 scripts/audit_identity_contract.py --workspace "$PWD"`.
+`error` means a cache contract violation; `warning` flags weak resolution,
+legacy flat caches, floor observations, or delivery failure for the operator.
 
-Do not dump raw JSON unless the user explicitly asks for it.
-Prefer a short interpreted summary.
+Give a short interpreted summary; dump raw JSON only if explicitly requested.
