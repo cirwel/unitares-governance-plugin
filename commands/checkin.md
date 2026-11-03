@@ -68,7 +68,7 @@ After the call:
 - report `memory_suggestions` when present and relevant to the next step
 - report `recovery_hint` when present before proposing an invented recovery path
 - report any guidance briefly
-- report the mirror question when present
+- report `mirror` signals and any `reflection` when present
 - if an actual lifecycle hold is reported, stop gated work and follow its
   surfaced recovery path. If no path is supplied, inspect `check_working_state`
   and the `governance-lifecycle` skill; seek structured review or operator input
