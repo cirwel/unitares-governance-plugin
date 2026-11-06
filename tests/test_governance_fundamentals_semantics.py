@@ -36,12 +36,13 @@ def test_coherence_sources_and_roles_are_explicit() -> None:
     # When it fires: re-read the section against coherence_provenance.py and
     # behavioral_sensor.py, check the assertions below still hold, then
     # update the hash.
-    # Both reviewed canonical snapshots are accepted while the independent
-    # skills mirror PR (#203) lands. This pins content, not a freshness date:
-    # any third version still requires the source review described above.
+    # Accept reviewed historical and SN1 snapshots while the automated mirror
+    # lands. This pins content, not a freshness date; unknown content still
+    # requires the source review described above.
     reviewed_snapshots = {
-        "42e86f9405e8744a",  # unitares 817424d9, currently bundled
+        "42e86f9405e8744a",  # unitares 817424d9, historical baseline
         "40af918727ff685b",  # unitares 87dd33c3, explicit ODE influence
+        "6d854721f11a6e93",  # unitares 4f6bbdcf, SN1 defaults; sources rechecked
     }
     assert _coherence_section_sha() in reviewed_snapshots
     assert "unitares/src/behavioral_sensor.py" in frontmatter
@@ -62,11 +63,22 @@ def test_legacy_controller_is_not_taught_as_health_or_balance() -> None:
     assert "Coherence reflects balance" not in body
 
 
-def test_hidden_e_and_i_dependency_is_disclosed() -> None:
+def test_e_and_i_controller_dependency_matches_the_instrument_era() -> None:
     _, body = _parts()
 
-    assert "legacy coherence-level term" in body
-    assert "trend of that same legacy controller scalar" in body
+    if _coherence_section_sha() == "6d854721f11a6e93":
+        assert "coherence-level self-loops neutralized by default" in body
+        assert "coherence-trend and fleet-strategic self-loops neutralized by default" in body
+        assert "UNITARES_NEUTRALIZE_SENSOR_SELF_LOOPS=1" in body
+        assert "UNITARES_PER_AGENT_I_CALIBRATION=1" in body
+        assert "UNITARES_NEUTRALIZE_SENSOR_SELF_LOOPS=0" in body
+        assert "legacy coherence-level term" not in body
+        assert "trend of that same legacy controller scalar" not in body
+        assert "it feeds E, I," not in body
+        assert "omitted-confidence estimator and the compatibility backstops" in body
+    else:
+        assert "legacy coherence-level term" in body
+        assert "trend of that same legacy controller scalar" in body
 
 
 def test_hidden_confidence_dependency_is_disclosed() -> None:
