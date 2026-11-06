@@ -144,3 +144,21 @@ can misclassify a delivered branch as unmerged.
 Do not force-delete a branch merely because its upstream is gone. Preserve the
 commit on a fresh branch and PR, or document why the work is intentionally
 retired first.
+
+## CI and canonical snapshots
+
+CI validates an unchanged skill bundle against the canonical source revision
+recorded by its last landed verified mirror. The selector reads only the trusted
+event base history, proves that base is on plugin master ancestry, requires the
+source to be an ancestor of canonical master, and proves exact skill bytes,
+file modes, attestations, and manifest hashes. Unlanded stacked-PR bases fail
+closed; use a base already on plugin master ancestry.
+This lets a test or hook repair land when canonical master has newer guidance
+that needs the repair before its mirror can pass.
+
+Any change to the skills tree selects current canonical master instead. Missing
+provenance, incomplete history, or content mismatches fail closed. Source-digest
+and calendar-age freshness checks still run, using the selected snapshot. The
+privileged mirror-delivery workflow still verifies an exact mirror of current
+canonical master and successful CI for the exact PR head. No freshness or
+required-check bypass is used.

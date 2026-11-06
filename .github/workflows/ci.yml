@@ -17,6 +17,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v7
@@ -44,6 +46,16 @@ jobs:
           ref: master
           path: canonical-projects/unitares
           persist-credentials: false
+          fetch-depth: 0
+
+      - name: Select verified canonical snapshot
+        env:
+          PLUGIN_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          revision="$(python3 scripts/dev/select-skill-source.py \
+            --plugin-root . --canonical-root canonical-projects/unitares \
+            --base "$PLUGIN_BASE")"
+          git -C canonical-projects/unitares checkout --detach "$revision"
 
       - name: Check skill freshness metadata
         env:
