@@ -284,6 +284,17 @@ def home_session_mirror_is_valid(home_path: Path) -> bool:
     if not authority_path.exists():
         return True  # Legacy mirror written before the authority contract.
     state = read_json_dict_unlocked(authority_path)
+    if state.get("schema_version") == 1 and state.get("mirror_valid") is True:
+        return True
+    # _replace_locked transiently writes mirror_valid=False while holding the
+    # authority lock before replacing the cache and restoring mirror_valid=True.
+    # Re-read under the authority lock before treating False as durable so a
+    # concurrent reader never mistakes an in-flight write for an invalid mirror.
+    try:
+        with session_cache_lock(authority_path):
+            state = read_json_dict_unlocked(authority_path)
+    except (OSError, TimeoutError):
+        return False
     return state.get("schema_version") == 1 and state.get("mirror_valid") is True
 
 
