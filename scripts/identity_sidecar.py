@@ -348,31 +348,35 @@ class IdentitySidecar:
                     auth_token=self.auth_token,
                     timeout=self.timeout,
                 )
+                if result.get("status") != "ok":
+                    return result
+                # run_onboard writes the cache; add schema/stamp fields for the
+                # sidecar contract without persisting the transient
+                # continuity_token. Keep this post-onboard stamp inside
+                # onboard_claim so a concurrent ensure_session caller cannot
+                # observe the un-stamped cache or the transient
+                # mirror_valid=False window during _update_cache.
+                def stamp_schema(session: dict[str, Any]) -> dict[str, Any] | None:
+                    if not session:
+                        return None
+                    session.setdefault("schema_version", 2)
+                    session["slot"] = slot
+                    session["updated_at"] = _now_iso()
+                    return session
+
+                result["session"] = _update_cache(self.workspace, stamp_schema, slot)
+                current_sid = str(result["session"].get("client_session_id") or "").strip()
+                if not current_sid or current_sid != str(result.get("client_session_id") or "").strip():
+                    return {
+                        "status": "onboard_superseded",
+                        "error": "session cache changed after onboarding; newer local state preserved",
+                    }
+                return result
         except TimeoutError:
             return {
                 "status": "onboard_in_progress",
                 "error": "another sidecar request is onboarding this slot",
             }
-        if result.get("status") != "ok":
-            return result
-        # run_onboard writes the cache; add schema/stamp fields for the sidecar
-        # contract without persisting the transient continuity_token.
-        def stamp_schema(session: dict[str, Any]) -> dict[str, Any] | None:
-            if not session:
-                return None
-            session.setdefault("schema_version", 2)
-            session["slot"] = slot
-            session["updated_at"] = _now_iso()
-            return session
-
-        result["session"] = _update_cache(self.workspace, stamp_schema, slot)
-        current_sid = str(result["session"].get("client_session_id") or "").strip()
-        if not current_sid or current_sid != str(result.get("client_session_id") or "").strip():
-            return {
-                "status": "onboard_superseded",
-                "error": "session cache changed after onboarding; newer local state preserved",
-            }
-        return result
 
     def update_cache_from_identity_response(
         self,

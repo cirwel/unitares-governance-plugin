@@ -20,6 +20,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
+import _session_cache_io  # noqa: E402
 import identity_sidecar  # noqa: E402
 import session_cache  # noqa: E402
 from identity_sidecar import (  # noqa: E402
@@ -257,6 +258,60 @@ def test_concurrent_ensure_session_is_single_flight(
     assert {result["client_session_id"] for result in results} == {
         "agent-single-flight"
     }
+
+
+def test_ensure_session_waits_for_inflight_authority_replace(
+    tmp_path: Path,
+    fake_server: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+    sidecar = _sidecar(tmp_path, fake_server)
+    sidecar.write_session(
+        "slot-a",
+        {
+            "schema_version": 2,
+            "slot": "slot-a",
+            "uuid": "11111111-2222-4333-8444-555555555555",
+            "client_session_id": "agent-single-flight",
+        },
+    )
+    home_cache = fake_home / ".unitares" / "session-slot-a.json"
+    authority_path = _session_cache_io.cache_authority_path(home_cache)
+    in_flight = threading.Event()
+    release_writer = threading.Event()
+
+    def transient_writer() -> None:
+        with identity_sidecar.session_cache_lock(authority_path):
+            authority_path.write_text(
+                json.dumps({"schema_version": 1, "generation": 2, "mirror_valid": False}),
+                encoding="utf-8",
+            )
+            in_flight.set()
+            assert release_writer.wait(timeout=5)
+            authority_path.write_text(
+                json.dumps({"schema_version": 1, "generation": 2, "mirror_valid": True}),
+                encoding="utf-8",
+            )
+
+    writer = threading.Thread(target=transient_writer)
+    writer.start()
+    assert in_flight.wait(timeout=5)
+    reader_result: list[dict] = []
+    reader = threading.Thread(target=lambda: reader_result.append(sidecar.ensure_session("slot-a")))
+    reader.start()
+    release_writer.set()
+    writer.join(timeout=5)
+    reader.join(timeout=5)
+
+    assert not writer.is_alive()
+    assert not reader.is_alive()
+    assert len(reader_result) == 1
+    assert reader_result[0]["status"] == "cached"
+    assert reader_result[0]["client_session_id"] == "agent-single-flight"
+    assert FakeGovernanceHandler.calls == []
 
 
 def test_workspace_session_mirror_cannot_override_protected_binding(
