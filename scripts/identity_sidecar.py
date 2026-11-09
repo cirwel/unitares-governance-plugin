@@ -33,6 +33,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from contextlib import ExitStack
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -312,71 +313,84 @@ class IdentitySidecar:
         onboard_claim = _cache_path(self.workspace, slot).with_name(
             f"{_cache_path(self.workspace, slot).name}.onboard"
         )
-        try:
-            with session_cache_lock(onboard_claim):
-                session = self.read_session(slot)
-                sid = session.get("client_session_id")
-                if isinstance(sid, str) and sid.strip():
-                    # The workspace cache is a compatibility mirror only.  A
-                    # protected HOME binding remains authoritative and repairs
-                    # a missing or attacker-modified workspace copy.
-                    workspace_session = _read_cache(self.workspace, slot)
-                    if workspace_session != session:
+        with ExitStack() as stack:
+            try:
+                stack.enter_context(session_cache_lock(onboard_claim))
+            except TimeoutError:
+                return {
+                    "status": "onboard_in_progress",
+                    "error": "another sidecar request is onboarding this slot",
+                }
+            session = self.read_session(slot)
+            sid = session.get("client_session_id")
+            if isinstance(sid, str) and sid.strip():
+                # The workspace cache is a compatibility mirror only.  A
+                # protected HOME binding remains authoritative and repairs
+                # a missing or attacker-modified workspace copy.
+                workspace_session = _read_cache(self.workspace, slot)
+                if workspace_session != session:
+                    try:
                         _write_cache(self.workspace, session, slot)
-                    return {
-                        "status": "cached",
-                        "uuid": session.get("uuid", ""),
-                        "client_session_id": sid.strip(),
-                        "session": session,
-                    }
-                protected_path = _cache_path(Path.home(), slot)
-                if protected_path.exists() or protected_path.is_symlink():
-                    return {
-                        "status": "invalid_protected_binding",
-                        "error": (
-                            "protected HOME session binding is invalid; "
-                            "clear it explicitly before onboarding a replacement"
-                        ),
-                    }
-                result = run_onboard(
-                    server_url=self.server_url,
-                    agent_name=self.agent_name,
-                    model_type=self.model_type,
-                    workspace=self.workspace,
-                    slot=slot,
-                    force_new=False,
-                    auth_token=self.auth_token,
-                    timeout=self.timeout,
-                )
-                if result.get("status") != "ok":
-                    return result
-                # run_onboard writes the cache; add schema/stamp fields for the
-                # sidecar contract without persisting the transient
-                # continuity_token. Keep this post-onboard stamp inside
-                # onboard_claim so a concurrent ensure_session caller cannot
-                # observe the un-stamped cache or the transient
-                # mirror_valid=False window during _update_cache.
-                def stamp_schema(session: dict[str, Any]) -> dict[str, Any] | None:
-                    if not session:
-                        return None
-                    session.setdefault("schema_version", 2)
-                    session["slot"] = slot
-                    session["updated_at"] = _now_iso()
-                    return session
-
-                result["session"] = _update_cache(self.workspace, stamp_schema, slot)
-                current_sid = str(result["session"].get("client_session_id") or "").strip()
-                if not current_sid or current_sid != str(result.get("client_session_id") or "").strip():
-                    return {
-                        "status": "onboard_superseded",
-                        "error": "session cache changed after onboarding; newer local state preserved",
-                    }
+                    except TimeoutError:
+                        return {
+                            "status": "cache_lock_timeout",
+                            "error": "session cache lock timed out while repairing workspace mirror",
+                        }
+                return {
+                    "status": "cached",
+                    "uuid": session.get("uuid", ""),
+                    "client_session_id": sid.strip(),
+                    "session": session,
+                }
+            protected_path = _cache_path(Path.home(), slot)
+            if protected_path.exists() or protected_path.is_symlink():
+                return {
+                    "status": "invalid_protected_binding",
+                    "error": (
+                        "protected HOME session binding is invalid; "
+                        "clear it explicitly before onboarding a replacement"
+                    ),
+                }
+            result = run_onboard(
+                server_url=self.server_url,
+                agent_name=self.agent_name,
+                model_type=self.model_type,
+                workspace=self.workspace,
+                slot=slot,
+                force_new=False,
+                auth_token=self.auth_token,
+                timeout=self.timeout,
+            )
+            if result.get("status") != "ok":
                 return result
-        except TimeoutError:
-            return {
-                "status": "onboard_in_progress",
-                "error": "another sidecar request is onboarding this slot",
-            }
+            # run_onboard writes the cache; add schema/stamp fields for the
+            # sidecar contract without persisting the transient
+            # continuity_token. Keep this post-onboard stamp inside
+            # onboard_claim so a concurrent ensure_session caller cannot
+            # observe the un-stamped cache or the transient
+            # mirror_valid=False window during _update_cache.
+            def stamp_schema(session: dict[str, Any]) -> dict[str, Any] | None:
+                if not session:
+                    return None
+                session.setdefault("schema_version", 2)
+                session["slot"] = slot
+                session["updated_at"] = _now_iso()
+                return session
+
+            try:
+                result["session"] = _update_cache(self.workspace, stamp_schema, slot)
+            except TimeoutError:
+                return {
+                    "status": "cache_lock_timeout",
+                    "error": "session cache lock timed out after onboarding",
+                }
+            current_sid = str(result["session"].get("client_session_id") or "").strip()
+            if not current_sid or current_sid != str(result.get("client_session_id") or "").strip():
+                return {
+                    "status": "onboard_superseded",
+                    "error": "session cache changed after onboarding; newer local state preserved",
+                }
+            return result
 
     def update_cache_from_identity_response(
         self,

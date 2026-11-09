@@ -314,6 +314,33 @@ def test_ensure_session_waits_for_inflight_authority_replace(
     assert FakeGovernanceHandler.calls == []
 
 
+def test_ensure_session_distinguishes_post_onboard_cache_lock_timeout(
+    tmp_path: Path,
+    fake_server: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+    sidecar = _sidecar(tmp_path, fake_server)
+
+    def ok_onboard(**kwargs):
+        return {
+            "status": "ok",
+            "uuid": "11111111-2222-4333-8444-555555555555",
+            "client_session_id": "agent-single-flight",
+        }
+
+    def timeout_update_cache(*args, **kwargs):
+        raise TimeoutError("simulated cache lock timeout")
+
+    monkeypatch.setattr(identity_sidecar, "run_onboard", ok_onboard)
+    monkeypatch.setattr(identity_sidecar, "_update_cache", timeout_update_cache)
+
+    result = sidecar.ensure_session("slot-a")
+    assert result["status"] == "cache_lock_timeout"
+
+
 def test_workspace_session_mirror_cannot_override_protected_binding(
     tmp_path: Path,
     fake_server: str,
