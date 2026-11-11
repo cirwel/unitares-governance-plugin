@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import socketserver
 import subprocess
@@ -1504,6 +1505,47 @@ def test_secrets_file_resolution_order(tmp_path, monkeypatch):
     _write_secret(override, "override-token")
     monkeypatch.setenv("UNITARES_SECRETS_ENV", str(override))
     assert file_lease_hook._configured_bearer_token() == "override-token"
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        'export LEASE_PLANE_BEARER_TOKEN="file-token"',
+        "export\tLEASE_PLANE_BEARER_TOKEN=file-token",
+        "  export   LEASE_PLANE_BEARER_TOKEN = 'file-token'",
+    ],
+)
+def test_secrets_file_lines_may_carry_a_shell_export_prefix(tmp_path, monkeypatch, line):
+    """A secrets file that shells source writes `export KEY=value`. A hook
+    started without that shell's environment must still find the bearer there
+    rather than fall back to the Compose default and be refused."""
+    _no_configured_bearer(monkeypatch, tmp_path)
+    # Record the name as absent so teardown removes what the loader inserts.
+    monkeypatch.setenv("LEASE_PLANE_BEARER_TOKEN", "placeholder")
+    monkeypatch.delenv("LEASE_PLANE_BEARER_TOKEN")
+    monkeypatch.setenv("LEASE_PLANE_BASE_URL", "http://127.0.0.1:8788")
+    secrets = tmp_path / "secrets.env"
+    secrets.write_text(f"# shell-sourced\n{line}\n", encoding="utf-8")
+    monkeypatch.setenv("UNITARES_SECRETS_ENV", str(secrets))
+
+    assert file_lease_hook._bearer_token_with_source() == ("file-token", "configured")
+    assert "export LEASE_PLANE_BEARER_TOKEN" not in os.environ
+
+
+def test_a_key_that_only_starts_with_export_is_kept_whole(tmp_path, monkeypatch):
+    _no_configured_bearer(monkeypatch, tmp_path)
+    monkeypatch.setenv("EXPORTED_TEST_KEY", "placeholder")
+    monkeypatch.delenv("EXPORTED_TEST_KEY")
+    monkeypatch.setenv("exportEXPORTED_TEST_KEY", "placeholder")
+    monkeypatch.delenv("exportEXPORTED_TEST_KEY")
+    secrets = tmp_path / "secrets.env"
+    secrets.write_text("exportEXPORTED_TEST_KEY=kept\n", encoding="utf-8")
+    monkeypatch.setenv("UNITARES_SECRETS_ENV", str(secrets))
+
+    file_lease_hook._load_env_file()
+
+    assert os.environ.get("exportEXPORTED_TEST_KEY") == "kept"
+    assert "EXPORTED_TEST_KEY" not in os.environ
 
 
 def test_status_on_when_the_bearer_authenticates(tmp_path, monkeypatch, lease_server):
