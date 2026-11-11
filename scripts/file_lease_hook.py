@@ -307,7 +307,11 @@ def _secrets_env_path() -> Path:
 
 
 def _load_env_file() -> None:
-    """Load a simple KEY=VALUE env file without overriding existing env."""
+    """Load a simple KEY=VALUE env file without overriding existing env.
+
+    Lines may carry a shell `export ` prefix: the same file is sourced by
+    shells, and a hook started without that shell's environment has only this
+    loader to find the bearer with."""
     path = _secrets_env_path()
     if not path.exists():
         return
@@ -321,6 +325,8 @@ def _load_env_file() -> None:
             continue
         key, value = stripped.split("=", 1)
         key = key.strip()
+        if key[:6] == "export" and key[6:7].isspace():
+            key = key[6:].strip()
         value = value.strip().strip('"').strip("'")
         if key and key not in os.environ:
             os.environ[key] = value
