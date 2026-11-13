@@ -458,3 +458,36 @@ def test_a_bounded_read_keeps_a_half_written_last_line_for_next_time(tmp_path):
     t.add(_result("z", error=True))
     counts, _state = collect_window(str(t), state, read_bound=2000)
     assert _counts(counts) == (1, 1, 0, 0)
+
+
+def test_a_bounded_read_ending_in_one_huge_line_keeps_the_partial_after_it(tmp_path):
+    t = Transcript(tmp_path).add(_prompt(), _call("a"), _result("a"))
+    _first, state = collect_window(str(t), None)
+    huge = _result("big", text="x" * 5000)
+    t.add(_call("big"), huge)
+    tail = json.dumps(_call("z"))
+    with t.path.open("a") as handle:
+        handle.write(tail[:15])
+
+    # The bound covers only the end of the huge line and the partial after it.
+    counts, state = collect_window(str(t), state, read_bound=1000)
+    assert counts["window_truncated"] is True
+    assert state["offset"] == t.path.stat().st_size - 15
+
+    with t.path.open("a") as handle:
+        handle.write(tail[15:] + "\n")
+    t.add(_result("z", error=True))
+    counts, _state = collect_window(str(t), state, read_bound=1000)
+    assert _counts(counts) == (1, 1, 0, 0)
+
+
+def test_a_single_line_larger_than_the_bound_is_stepped_past(tmp_path):
+    t = Transcript(tmp_path).add(_prompt(), _call("a"), _result("a"))
+    _first, state = collect_window(str(t), None)
+    with t.path.open("a") as handle:
+        handle.write(json.dumps(_result("big", text="x" * 5000))[:4000])  # still being written
+
+    counts, state = collect_window(str(t), state, read_bound=1000)
+
+    assert counts["window_truncated"] is True
+    assert state["offset"] == t.path.stat().st_size

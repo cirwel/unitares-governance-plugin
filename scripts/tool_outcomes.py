@@ -279,11 +279,9 @@ def collect_window(
     entries = _entries(data)
     # The cursor stops after the last complete line, parsed or not, so a
     # half-written last line is left whole for the next call.
-    complete = data.rfind(b"\n") + 1
-    if complete == 0 and truncated:
-        # One line larger than the bound: it can never be read, so step past it.
-        complete = len(data)
-    end = start + complete
+    # A line larger than the bound was already stepped past by the trim above,
+    # which leaves nothing here.
+    end = start + data.rfind(b"\n") + 1
 
     if first_sight:
         # Count only the closing turn, so history carried in by a resume is
