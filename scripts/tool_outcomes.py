@@ -36,7 +36,8 @@ What the counts are, and are not:
 Privacy boundary (same as ``activity_observer`` and ``failure_reflex``): only
 counts leave the machine. Tool names, inputs, outputs and error text are read
 to count and to compare, and are never sent, logged or stored. A call is kept
-locally only as a sha256 digest of its name and execution-relevant input.
+locally only as a sha256 digest of its name and execution-relevant input, and
+the ledger is named and keyed by a digest of the host session id, not the id.
 
 Delivery is at most once: the ledger advances before the post, so a failed post
 loses that window instead of risking a double count. Disable with
@@ -59,7 +60,6 @@ from typing import Any, Mapping
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from _slot_from_stdin import slot_from_payload  # noqa: E402
 from activity_observer import (  # noqa: E402
     _lock_timeout_s,
     _read_state,
@@ -75,6 +75,7 @@ LEDGER_DIRNAME = "claude-tool-outcomes"
 READ_BOUND_BYTES = 8 * 1024 * 1024
 MAX_PENDING_CALLS = 256
 MAX_FAILED_DIGESTS = 64
+MAX_COMPLETED_IDS = 256
 _RESULT_TEXT_PREFIX = 400
 _EVENT_NAMESPACE = uuid.UUID("0b0f3a5e-6a55-4d59-9a39-6f2f4b0f8a11")
 
@@ -85,18 +86,17 @@ _NON_EXECUTION_KEYS = {
     "Bash": frozenset({"description", "timeout", "run_in_background"}),
 }
 
-# Fixed strings the host writes into the result of a call that never ran.
-# Compared casefolded against the start of the result text only.
+# Fixed strings the host writes at the start of the result of a call that
+# never ran. Compared casefolded against the start of the result text only.
+# Anchored there on purpose: a command that ran and merely printed one of them
+# is an executed error.
 _NOT_EXECUTED_PREFIXES = (
     "pretooluse:",
     "[request interrupted by user",
     "permission to use",
-)
-_NOT_EXECUTED_PHRASES = (
     "the user doesn't want to proceed with this tool use",
     "the user doesn't want to take this action right now",
-    "hook blocking error",
-    "requested permissions to",
+    "claude requested permissions to",
 )
 
 
@@ -114,9 +114,12 @@ def ledger_path(home: Path, slot: str) -> Path:
         if configured
         else home / ".unitares" / LEDGER_DIRNAME
     )
-    safe_slot = slot_from_payload(json.dumps({"session_id": slot})) or "slot"
-    digest = hashlib.sha256(slot.encode("utf-8")).hexdigest()[:12]
-    return root / f"outcomes-{safe_slot}-{digest}.json"
+    # Named by digest only: the raw host session id is not written anywhere.
+    return root / f"outcomes-{_slot_hash(slot)}.json"
+
+
+def _slot_hash(slot: str) -> str:
+    return hashlib.sha256(slot.encode("utf-8")).hexdigest()[:32]
 
 
 def _open_transcript(path: Any) -> int | None:
@@ -163,7 +166,9 @@ def _entries(data: bytes) -> list[tuple[int, Mapping[str, Any]]]:
             continue
         try:
             entry = json.loads(line)
-        except ValueError:
+        except (ValueError, RecursionError):
+            # RecursionError: absurdly nested JSON. Skipped like any bad line,
+            # so one such line cannot stall the cursor for good.
             continue
         if isinstance(entry, dict):
             parsed.append((position, entry))
@@ -219,10 +224,7 @@ def _result_text(block: Mapping[str, Any]) -> str:
 
 
 def _never_ran(block: Mapping[str, Any]) -> bool:
-    text = _result_text(block).casefold().lstrip()
-    return text.startswith(_NOT_EXECUTED_PREFIXES) or any(
-        phrase in text for phrase in _NOT_EXECUTED_PHRASES
-    )
+    return _result_text(block).casefold().lstrip().startswith(_NOT_EXECUTED_PREFIXES)
 
 
 def collect_window(
@@ -275,11 +277,13 @@ def collect_window(
             data, start = data[cut + 1:], start + cut + 1
 
     entries = _entries(data)
-    end = start + (entries[-1][0] if entries else 0)
-    if not entries:
-        # Nothing complete to read yet; keep whole lines for the next call,
-        # but step past a single line too large to ever fit the bound.
-        end = start + (len(data) if truncated else 0)
+    # The cursor stops after the last complete line, parsed or not, so a
+    # half-written last line is left whole for the next call.
+    complete = data.rfind(b"\n") + 1
+    if complete == 0 and truncated:
+        # One line larger than the bound: it can never be read, so step past it.
+        complete = len(data)
+    end = start + complete
 
     if first_sight:
         # Count only the closing turn, so history carried in by a resume is
@@ -291,10 +295,14 @@ def collect_window(
         else:
             truncated = truncated or start > 0
 
+    completed: list[str] = []
     if first_sight:
         pending: dict[str, str] = {}
         failed: list[str] = []
     else:
+        raw_completed = previous.get("completed")
+        if isinstance(raw_completed, list):
+            completed = [str(c) for c in raw_completed]
         raw_pending = previous.get("pending")
         pending = (
             {str(k): str(v) for k, v in raw_pending.items()}
@@ -305,7 +313,9 @@ def collect_window(
         failed = [str(d) for d in raw_failed] if isinstance(raw_failed, list) else []
 
     tool_delta = errors = not_executed = repeats = 0
-    seen_results: set[str] = set()
+    # Results already counted, in this window or a recent one: the host can
+    # log an entry twice, and the second copy may land past the cursor.
+    seen_results: set[str] = set(completed)
     for _, entry in entries:
         if entry.get("isSidechain"):
             continue
@@ -327,6 +337,7 @@ def collect_window(
                 if not call_id or call_id in seen_results:
                     continue
                 seen_results.add(call_id)
+                completed.append(call_id)
                 digest = pending.pop(call_id, None)
                 tool_delta += 1
                 if block.get("is_error") is not True:
@@ -347,6 +358,7 @@ def collect_window(
     while len(pending) > MAX_PENDING_CALLS:
         pending.pop(next(iter(pending)))
     failed = failed[-MAX_FAILED_DIGESTS:]
+    completed = completed[-MAX_COMPLETED_IDS:]
 
     counts = {
         "tool_delta": tool_delta,
@@ -363,6 +375,7 @@ def collect_window(
         "window_start": start,
         "pending": pending,
         "failed": failed,
+        "completed": completed,
     }
     return counts, next_state
 
@@ -377,13 +390,13 @@ def advance(
     path = ledger_path(home or Path.home(), slot)
     with _state_lock(path, timeout_s=_lock_timeout_s()):
         state = _read_state(path)
-        if state.get("slot") not in (None, slot[:256]):
+        if state.get("slot_hash") not in (None, _slot_hash(slot)):
             state = {}
         collected = collect_window(transcript_path, state)
         if collected is None:
             return None
         counts, next_state = collected
-        next_state["slot"] = slot[:256]
+        next_state["slot_hash"] = _slot_hash(slot)
         next_state["updated_at"] = time.time()
         _write_state(path, next_state)
     return counts, next_state
@@ -417,7 +430,7 @@ def build_payload(
         "host_family": "claude",
         "execution_mode": "unknown",
         "execution_mode_source": "unspecified",
-        "slot_hash": hashlib.sha256(slot.encode("utf-8")).hexdigest()[:32],
+        "slot_hash": _slot_hash(slot),
         "observed_at": observed_at,
         "plugin_version": plugin_version,
         "event_id": str(uuid.uuid5(_EVENT_NAMESPACE, key)),

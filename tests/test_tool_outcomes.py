@@ -346,8 +346,10 @@ def test_run_posts_counts_and_nothing_else(tmp_path, monkeypatch):
     wire = json.dumps(body)
     for private in ("id_rsa", "private", "Bash", "Exit code", "slot-1"):
         assert private not in wire
-    ledger = "".join(p.read_text() for p in (tmp_path / ".unitares").rglob("*.json"))
-    for private in ("id_rsa", "private prompt", "private output", "Exit code"):
+    files = list((tmp_path / ".unitares").rglob("*.json"))
+    assert files
+    ledger = "".join(p.read_text() + p.name for p in files)
+    for private in ("id_rsa", "private prompt", "private output", "Exit code", "slot-1", "Bash"):
         assert private not in ledger
 
 
@@ -400,3 +402,59 @@ def test_event_id_is_stable_for_a_window_and_differs_between_windows(tmp_path):
 
     assert first["event_id"] == again["event_id"]
     assert first["event_id"] != later["event_id"]
+
+
+def test_an_executed_error_that_prints_a_refusal_phrase_is_still_executed(tmp_path):
+    same = {"command": "grep -rn hook ."}
+    printed = "Exit code 2\nsrc/x.py: PreToolUse:Bash hook blocking error; the user doesn't want to proceed with this tool use"
+    t = Transcript(tmp_path).add(
+        _prompt(),
+        _call("a", tool_input=same), _result("a", error=True, text=printed),
+        _call("b", tool_input=same), _result("b", error=True, text=printed),
+    )
+
+    counts, _state = collect_window(str(t), None)
+
+    assert _counts(counts) == (2, 2, 0, 1)
+
+
+def test_a_result_logged_again_in_a_later_window_is_not_counted_twice(tmp_path):
+    t = Transcript(tmp_path).add(_prompt(), _call("a"), _result("a", error=True))
+    _first, state = collect_window(str(t), None)
+    t.add(_result("a", error=True), _call("b"), _result("b"))
+
+    counts, _state = collect_window(str(t), state)
+
+    assert _counts(counts) == (1, 0, 0, 0)
+
+
+def test_a_deeply_nested_line_is_skipped_and_does_not_stall_the_cursor(tmp_path):
+    t = Transcript(tmp_path).add(_prompt(), _call("a"), _result("a"))
+    with t.path.open("a") as handle:
+        handle.write("[" * 200000 + "]" * 200000 + "\n")
+    t.add(_call("b"), _result("b", error=True))
+
+    counts, state = collect_window(str(t), None)
+
+    assert _counts(counts) == (2, 1, 0, 0)
+    assert state["offset"] == t.path.stat().st_size
+
+
+def test_a_bounded_read_keeps_a_half_written_last_line_for_next_time(tmp_path):
+    t = Transcript(tmp_path).add(_prompt(), _call("a"), _result("a"))
+    _first, state = collect_window(str(t), None)
+    for index in range(40):
+        t.add(_call(f"c{index}"), _result(f"c{index}"))
+    tail = json.dumps(_call("z"))
+    with t.path.open("a") as handle:
+        handle.write(tail[:15])
+
+    counts, state = collect_window(str(t), state, read_bound=2000)
+    assert counts["window_truncated"] is True
+    assert state["offset"] == t.path.stat().st_size - 15
+
+    with t.path.open("a") as handle:
+        handle.write(tail[15:] + "\n")
+    t.add(_result("z", error=True))
+    counts, _state = collect_window(str(t), state, read_bound=2000)
+    assert _counts(counts) == (1, 1, 0, 0)
