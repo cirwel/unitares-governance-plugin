@@ -492,3 +492,100 @@ def test_agy_post_stop_skips_unbound_invoke_subagent_child(tmp_path):
     assert res.returncode == 0
     assert res.stdout == "{}\n"
     assert LazyOnboardHandler.calls == []
+
+
+def test_claude_post_stop_posts_tool_outcomes_beside_the_checkin(tmp_path):
+    """A bound Claude Stop posts counts from the transcript and one check-in."""
+    RecordingHandler.calls = []
+    RecordingHandler.paths = []
+    srv = _ReusableTCPServer(("127.0.0.1", 0), RecordingHandler)
+    port = srv.server_address[1]
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+
+    session_dir = tmp_path / ".unitares"
+    session_dir.mkdir()
+    slot = "outcome-slot"
+    cache = session_dir / _slot_filename(slot)
+    cache.write_text(json.dumps({
+        "uuid": "86ae619f-87e0-4040-8f29-eacece0c7904",
+        "client_session_id": "agent-test1234",
+        "schema_version": 2,
+        "slot": slot,
+    }))
+    cache.chmod(0o600)
+
+    def call(call_id):
+        return {"type": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "id": call_id, "name": "Bash",
+             "input": {"command": "make private-target"}}]}}
+
+    def result(call_id, error):
+        block = {"type": "tool_result", "tool_use_id": call_id,
+                 "content": "Exit code 2\nprivate output"}
+        if error:
+            block["is_error"] = True
+        return {"type": "user", "message": {"role": "user", "content": [block]}}
+
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text("".join(json.dumps(entry) + "\n" for entry in [
+        {"type": "user", "message": {"role": "user", "content": "private prompt"}},
+        call("a"), result("a", True), call("b"), result("b", True), call("c"), result("c", False),
+    ]))
+
+    stop_payload = json.dumps({
+        "hook_event_name": "Stop",
+        "session_id": slot,
+        "stop_hook_active": False,
+        "last_assistant_message": "Done.",
+        "transcript_path": str(transcript),
+    })
+
+    try:
+        env = {
+            "PATH": "/usr/bin:/bin:/usr/local/bin",
+            "HOME": str(tmp_path),
+            "UNITARES_SERVER_URL": f"http://127.0.0.1:{port}",
+            "UNITARES_CHECKIN_LOG": str(tmp_path / "checkins.log"),
+            "CLAUDE_PLUGIN_ROOT": str(PLUGIN_ROOT),
+            "PWD": str(tmp_path),
+        }
+        subprocess.run(
+            [str(PLUGIN_ROOT / "hooks" / "post-stop")],
+            env=env,
+            cwd=str(tmp_path),
+            input=stop_payload,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    finally:
+        srv.shutdown()
+        thread.join(timeout=2)
+
+    outcomes = [
+        c for c in RecordingHandler.calls
+        if c.get("observation_kind") == "tool_outcome_rollup"
+    ]
+    assert len(outcomes) == 1, RecordingHandler.calls
+    body = outcomes[0]
+    assert "/v1/runtime/observe" in RecordingHandler.paths
+    assert body["agent_uuid"] == "86ae619f-87e0-4040-8f29-eacece0c7904"
+    assert body["client_session_id"] == "agent-test1234"
+    assert body["host_family"] == "claude"
+    assert body["tool_delta"] == 3
+    assert body["tool_error_delta"] == 2
+    assert body["tool_not_executed_delta"] == 0
+    assert body["repeat_failure_delta"] == 1
+    assert body["window_truncated"] is False
+    assert body["window_basis"] == "transcript_cursor"
+    wire = json.dumps(body)
+    for private in ("private", "make", "Bash", "Exit code", slot):
+        assert private not in wire
+
+    checkins = [
+        c for c in RecordingHandler.calls
+        if c.get("name") == "process_agent_update"
+        and c["arguments"].get("metadata", {}).get("event") == "turn_stop"
+    ]
+    assert len(checkins) == 1
