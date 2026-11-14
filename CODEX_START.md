@@ -259,6 +259,14 @@ python3 scripts/audit_identity_contract.py --workspace "$PWD" --log-tail 200
 It checks the neutral cache and check-in log for token-at-rest violations, empty
 identity stubs, weak resolution sources, and floor/failure log statuses.
 
+To assemble a read-only handoff brief for an exited predecessor before declaring `parent_agent_id`:
+
+```bash
+python3 scripts/reconstruct_predecessor.py --workspace "$PWD"
+```
+
+Run `scripts/reconstruct_predecessor.py --workspace "$PWD" --json` (or pass `--agent-id <uuid>`, `--slot <slot>`, or `--exclude-slot <current-slot>` once your fresh session has already written its own cache slot) to inspect `host_session` transcript pointers, recent check-ins and `git=` workspace breadcrumbs, existing successor warnings, open/superseded findings, dialectic reviews, and graded outcomes in one pass.
+
 ## Codex Skills And Tools
 
 - `unitares-governance:governance-lifecycle` skill plus `start_session(...)` for onboarding and declared lineage

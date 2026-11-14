@@ -7,9 +7,11 @@ import argparse
 import json
 import os
 import re
+import signal
 import stat
+import subprocess
 import sys
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -28,6 +30,34 @@ _UUID_RE = re.compile(
 _AGY_ONBOARD_TOOLS = frozenset({"onboard", "start_session", "identity", "bind_session"})
 _AGY_GOVERNANCE_SERVERS = frozenset({"unitares-governance", "unitares_governance", "governance", "unitares"})
 _SPILLED_FILE_RE = re.compile(r"file://(/[^\s\"'<>]+)")
+_GIT_OVERRIDE_ENV_VARS = frozenset({
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_COMMON_DIR",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_GRAFT_FILE",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_COUNT",
+    "GIT_CONFIG",
+})
+
+
+def _safe_truncate_redacted(text: str, max_chars: int) -> str:
+    """Redact secrets before slicing so partial tokens or tags never leak."""
+    redacted = redact_secrets(text)
+    if max_chars <= 0:
+        return ""
+    if len(redacted) <= max_chars:
+        return redacted
+    cut = redacted[:max_chars]
+    # Avoid chopping a "[REDACTED:...]" sentinel mid-tag across boundaries.
+    last_open = cut.rfind("[REDACTED:")
+    if last_open != -1 and cut.find("]", last_open) == -1:
+        cut = cut[:last_open]
+    return redact_secrets(cut.rstrip())
 
 
 class StopHookPayloadError(ValueError):
@@ -49,21 +79,37 @@ class StopHookEvent:
     harness_source: str = "harness_reported"
     workspace_dir: str = ""
     is_subagent: bool = False
+    git_context: str = ""
 
     @property
     def summary(self) -> str:
-        excerpt = self.response_text.strip().replace("\n", " ")[:120]
+        raw_clean = self.response_text.strip().replace("\n", " ")
         if self.tool_count is None:
-            return f"Turn summary ({self.host}; tool count unavailable); response excerpt: {excerpt}"
-        top = ", ".join(self.tool_names[:3]) if self.tool_names else "no tools"
-        return (
-            f"Turn summary: {self.tool_count} tool calls ({top}); "
-            f"response excerpt: {excerpt}"
+            prefix = f"Turn summary ({self.host}; tool count unavailable); response excerpt: "
+        else:
+            top = ", ".join(self.tool_names[:3]) if self.tool_names else "no tools"
+            prefix = f"Turn summary: {self.tool_count} tool calls ({top}); response excerpt: "
+        if self.git_context:
+            # Keep total summary safely inside checkin.py (512) and server excerpt (500) caps
+            # so a long tool-name list never clips the git breadcrumb at the tail.
+            suffix = f"; {self.git_context}"
+            budget = 490 - len(prefix) - len(suffix)
+            if budget < 0:
+                max_prefix = max(0, 490 - len(suffix) - 3)
+                prefix = redact_secrets(prefix)[:max_prefix] + "..."
+                budget = 0
+            excerpt = _safe_truncate_redacted(raw_clean, min(120, budget))
+            combined = redact_secrets(f"{prefix}{excerpt}{suffix}")
+            return combined[:490] if len(combined) > 490 else combined
+        return _safe_truncate_redacted(
+            f"{prefix}{_safe_truncate_redacted(raw_clean, 120)}", 490
         )
 
     @property
     def floor_summary(self) -> str:
-        excerpt = self.response_text.strip().replace("\n", " ")[:100]
+        excerpt = _safe_truncate_redacted(
+            self.response_text.strip().replace("\n", " "), 100
+        )
         if self.tool_count is None:
             return f"Floor (un-onboarded {self.host}): tool count unavailable; {excerpt}"
         return f"Floor (un-onboarded): {self.tool_count} tool calls; {excerpt}"
@@ -217,7 +263,7 @@ def normalize_claude(payload: Mapping[str, Any]) -> StopHookEvent:
     return StopHookEvent(
         host="claude",
         session_id=str(payload.get("session_id") or "").strip(),
-        response_text=message[:512],
+        response_text=_safe_truncate_redacted(message, 512),
         tool_count=count,
         tool_names=names,
         model=model,
@@ -240,7 +286,7 @@ def normalize_codex(payload: Mapping[str, Any]) -> StopHookEvent:
     return StopHookEvent(
         host="codex",
         session_id=str(payload.get("session_id") or "").strip(),
-        response_text=message[:512],
+        response_text=_safe_truncate_redacted(message, 512),
         tool_count=None,
         tool_names=(),
         model=model,
@@ -753,15 +799,25 @@ def normalize_agy(payload: Mapping[str, Any]) -> StopHookEvent:
     workspace_dir = ""
     workspaces = payload.get("workspacePaths")
     if isinstance(workspaces, list):
+        candidates: list[str] = []
         for item in workspaces:
-            if isinstance(item, str) and item.strip().startswith("/"):
-                workspace_dir = item.strip()
+            if not isinstance(item, str):
+                continue
+            cand = item.strip()
+            if not cand.startswith("/") or any(ord(ch) < 32 for ch in cand):
+                continue
+            candidates.append(cand)
+        for cand in candidates:
+            if Path(cand).is_dir():
+                workspace_dir = cand
                 break
+        if not workspace_dir and candidates:
+            workspace_dir = candidates[0]
 
     return StopHookEvent(
         host="agy",
         session_id=session_id,
-        response_text=redact_secrets(message)[:512],
+        response_text=_safe_truncate_redacted(message, 512),
         tool_count=tool_count,
         tool_names=tool_names,
         model=model,
@@ -778,19 +834,154 @@ def normalize_agy(payload: Mapping[str, Any]) -> StopHookEvent:
     )
 
 
+_HEX_RE = re.compile(r"^[0-9a-fA-F]{7,}$")
+_BRANCH_AB_RE = re.compile(r"^\+(\d+)\s+-(\d+)$")
+
+
+def _sanitize_git_branch(raw_branch: str) -> str:
+    value = raw_branch.strip()
+    if not value:
+        return "unknown"
+    if value == "(detached)":
+        return "detached"
+    if "://" in value or redact_secrets(value) != value:
+        return "<redacted>"
+    candidate = value[:80]
+    if not _SAFE_IDENTIFIER_RE.fullmatch(candidate):
+        return "<redacted>"
+    return candidate
+
+
+def git_state_breadcrumb(workspace: str | Path, *, timeout_s: float = 0.75) -> str:
+    """Return a compact, lock-free ``git=<branch>@<sha>(...)`` summary, or ``""``."""
+    if not workspace:
+        return ""
+    try:
+        ws_path = Path(workspace)
+        if not ws_path.is_dir():
+            return ""
+        clean_env = {
+            k: v for k, v in os.environ.items() if k not in _GIT_OVERRIDE_ENV_VARS
+        }
+        clean_env["GIT_OPTIONAL_LOCKS"] = "0"
+        proc = subprocess.Popen(
+            [
+                "git",
+                "-C",
+                str(ws_path),
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                "core.untrackedCache=false",
+                "-c",
+                "protocol.ext.allow=never",
+                "status",
+                "--porcelain=v2",
+                "--branch",
+                "--untracked-files=normal",
+                "--ignore-submodules=all",
+            ],
+            env=clean_env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+        try:
+            stdout_text, _ = proc.communicate(timeout=timeout_s)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except OSError:
+                proc.kill()
+            try:
+                proc.communicate(timeout=0.2)
+            except Exception:
+                pass
+            return ""
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return ""
+    if proc.returncode != 0:
+        return ""
+
+    branch = ""
+    oid = ""
+    ahead = 0
+    behind = 0
+    unmerged_count = 0
+    dirty_count = 0
+    for raw_line in stdout_text.splitlines():
+        line = raw_line.rstrip("\r\n")
+        if not line:
+            continue
+        if line.startswith("# branch.head "):
+            branch = _sanitize_git_branch(line[len("# branch.head ") :])
+        elif line.startswith("# branch.oid "):
+            raw_oid = line[len("# branch.oid ") :].strip()
+            oid = raw_oid[:9].lower() if _HEX_RE.fullmatch(raw_oid) else "initial"
+        elif line.startswith("# branch.ab "):
+            ab_match = _BRANCH_AB_RE.match(line[len("# branch.ab ") :].strip())
+            if ab_match:
+                ahead = int(ab_match.group(1))
+                behind = int(ab_match.group(2))
+        elif line.startswith("u "):
+            unmerged_count += 1
+        elif not line.startswith("# "):
+            dirty_count += 1
+
+    if not branch and not oid:
+        return ""
+    branch = branch or "unknown"
+    oid = oid or "initial"
+    tokens: list[str] = []
+    if ahead > 0:
+        tokens.append(f"+{ahead}")
+    if behind > 0:
+        tokens.append(f"-{behind}")
+    if unmerged_count > 0:
+        tokens.append(f"conflict={unmerged_count}")
+    if dirty_count > 0:
+        tokens.append(f"dirty={dirty_count}")
+    elif unmerged_count == 0:
+        tokens.append("clean")
+    return f"git={branch}@{oid}({','.join(tokens)})"
+
+
+def _stop_git_probe_enabled() -> bool:
+    raw = (os.environ.get("UNITARES_STOP_GIT_PROBE") or "1").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
 def normalize_stop_hook(
     raw: str | Mapping[str, Any],
     *,
     host: str,
+    workspace: str | Path = "",
+    probe_git: bool = False,
 ) -> StopHookEvent:
     payload = _decode_payload(raw)
     if host == "claude":
-        return normalize_claude(payload)
-    if host == "codex":
-        return normalize_codex(payload)
-    if host == "agy":
-        return normalize_agy(payload)
-    raise StopHookPayloadError(f"unsupported hook host: {host or '<missing>'}")
+        event = normalize_claude(payload)
+    elif host == "codex":
+        event = normalize_codex(payload)
+    elif host == "agy":
+        event = normalize_agy(payload)
+    else:
+        raise StopHookPayloadError(f"unsupported hook host: {host or '<missing>'}")
+    if probe_git and _stop_git_probe_enabled():
+        if host == "agy":
+            probe_dir = event.workspace_dir
+        else:
+            probe_dir = str(workspace).strip()
+            if not probe_dir:
+                raw_cwd = payload.get("cwd")
+                if isinstance(raw_cwd, str) and raw_cwd.strip().startswith("/"):
+                    probe_dir = raw_cwd.strip()
+        crumb = git_state_breadcrumb(probe_dir)
+        if crumb:
+            event = replace(event, git_context=crumb)
+    return event
 
 
 def main(argv: list[str] | None = None, stdin_text: str | None = None) -> int:
@@ -799,6 +990,7 @@ def main(argv: list[str] | None = None, stdin_text: str | None = None) -> int:
     parser.add_argument("--recover-agy-identity", action="store_true")
     parser.add_argument("--workspace", default="")
     parser.add_argument("--slot", default="")
+    parser.add_argument("--probe-git", action="store_true")
     args = parser.parse_args(argv)
     raw = sys.stdin.read() if stdin_text is None else stdin_text
     if args.recover_agy_identity:
@@ -814,7 +1006,12 @@ def main(argv: list[str] | None = None, stdin_text: str | None = None) -> int:
             return 1
         return 0 if ok else 1
     try:
-        event = normalize_stop_hook(raw, host=args.host)
+        event = normalize_stop_hook(
+            raw,
+            host=args.host,
+            workspace=args.workspace,
+            probe_git=args.probe_git,
+        )
     except StopHookPayloadError as exc:
         print(f"stop_hook_event.py: {exc}", file=sys.stderr)
         return 2

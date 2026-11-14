@@ -869,3 +869,309 @@ def test_agy_subagent_with_large_prompt_and_current_turn_upgrade(
     assert bound["uuid"] == "44444444-4444-4444-8444-444444444444"
     assert bound["client_session_id"] == "long-turn-csid"
     assert bound["prior_process"] is False
+
+
+def _run_git(repo, *args: str) -> str:
+    import subprocess
+
+    proc = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            *args,
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return proc.stdout.strip()
+
+
+def test_git_state_breadcrumb_covers_clean_dirty_ahead_detached_and_lockfree(tmp_path):
+    assert stop_hook_event.git_state_breadcrumb("") == ""
+    non_git = tmp_path / "plain"
+    non_git.mkdir()
+    assert stop_hook_event.git_state_breadcrumb(non_git) == ""
+
+    upstream = tmp_path / "upstream.git"
+    upstream.mkdir()
+    _run_git(upstream, "init", "--bare")
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _run_git(repo, "init", "-b", "main")
+    (repo / "tracked.txt").write_text("base\n")
+    _run_git(repo, "add", "tracked.txt")
+    _run_git(repo, "commit", "-m", "initial")
+    head_sha = _run_git(repo, "rev-parse", "HEAD")
+
+    clean = stop_hook_event.git_state_breadcrumb(repo)
+    assert clean == f"git=main@{head_sha[:9]}(clean)"
+    assert not (repo / ".git" / "index.lock").exists()
+
+    # Dirty repo: one modified tracked file + one untracked file -> dirty=2.
+    (repo / "tracked.txt").write_text("modified\n")
+    (repo / "untracked.txt").write_text("extra\n")
+    dirty = stop_hook_event.git_state_breadcrumb(repo)
+    assert dirty == f"git=main@{head_sha[:9]}(dirty=2)"
+    assert not (repo / ".git" / "index.lock").exists()
+
+    # Reset working tree and push baseline, then create ahead commit.
+    _run_git(repo, "checkout", "--", "tracked.txt")
+    (repo / "untracked.txt").unlink()
+    _run_git(repo, "remote", "add", "origin", str(upstream))
+    _run_git(repo, "push", "-u", "origin", "main")
+
+    (repo / "tracked.txt").write_text("ahead clean\n")
+    _run_git(repo, "commit", "-am", "ahead commit")
+    ahead_sha = _run_git(repo, "rev-parse", "HEAD")
+    assert (
+        stop_hook_event.git_state_breadcrumb(repo)
+        == f"git=main@{ahead_sha[:9]}(+1,clean)"
+    )
+
+    (repo / "tracked.txt").write_text("ahead dirty\n")
+    assert (
+        stop_hook_event.git_state_breadcrumb(repo)
+        == f"git=main@{ahead_sha[:9]}(+1,dirty=1)"
+    )
+
+    # Detached HEAD.
+    _run_git(repo, "checkout", "--force", ahead_sha)
+    assert (
+        stop_hook_event.git_state_breadcrumb(repo)
+        == f"git=detached@{ahead_sha[:9]}(clean)"
+    )
+
+    # Secret-bearing branch name must be redacted; URL-like branch must sanitize too.
+    secret = "ghp_" + "Z" * 30
+    _run_git(repo, "checkout", "-b", f"feat/{secret}")
+    secret_crumb = stop_hook_event.git_state_breadcrumb(repo)
+    assert secret not in secret_crumb
+    assert secret_crumb == f"git=<redacted>@{ahead_sha[:9]}(clean)"
+    assert stop_hook_event._sanitize_git_branch("https://user:pw@example.com") == "<redacted>"
+
+
+def test_stop_hook_git_breadcrumb_stays_in_summary_only_and_respects_agy_workspace(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _run_git(repo, "init", "-b", "main")
+    (repo / "a.txt").write_text("v1\n")
+    _run_git(repo, "add", "a.txt")
+    _run_git(repo, "commit", "-m", "init")
+    sha = _run_git(repo, "rev-parse", "HEAD")
+
+    claude_event = stop_hook_event.normalize_stop_hook(
+        {
+            "session_id": "s1",
+            "last_assistant_message": "Checked repository.",
+            "model": "claude-opus-5-5",
+        },
+        host="claude",
+        workspace=repo,
+        probe_git=True,
+    )
+    assert f"; git=main@{sha[:9]}(clean)" in claude_event.summary
+    assert "git=" not in claude_event.floor_summary
+    assert "main" not in claude_event.floor_summary
+    assert sha[:9] not in claude_event.floor_summary
+
+    # agy with empty workspacePaths must not fall back to --workspace.
+    transcript = _transcript(
+        tmp_path,
+        [
+            {"step_index": 0, "type": "USER_INPUT", "content": "hi"},
+            {"step_index": 1, "type": "PLANNER_RESPONSE", "content": "Done."},
+        ],
+    )
+    agy_no_ws = stop_hook_event.normalize_stop_hook(
+        {"conversationId": "conv-nows", "workspacePaths": [], "transcriptPath": transcript},
+        host="agy",
+        workspace=repo,
+        probe_git=True,
+    )
+    assert agy_no_ws.git_context == ""
+
+    agy_with_ws = stop_hook_event.normalize_stop_hook(
+        {
+            "conversationId": "conv-ws",
+            "workspacePaths": [str(repo)],
+            "transcriptPath": transcript,
+        },
+        host="agy",
+        workspace="",
+        probe_git=True,
+    )
+    assert agy_with_ws.git_context == f"git=main@{sha[:9]}(clean)"
+    assert f"; git=main@{sha[:9]}(clean)" in agy_with_ws.summary
+
+
+def test_stop_hook_redacts_secrets_across_truncation_boundaries_and_caps_summary():
+    # Place each secret right across common truncation limits (100 / 120 / 512).
+    pad_85 = "A" * 85
+    bearer = "Bearer " + "B" * 45
+    akia = "AKIA" + "CCCCCCCCCCCCCCCC"
+    ghp = "ghp_" + "D" * 28
+    sk_ant = "sk-ant-api03-" + "E" * 28
+    pad_500 = "F" * 500
+
+    for secret, fragment in (
+        (bearer, "BBBBBBBBBB"),
+        (akia, "AKIA"),
+        (ghp, "ghp_"),
+        (sk_ant, "sk-ant-api03"),
+    ):
+        for payload_msg in (f"{pad_85} {secret}", f"{pad_500} {secret}"):
+            for host in ("claude", "codex"):
+                ev = stop_hook_event.normalize_stop_hook(
+                    {"session_id": "s-sec", "last_assistant_message": payload_msg},
+                    host=host,
+                )
+                assert secret not in ev.response_text
+                assert fragment not in ev.response_text
+                assert fragment not in ev.summary
+                assert fragment not in ev.floor_summary
+                for text in (ev.summary, ev.floor_summary):
+                    open_idx = text.rfind("[REDACTED:")
+                    if open_idx != -1:
+                        assert "]" in text[open_idx:]
+
+    # Long MCP tool names must still stay inside <= 490 chars without cutting git_context.
+    long_tools = tuple(
+        f"mcp__very_long_server_name__{i}_tool_operation_identifier_" + ("x" * 100)
+        for i in range(3)
+    )
+    ev_capped = stop_hook_event.StopHookEvent(
+        host="claude",
+        session_id="s-cap",
+        response_text="Finished checking long tool calls.",
+        tool_count=5,
+        tool_names=long_tools,
+        git_context="git=main@123456789(clean)",
+    )
+    assert len(ev_capped.summary) <= 490
+    assert ev_capped.summary.endswith("; git=main@123456789(clean)")
+
+
+def test_git_state_breadcrumb_strips_overrides_handles_unborn_behind_conflict_and_opt_out(
+    tmp_path, monkeypatch
+):
+    import subprocess
+
+    # Unborn repo -> initial SHA.
+    unborn = tmp_path / "unborn"
+    unborn.mkdir()
+    _run_git(unborn, "init", "-b", "main")
+    (unborn / "new.txt").write_text("hi\n")
+    assert stop_hook_event.git_state_breadcrumb(unborn) == "git=main@initial(dirty=1)"
+
+    # Upstream + two clones to exercise behind/diverged & GIT_DIR override isolation.
+    upstream = tmp_path / "upstream.git"
+    upstream.mkdir()
+    _run_git(upstream, "init", "--bare")
+
+    repo_a = tmp_path / "repo_a"
+    repo_a.mkdir()
+    _run_git(repo_a, "init", "-b", "branch-a")
+    (repo_a / "f.txt").write_text("v1\n")
+    _run_git(repo_a, "add", "f.txt")
+    _run_git(repo_a, "commit", "-m", "init a")
+    _run_git(repo_a, "remote", "add", "origin", str(upstream))
+    _run_git(repo_a, "push", "-u", "origin", "branch-a")
+
+    repo_b = tmp_path / "repo_b"
+    _run_git(tmp_path, "clone", str(upstream), str(repo_b))
+    _run_git(repo_b, "checkout", "-B", "branch-a", "origin/branch-a")
+
+    # Inherited GIT_DIR / GIT_WORK_TREE pointing at other repo must not hijack repo_b.
+    unrelated = tmp_path / "unrelated"
+    unrelated.mkdir()
+    _run_git(unrelated, "init", "-b", "wrong-branch")
+    (unrelated / "x.txt").write_text("x\n")
+    _run_git(unrelated, "add", "x.txt")
+    _run_git(unrelated, "commit", "-m", "unrelated")
+
+    sha_b = _run_git(repo_b, "rev-parse", "HEAD")[:9]
+    monkeypatch.setenv("GIT_DIR", str(unrelated / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(unrelated))
+    crumb_b = stop_hook_event.git_state_breadcrumb(repo_b)
+    assert crumb_b == f"git=branch-a@{sha_b}(clean)"
+    assert "wrong-branch" not in crumb_b
+    monkeypatch.delenv("GIT_DIR", raising=False)
+    monkeypatch.delenv("GIT_WORK_TREE", raising=False)
+
+    # Push from repo_a, fetch in repo_b -> repo_b is -1 behind.
+    (repo_a / "f.txt").write_text("v2-upstream\n")
+    _run_git(repo_a, "commit", "-am", "upstream advance")
+    _run_git(repo_a, "push", "origin", "branch-a")
+    _run_git(repo_b, "fetch", "origin")
+    assert stop_hook_event.git_state_breadcrumb(repo_b) == f"git=branch-a@{sha_b}(-1,clean)"
+
+    # Local commit on repo_b -> +1,-1 diverged.
+    (repo_b / "local.txt").write_text("local-change\n")
+    _run_git(repo_b, "add", "local.txt")
+    _run_git(repo_b, "commit", "-m", "local commit")
+    div_sha = _run_git(repo_b, "rev-parse", "HEAD")[:9]
+    assert stop_hook_event.git_state_breadcrumb(repo_b) == f"git=branch-a@{div_sha}(+1,-1,clean)"
+
+    # Merge conflict -> conflict=1 without clean.
+    (repo_b / "f.txt").write_text("v2-local\n")
+    _run_git(repo_b, "commit", "-am", "conflicting edit")
+    merge_res = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo_b),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "merge",
+            "origin/branch-a",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert merge_res.returncode != 0
+    assert "CONFLICT" in (merge_res.stdout + merge_res.stderr)
+    conflict_crumb = stop_hook_event.git_state_breadcrumb(repo_b)
+    assert "conflict=1" in conflict_crumb
+    assert "clean" not in conflict_crumb
+
+    # Opt-out env disables probe cleanly; agy prefers existing directory in workspacePaths.
+    monkeypatch.setenv("UNITARES_STOP_GIT_PROBE", "0")
+    opted_out = stop_hook_event.normalize_stop_hook(
+        {"session_id": "s-opt", "last_assistant_message": "Done."},
+        host="claude",
+        workspace=repo_a,
+        probe_git=True,
+    )
+    assert opted_out.git_context == ""
+    monkeypatch.delenv("UNITARES_STOP_GIT_PROBE", raising=False)
+
+    transcript = _transcript(
+        tmp_path,
+        [
+            {"step_index": 0, "type": "USER_INPUT", "content": "hi"},
+            {"step_index": 1, "type": "PLANNER_RESPONSE", "content": "Done."},
+        ],
+    )
+    agy_multi = stop_hook_event.normalize_stop_hook(
+        {
+            "conversationId": "conv-multi",
+            "workspacePaths": [str(tmp_path / "does-not-exist"), str(repo_a)],
+            "transcriptPath": transcript,
+        },
+        host="agy",
+        probe_git=True,
+    )
+    assert agy_multi.workspace_dir == str(repo_a)
+    assert agy_multi.git_context.startswith("git=branch-a@")
+
+

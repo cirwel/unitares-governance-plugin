@@ -32,11 +32,13 @@ were the same measurement:
 | Signal | Producer | Storage path | What it measures |
 |---|---|---|---|
 | Explicit `sync_state` | agent, usually zero or one per turn | identity-bound state row (`agent_report` default) | agent-authored proprioceptive state |
-| `turn_stop` | Stop hook, once per completed turn | identity-bound state row (`substrate_interpretation`) | automatic host interpretation of the completed turn |
+| `turn_stop` | Stop hook, once per completed turn | identity-bound state row (`substrate_interpretation`) | automatic host interpretation of the completed turn (includes lock-free `git=<branch>@<sha>(...)` workspace state when inside a git repo) |
 | Bootstrap | lazy onboarding / explicit initial state | synthetic identity-bound state row | initialization only; excluded from real-check-in counts |
 | PostToolUse activity | PostToolUse hook | local `~/.unitares/codex-activity/` ledger | completed-tool events received for one Codex slot |
 | Bounded activity rollup | detached per-slot worker | identity-bound `audit.events` host observation | a counter/time-window summary of completed-tool receipts |
 | Optional host heartbeat | detached per-slot worker | identity-bound `audit.events` host observation | only that the hook's parent PID was observed alive |
+
+The `turn_stop` git breadcrumb probes with `GIT_OPTIONAL_LOCKS=0`, `-c core.fsmonitor=false -c core.untrackedCache=false -c protocol.ext.allow=never`, and `--ignore-submodules=all`, stripping inherited `GIT_*` overrides so it targets only the host workspace (`CLAUDE_PROJECT_DIR`/`$PWD` for Claude, `$PWD` for Codex, declared `workspacePaths` only for Antigravity). It reports `(+A,-B,conflict=U,dirty=N|clean)` status tokens, sanitizes branch names (remember branch names travel to the governance server in bound check-ins), is omitted from identity-free `/v1/substrate/observe` floor observations, and can be disabled with `UNITARES_STOP_GIT_PROBE=0`.
 
 The local activity observer is on by default. SessionStart does not launch its
 worker. The synchronous PostToolUse hook does no network I/O: after a completed

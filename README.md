@@ -135,8 +135,10 @@ With the host hooks enabled and, in Codex, trusted:
 | Session start | Surface lifecycle guidance and local continuity context |
 | File edit | Acquire and release file leases through the separate lease plane; record local milestones |
 | Completed tool call | Maintain host-specific continuity and observation records; Codex receipts are not check-ins |
-| Turn stop | May emit an automatic `substrate_interpretation`, separately labeled from an agent-authored check-in |
+| Turn stop | May emit an automatic `substrate_interpretation` (with a lock-free `git=` workspace breadcrumb when applicable), separately labeled from an agent-authored check-in |
 | Shell push | Guard against pushing more work onto a branch whose PR is already merged or closed |
+
+Before picking up an interrupted session's work from a fresh process, run `scripts/reconstruct_predecessor.py --workspace "$PWD"` (optionally `--agent-id <uuid>`, `--slot <slot>`, `--exclude-slot <current-slot>`, or `--json`) to gather a read-only handoff brief covering `host_session` pointers, recent check-ins, existing successors, open/superseded findings, dialectic reviews, and graded outcomes.
 
 Claude also supports asynchronous edit check-ins. Codex does not make
 synchronous per-edit governance check-ins. The [check-in reference](docs/check-ins.md)
