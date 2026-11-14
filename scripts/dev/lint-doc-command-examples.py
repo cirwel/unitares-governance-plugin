@@ -27,9 +27,9 @@ DOC_PATHS = [
 ]
 
 
-def _load_session_cache_parser():
-    script = ROOT / "scripts" / "session_cache.py"
-    spec = importlib.util.spec_from_file_location("session_cache_for_lint", script)
+def _load_script_parser(rel_path: str, module_name: str):
+    script = ROOT / rel_path
+    spec = importlib.util.spec_from_file_location(module_name, script)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"could not load {script}")
     module = importlib.util.module_from_spec(spec)
@@ -38,7 +38,12 @@ def _load_session_cache_parser():
 
 
 PARSERS = {
-    "scripts/session_cache.py": _load_session_cache_parser,
+    "scripts/session_cache.py": lambda: _load_script_parser(
+        "scripts/session_cache.py", "session_cache_for_lint"
+    ),
+    "scripts/reconstruct_predecessor.py": lambda: _load_script_parser(
+        "scripts/reconstruct_predecessor.py", "reconstruct_predecessor_for_lint"
+    ),
 }
 
 

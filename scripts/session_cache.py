@@ -45,7 +45,7 @@ import sys
 import tempfile
 import time
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -486,6 +486,66 @@ def _parse_session_filename(name: str) -> str | None:
     return raw
 
 
+def list_session_slots(workspace: Path | str | None = None) -> list[dict[str, Any]]:
+    """Return slot inventory for ``workspace``'s session cache, newest first.
+
+    Pure read-only discovery returning ``{slot, parent_agent_id, updated_at, path}``
+    entries. Deliberately omits ``client_session_id`` and ``continuity_token`` so
+    listing workspace lineage hints never exposes a proof credential.
+    """
+    resolved_workspace = _workspace_path(os.fspath(workspace) if workspace is not None else None)
+    cache_dir = resolved_workspace / CACHE_DIR
+    entries: list[dict[str, Any]] = []
+    if not cache_dir.is_symlink() and cache_dir.is_dir():
+        for path in cache_dir.iterdir():
+            if path.is_symlink() or not path.is_file():
+                continue
+            slot = _parse_session_filename(path.name)
+            # path.name == "session.json" → slot is None (the flat fallback).
+            # Surface legacy/--allow-shared files alongside slotted ones so
+            # operators can see them; consumers decide whether to use them.
+            if path.name != "session.json" and slot is None:
+                continue
+            data = _read_json(path)
+            if not data:
+                continue
+            uuid = data.get("uuid") or data.get("agent_uuid")
+            if not isinstance(uuid, str) or not _UUID_PATTERN.fullmatch(uuid):
+                continue
+            entries.append({
+                "slot": slot,
+                "parent_agent_id": uuid,
+                "updated_at": data.get("updated_at"),
+                "path": str(path),
+            })
+    # Sort by parsed UTC datetime, not raw ISO string. Mixed-offset
+    # timestamps (e.g., +05:30 vs +00:00) sort incorrectly by string
+    # comparison even though Python's `fromisoformat` normalizes them.
+    # Entries that fail to parse or claim timestamps far in the future
+    # fall back to _MIN_UTC under reverse=True so they don't displace real entries.
+    _MIN_UTC = datetime.min.replace(tzinfo=timezone.utc)
+    future_ceiling = datetime.now(timezone.utc) + timedelta(minutes=5)
+
+    def _sort_ts(entry: dict[str, Any]) -> datetime:
+        raw = entry.get("updated_at")
+        if not isinstance(raw, str) or not raw:
+            return _MIN_UTC
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except Exception:
+            return _MIN_UTC
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        else:
+            parsed = parsed.astimezone(timezone.utc)
+        if parsed > future_ceiling:
+            return _MIN_UTC
+        return parsed
+
+    entries.sort(key=_sort_ts, reverse=True)
+    return entries
+
+
 def cmd_list(args: argparse.Namespace) -> int:
     """List slot inventory for the session cache, newest first.
 
@@ -505,52 +565,7 @@ def cmd_list(args: argparse.Namespace) -> int:
     host-provided developer context. Malformed JSON is skipped silently — this
     is a discovery surface, not a validator.
     """
-    workspace = _workspace_path(args.workspace)
-    cache_dir = workspace / CACHE_DIR
-    entries: list[dict[str, Any]] = []
-    if cache_dir.is_dir():
-        for path in cache_dir.iterdir():
-            if not path.is_file():
-                continue
-            slot = _parse_session_filename(path.name)
-            # path.name == "session.json" → slot is None (the flat fallback).
-            # Surface legacy/--allow-shared files alongside slotted ones so
-            # operators can see them; consumers decide whether to use them.
-            if path.name != "session.json" and slot is None:
-                continue
-            data = _read_json(path)
-            if not data:
-                continue
-            uuid = data.get("uuid")
-            if not isinstance(uuid, str) or not _UUID_PATTERN.fullmatch(uuid):
-                continue
-            entries.append({
-                "slot": slot,
-                "parent_agent_id": uuid,
-                "updated_at": data.get("updated_at"),
-                "path": str(path),
-            })
-    # Sort by parsed UTC datetime, not raw ISO string. Mixed-offset
-    # timestamps (e.g., +05:30 vs +00:00) sort incorrectly by string
-    # comparison even though Python's `fromisoformat` normalizes them.
-    # Entries that fail to parse fall back to a sentinel that sorts last
-    # under reverse=True, so they don't displace real entries.
-    _MIN_UTC = datetime.min.replace(tzinfo=timezone.utc)
-
-    def _sort_ts(entry: dict[str, Any]) -> datetime:
-        raw = entry.get("updated_at")
-        if not isinstance(raw, str) or not raw:
-            return _MIN_UTC
-        try:
-            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-        except Exception:
-            return _MIN_UTC
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
-        return parsed
-
-    entries.sort(key=_sort_ts, reverse=True)
-    print(json.dumps(entries))
+    print(json.dumps(list_session_slots(args.workspace)))
     return 0
 
 

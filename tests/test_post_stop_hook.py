@@ -589,3 +589,111 @@ def test_claude_post_stop_posts_tool_outcomes_beside_the_checkin(tmp_path):
         and c["arguments"].get("metadata", {}).get("event") == "turn_stop"
     ]
     assert len(checkins) == 1
+
+
+def test_post_stop_attaches_git_breadcrumb_to_checkin_and_keeps_it_out_of_floor(tmp_path):
+    """Bound turn_stop includes ; git=...; unbound floor observation never leaks repo info."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    for cmd in (
+        ["git", "-C", str(repo), "init", "-b", "feature/test"],
+        ["git", "-C", str(repo), "-c", "user.name=T", "-c", "user.email=t@e.com", "commit", "--allow-empty", "-m", "init"],
+    ):
+        subprocess.run(cmd, capture_output=True, check=True)
+    sha = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()[:9]
+    (repo / "dirty.py").write_text("x = 1\n")
+
+    # 1) Bound session -> turn_stop includes git breadcrumb.
+    RecordingHandler.calls = []
+    RecordingHandler.paths = []
+    srv = _ReusableTCPServer(("127.0.0.1", 0), RecordingHandler)
+    port = srv.server_address[1]
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+
+    home_dir = tmp_path / "home"
+    session_dir = home_dir / ".unitares"
+    session_dir.mkdir(parents=True)
+    slot = "git-bound-slot"
+    cache = session_dir / _slot_filename(slot)
+    cache.write_text(json.dumps({
+        "uuid": "86ae619f-87e0-4040-8f29-eacece0c7904",
+        "client_session_id": "agent-git1234",
+        "schema_version": 2,
+        "slot": slot,
+    }))
+    cache.chmod(0o600)
+
+    stop_payload = json.dumps({
+        "hook_event_name": "Stop",
+        "session_id": slot,
+        "stop_hook_active": False,
+        "last_assistant_message": "Updated dirty.py.",
+    })
+    try:
+        env = {
+            "PATH": "/usr/bin:/bin:/usr/local/bin",
+            "HOME": str(home_dir),
+            "UNITARES_SERVER_URL": f"http://127.0.0.1:{port}",
+            "UNITARES_CHECKIN_LOG": str(tmp_path / "checkins.log"),
+            "CLAUDE_PLUGIN_ROOT": str(PLUGIN_ROOT),
+            "PWD": str(repo),
+        }
+        subprocess.run(
+            [str(PLUGIN_ROOT / "hooks" / "post-stop")],
+            env=env,
+            cwd=str(repo),
+            input=stop_payload,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+
+        checkins = [
+            c for c in RecordingHandler.calls
+            if c.get("name") == "process_agent_update"
+            and c["arguments"].get("metadata", {}).get("event") == "turn_stop"
+        ]
+        assert len(checkins) == 1
+        response_text = checkins[0]["arguments"]["response_text"]
+        assert f"; git=feature/test@{sha}(dirty=1)" in response_text
+
+        # 2) Unbound session -> floor_summary omits git breadcrumb completely.
+        RecordingHandler.calls = []
+        RecordingHandler.paths = []
+        unbound_payload = json.dumps({
+            "hook_event_name": "Stop",
+            "session_id": "unbound-slot",
+            "stop_hook_active": False,
+            "last_assistant_message": "Unbound edit check.",
+        })
+        env["UNITARES_AUTO_ONBOARD"] = "off"
+        subprocess.run(
+            [str(PLUGIN_ROOT / "hooks" / "post-stop")],
+            env=env,
+            cwd=str(repo),
+            input=unbound_payload,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    finally:
+        srv.shutdown()
+        thread.join(timeout=2)
+
+    assert "/v1/substrate/observe" in RecordingHandler.paths
+    floor_calls = [
+        c for c in RecordingHandler.calls
+        if "summary_excerpt" in c and c.get("event") == "turn_stop"
+    ]
+    assert len(floor_calls) == 1
+    floor_summary = floor_calls[0]["summary_excerpt"]
+    assert "git=" not in floor_summary
+    assert "feature/test" not in floor_summary
+    assert sha not in floor_summary
+

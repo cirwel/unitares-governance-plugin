@@ -130,8 +130,14 @@ STOP_EVENT_HELPER="${PLUGIN_ROOT}/scripts/stop_hook_event.py"
 if [[ ! -f "${STOP_EVENT_HELPER}" ]]; then
   exit 0
 fi
+HOOK_STOP_WORKSPACE=""
+if [[ "${HOOK_HOST}" == "claude" ]]; then
+  HOOK_STOP_WORKSPACE="${CLAUDE_PROJECT_DIR:-${PWD}}"
+elif [[ "${HOOK_HOST}" == "codex" ]]; then
+  HOOK_STOP_WORKSPACE="${PWD}"
+fi
 if ! STOP_EVENT=$(printf '%s' "${PAYLOAD}" | python3 "${STOP_EVENT_HELPER}" \
-  --host "${HOOK_HOST}" 2>/dev/null); then
+  --host "${HOOK_HOST}" --workspace "${HOOK_STOP_WORKSPACE}" --probe-git 2>/dev/null); then
   exit 0
 fi
 
