@@ -866,7 +866,12 @@ new identity and breaks that continuity.
 ${FIRST_BIND_GUIDANCE}
 A spawned child or reviewer must start its own identity with declared lineage;
 it must never use an inherited thread anchor.
-Otherwise the Stop hook binds the anchor after the turn. Declare
+To declare lineage for a nested CLI, its launcher must first unset
+\`UNITARES_CLIENT_SESSION_ID\`, \`UNITARES_ORCHESTRATED\`, and
+\`UNITARES_ORCHESTRATED_OWNER_PID\`, then set its own
+\`UNITARES_PARENT_AGENT_ID\` and \`UNITARES_SPAWN_REASON\`.
+If no tool needs identity yet, the Stop hook binds this conversation's anchor
+after the turn. Declare
 \`parent_agent_id\` only for a real spawn/handoff, never
 for the turn-to-turn flow of this conversation.
 Use \`sync_state(...)\` only for meaningful state worth reporting; do not

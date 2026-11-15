@@ -74,6 +74,9 @@ shift
 # dispatch turn's identity. Keep the check here so SessionStart, PreToolUse and
 # Stop all see the same process-scoped environment. An unmarked anchor also
 # fails closed; older launchers must add the owner marker before upgrading.
+# A launcher that deliberately declares lineage for a nested CLI must clear
+# the inherited anchor/owner first. Otherwise inherited and newly declared
+# lineage are indistinguishable here, so both are discarded.
 UNITARES_HOOK_HOST_PID="$PPID"
 export UNITARES_HOOK_HOST_PID
 if { [ -n "${UNITARES_CLIENT_SESSION_ID:-}" ] \
