@@ -126,12 +126,14 @@ def test_existing_slot_cache_is_not_reminted(tmp_path):
     assert onboards == []
 
 
-def test_orchestrated_anchor_is_left_to_resume(tmp_path):
+def test_unowned_orchestrated_anchor_does_not_resume(tmp_path):
     _, onboards = _serve(
         tmp_path, claude_session_id=SLOT,
         extra_env={"UNITARES_CLIENT_SESSION_ID": "agent:/thread-x",
                    "UNITARES_ORCHESTRATED": "1"})
-    assert onboards == []
+    assert len(onboards) == 1
+    assert onboards[0]["arguments"]["force_new"] is True
+    assert "client_session_id" not in onboards[0]["arguments"]
 
 
 def test_home_mirror_counts_as_bound(tmp_path):

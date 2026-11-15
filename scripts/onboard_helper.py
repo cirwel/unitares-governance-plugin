@@ -661,6 +661,15 @@ def main(argv: list[str] | None = None) -> int:
     workspace = Path(args.workspace).expanduser().resolve()
     slot = (args.slot or "").strip() or None
     client_session_id = (args.client_session_id or "").strip() or None
+    # Hook launchers pass a PID owner marker for a dispatch thread anchor.
+    # Scope the Stop fallback to that exact CLI even when onboard_helper is
+    # called directly instead of through run-hook.cmd.
+    if client_session_id and args.orchestrated:
+        owner = os.environ.get("UNITARES_ORCHESTRATED_OWNER_PID", "").strip()
+        host = os.environ.get("UNITARES_HOOK_HOST_PID", "").strip()
+        if not owner or owner != host:
+            client_session_id = None
+            args.orchestrated = False
     result = run_onboard(
         server_url=args.server_url,
         agent_name=args.name,

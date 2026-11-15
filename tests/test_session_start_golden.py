@@ -170,7 +170,9 @@ def test_golden_anchored(tmp_path):
     _assert_golden("anchored", _render(
         tmp_path,
         extra_env={"UNITARES_ORCHESTRATED": "1",
-                   "UNITARES_CLIENT_SESSION_ID": "agent-anchored-0001"},
+                   "UNITARES_CLIENT_SESSION_ID": "agent:/thread-0001",
+                   "UNITARES_ORCHESTRATED_OWNER_PID": "12345",
+                   "UNITARES_HOOK_HOST_PID": "12345"},
     ))
 
 
@@ -322,6 +324,8 @@ def test_anchored_variant_does_not_tell_the_agent_to_force_new(tmp_path):
     rendered = _render(
         tmp_path,
         extra_env={"UNITARES_ORCHESTRATED": "1",
-                   "UNITARES_CLIENT_SESSION_ID": "agent-anchored-0001"},
+                   "UNITARES_CLIENT_SESSION_ID": "agent:/thread-0001",
+                   "UNITARES_ORCHESTRATED_OWNER_PID": "12345",
+                   "UNITARES_HOOK_HOST_PID": "12345"},
     )
     assert "Do NOT call" in rendered or "do NOT call" in rendered

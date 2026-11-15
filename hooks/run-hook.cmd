@@ -69,6 +69,21 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SCRIPT_NAME="$1"
 shift
+# Dispatch sets this to the PID of the CLI it launches. A nested CLI inherits
+# the thread anchor but has a different hook host PID; it must not resume the
+# dispatch turn's identity. Keep the check here so SessionStart, PreToolUse and
+# Stop all see the same process-scoped environment. An unmarked anchor also
+# fails closed; older launchers must add the owner marker before upgrading.
+UNITARES_HOOK_HOST_PID="$PPID"
+export UNITARES_HOOK_HOST_PID
+if { [ -n "${UNITARES_CLIENT_SESSION_ID:-}" ] \
+        || [ -n "${UNITARES_ORCHESTRATED_OWNER_PID:-}" ]; } \
+    && [ "$UNITARES_HOOK_HOST_PID" != "${UNITARES_ORCHESTRATED_OWNER_PID:-}" ]; then
+    UNITARES_ANCHOR_IGNORED=1
+    export UNITARES_ANCHOR_IGNORED
+    unset UNITARES_CLIENT_SESSION_ID UNITARES_ORCHESTRATED \
+        UNITARES_ORCHESTRATED_OWNER_PID UNITARES_PARENT_AGENT_ID UNITARES_SPAWN_REASON
+fi
 if [ -x /bin/bash ]; then
     BASH_BIN=/bin/bash
 elif [ -x /usr/bin/bash ]; then
@@ -92,8 +107,6 @@ REPORTER="${SCRIPT_DIR}/../scripts/hook_invocations.py"
 if [ "$HOOK_HOST" = "codex" ] && [ -f "$REPORTER" ] && command -v python3 >/dev/null 2>&1; then
     # The child used to be exec'd directly, so its PPID was the hook host.
     # Keep that PID available across the reporting process boundary.
-    UNITARES_HOOK_HOST_PID="$PPID"
-    export UNITARES_HOOK_HOST_PID
     exec python3 "$REPORTER" run --plugin-root "${SCRIPT_DIR}/.." \
         --hook "$SCRIPT_NAME" -- "$BASH_BIN" "${SCRIPT_DIR}/${SCRIPT_NAME}" "$@"
 fi

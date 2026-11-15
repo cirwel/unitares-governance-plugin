@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" pre-edit --host claude",
+            "command": "exec \"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" pre-edit --host claude",
             "async": false
           }
         ]
@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" pre-governance-call --host claude",
+            "command": "exec \"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" pre-governance-call --host claude",
             "async": false
           }
         ]
@@ -26,7 +26,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" pre-push --host claude",
+            "command": "exec \"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" pre-push --host claude",
             "async": false,
             "timeout": 10
           }
@@ -39,12 +39,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" session-start --host claude",
+            "command": "exec \"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" session-start --host claude",
             "async": false
           },
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" watcher-context --event session-start --host claude",
+            "command": "exec \"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" watcher-context --event session-start --host claude",
             "async": false,
             "timeout": 12
           }
@@ -57,7 +57,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" session-end --host claude",
+            "command": "exec \"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" session-end --host claude",
             "async": false,
             "timeout": 1
           }
@@ -70,7 +70,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" post-stop --host claude",
+            "command": "exec \"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" post-stop --host claude",
             "async": true
           }
         ]
@@ -82,7 +82,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" post-edit-release --host claude",
+            "command": "exec \"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" post-edit-release --host claude",
             "async": false,
             "timeout": 6
           }
@@ -93,7 +93,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" post-checkin --host claude",
+            "command": "exec \"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" post-checkin --host claude",
             "async": true
           }
         ]
@@ -103,7 +103,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" post-tool-failure --host claude",
+            "command": "exec \"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" post-tool-failure --host claude",
             "async": false,
             "timeout": 3
           }
@@ -116,7 +116,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" post-edit-release --host claude",
+            "command": "exec \"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" post-edit-release --host claude",
             "async": false,
             "timeout": 6
           }
@@ -127,7 +127,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" post-checkin --host claude",
+            "command": "exec \"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" post-checkin --host claude",
             "async": true
           }
         ]
@@ -138,7 +138,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" post-edit-batch-release --host claude",
+            "command": "exec \"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" post-edit-batch-release --host claude",
             "async": false,
             "timeout": 6
           }
@@ -151,13 +151,13 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" post-edit-release --host claude",
+            "command": "exec \"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" post-edit-release --host claude",
             "async": false,
             "timeout": 6
           },
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" post-edit --host claude",
+            "command": "exec \"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" post-edit --host claude",
             "async": true
           }
         ]
@@ -167,7 +167,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" post-checkin --host claude",
+            "command": "exec \"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" post-checkin --host claude",
             "async": true
           }
         ]
@@ -177,7 +177,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" post-identity --host claude",
+            "command": "exec \"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" post-identity --host claude",
             "async": true
           }
         ]
@@ -188,12 +188,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" user-prompt-submit --host claude",
+            "command": "exec \"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" user-prompt-submit --host claude",
             "async": false
           },
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" watcher-context --event user-prompt-submit --host claude",
+            "command": "exec \"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" watcher-context --event user-prompt-submit --host claude",
             "async": false,
             "timeout": 12
           }
