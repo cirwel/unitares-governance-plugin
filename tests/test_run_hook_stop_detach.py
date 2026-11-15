@@ -21,7 +21,7 @@ WRAPPER = ROOT / "hooks" / "run-hook.cmd"
 # records the payload it was given plus its arguments.
 FAKE_STOP = """#!/usr/bin/env bash
 payload="$(cat)"
-sleep 1
+sleep "${PROBE_SLEEP:-2}"
 printf '%s|%s' "$payload" "$*" > "$PROBE_OUT"
 printf '{}\\n'
 """
@@ -62,9 +62,9 @@ def test_claude_stop_returns_at_once_and_finishes_in_the_background(tmp_path: Pa
 
     assert res.returncode == 0
     assert res.stdout == ""
-    assert elapsed < 0.9, f"dispatcher waited for the hook ({elapsed:.2f}s)"
+    assert elapsed < 1.5, f"dispatcher waited for the hook ({elapsed:.2f}s)"
     assert not (tmp_path / "out").exists()
-    assert _wait_for(tmp_path / "out", 5)
+    assert _wait_for(tmp_path / "out", 8)
     assert (tmp_path / "out").read_text() == '{"session_id":"s-1"}|--host claude'
 
 
@@ -82,8 +82,41 @@ def test_claude_stop_survives_the_signal_that_ends_its_parent(tmp_path: Path) ->
     except ProcessLookupError:
         pass
 
-    assert _wait_for(tmp_path / "out", 5)
+    assert _wait_for(tmp_path / "out", 8)
     assert (tmp_path / "out").read_text().startswith('{"session_id":"s-2"}|')
+
+
+def test_a_hung_detached_hook_is_killed_at_the_limit(tmp_path: Path) -> None:
+    """The detached hook ignores TERM, so only the watchdog can end a hang."""
+    wrapper = _plugin(tmp_path)
+    marker = f"probe-{os.getpid()}-{time.monotonic_ns()}"
+    subprocess.run(
+        ["sh", str(wrapper), "post-stop", "--host", "claude", marker],
+        input="{}", capture_output=True, text=True, timeout=10,
+        env=_env(tmp_path, PROBE_SLEEP="60", UNITARES_STOP_HOOK_LIMIT_S="1"),
+    )
+
+    def running() -> bool:
+        found = subprocess.run(["pgrep", "-f", marker], capture_output=True, text=True)
+        return bool(found.stdout.strip())
+
+    assert running(), "the hook should still be alive just after the dispatcher returns"
+    deadline = time.monotonic() + 10
+    while running() and time.monotonic() < deadline:
+        time.sleep(0.1)
+    assert not running(), "the watchdog left the hung hook alive"
+    assert not (tmp_path / "out").exists()
+
+
+def test_a_bad_limit_falls_back_to_the_default(tmp_path: Path) -> None:
+    wrapper = _plugin(tmp_path)
+    subprocess.run(
+        ["sh", str(wrapper), "post-stop", "--host", "claude"],
+        input='{"session_id":"s-5"}', capture_output=True, text=True, timeout=10,
+        env=_env(tmp_path, PROBE_SLEEP="0", UNITARES_STOP_HOOK_LIMIT_S="soon; rm -rf /"),
+    )
+    assert _wait_for(tmp_path / "out", 8)
+    assert (tmp_path / "out").read_text().startswith('{"session_id":"s-5"}|')
 
 
 def test_detach_can_be_switched_off(tmp_path: Path) -> None:
@@ -91,7 +124,7 @@ def test_detach_can_be_switched_off(tmp_path: Path) -> None:
     res = subprocess.run(
         ["sh", str(wrapper), "post-stop", "--host", "claude"],
         input='{"session_id":"s-3"}', capture_output=True, text=True,
-        env=_env(tmp_path, UNITARES_STOP_DETACH="0"), timeout=10,
+        env=_env(tmp_path, UNITARES_STOP_DETACH="0", PROBE_SLEEP="0"), timeout=10,
     )
     assert res.returncode == 0
     assert (tmp_path / "out").read_text() == '{"session_id":"s-3"}|--host claude'
@@ -105,7 +138,7 @@ def test_codex_and_agy_stop_stay_in_the_foreground(tmp_path: Path) -> None:
         res = subprocess.run(
             ["sh", str(wrapper), "post-stop", "--host", host],
             input='{"session_id":"s-4"}', capture_output=True, text=True,
-            env=_env(tmp_path / host), timeout=10,
+            env=_env(tmp_path / host, PROBE_SLEEP="0"), timeout=10,
         )
         # They read the hook's stdout, so it must have run to completion.
         assert res.stdout.strip().endswith("{}"), (host, res.stdout, res.stderr)
