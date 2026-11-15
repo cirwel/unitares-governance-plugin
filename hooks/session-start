@@ -618,8 +618,13 @@ if [[ -n "${UNITARES_CLIENT_SESSION_ID:-}" \
       && ( "${ORCHESTRATED_MODE}" == "1" \
            || "${ORCHESTRATED_MODE}" == "true" \
            || "${ORCHESTRATED_MODE}" == "yes" \
-           || "${ORCHESTRATED_MODE}" == "on" ) ]]; then
+           || "${ORCHESTRATED_MODE}" == "on" ) \
+      && -n "${UNITARES_ORCHESTRATED_OWNER_PID:-}" \
+      && "${UNITARES_HOOK_HOST_PID:-}" == "${UNITARES_ORCHESTRATED_OWNER_PID}" ]]; then
   ANCHOR_RESUME_ENABLED=1
+fi
+if [[ "${UNITARES_ANCHOR_IGNORED:-0}" == "1" ]]; then
+  printf '[UNITARES] ignored unowned or inherited governance thread anchor\n' >&2
 fi
 
 # Record the compaction on the identity that was bound when it happened, so
@@ -838,24 +843,35 @@ else
   if [[ "${ANCHOR_RESUME_ENABLED}" == "1" ]]; then
     # Anchored conversation (e.g. Discord / dispatch_beam): a stable resume
     # anchor (UNITARES_CLIENT_SESSION_ID) is set by an orchestrator together
-    # with UNITARES_ORCHESTRATED=1, so every turn must resolve to ONE governance
-    # identity. A bare leaked anchor without the orchestration marker is treated
+    # with UNITARES_ORCHESTRATED=1 and a matching owner PID, so every turn must
+    # resolve to ONE governance identity. A leaked or unowned anchor is treated
     # like a normal fresh process. Nudging force_new here is actively wrong for
     # true orchestrated anchors — it mints a fresh uuid per turn and breaks the
     # per-conversation continuity the anchor exists to provide. A bare
-    # start_session() is rewritten by PreToolUse with the anchored session id,
-    # so an agent needing identity-gated calls on its first turn can bind
+    # start_session() is rewritten by PreToolUse with the anchored session id
+    # and orchestrated first-bind declaration, so an agent needing
+    # identity-gated calls on its first turn can bind
     # itself before Stop. Otherwise Stop is the fallback. (Takes precedence
     # over compact / already-shown: the message is short enough to repeat.)
+    FIRST_BIND_GUIDANCE="If you need an identity-gated tool before your first
+turn ends, call \`start_session()\` with no arguments. The orchestrated anchor
+and first-bind declaration are attached to that call and resolve this
+conversation's identity. If it fails, report the failure; do not retry with
+\`force_new\`."
     CONTEXT="UNITARES Governance: ONLINE (anchored session)
 This conversation carries a stable governance resume anchor, so your identity
 resumes automatically across turns — ONE identity per conversation, not a fresh
 one per turn. Do NOT call \`start_session(force_new=true)\`: force_new mints a
-new identity and breaks that continuity. If you need an identity-gated tool
-before your first turn ends, call \`start_session()\` with no arguments. The
-orchestrated anchor is attached to that call and resolves this conversation's
-identity. If it fails, report the failure; do not retry with \`force_new\`.
-Otherwise the Stop hook binds the anchor after the turn. Declare
+new identity and breaks that continuity.
+${FIRST_BIND_GUIDANCE}
+A spawned child or reviewer must start its own identity with declared lineage;
+it must never use an inherited thread anchor.
+To declare lineage for a nested CLI, its launcher must first unset
+\`UNITARES_CLIENT_SESSION_ID\`, \`UNITARES_ORCHESTRATED\`, and
+\`UNITARES_ORCHESTRATED_OWNER_PID\`, then set its own
+\`UNITARES_PARENT_AGENT_ID\` and \`UNITARES_SPAWN_REASON\`.
+If no tool needs identity yet, the Stop hook binds this conversation's anchor
+after the turn. Declare
 \`parent_agent_id\` only for a real spawn/handoff, never
 for the turn-to-turn flow of this conversation.
 Use \`sync_state(...)\` only for meaningful state worth reporting; do not

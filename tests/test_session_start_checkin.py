@@ -81,6 +81,7 @@ def _run_hook(
     claude_session_id=None,
     host="claude",
     hook_payload=None,
+    through_runner=False,
 ):
     """Run session-start with a given server URL and return (stdout, tool_calls).
 
@@ -114,8 +115,11 @@ def _run_hook(
         stdin_payload = hook_payload
 
     hook = PLUGIN_ROOT / "hooks" / "session-start"
+    command = [str(hook), "--host", host]
+    if through_runner:
+        command = ["/bin/sh", str(PLUGIN_ROOT / "hooks" / "run-hook.cmd"), "session-start", "--host", host]
     result = subprocess.run(
-        [str(hook), "--host", host],
+        command,
         env=env,
         cwd=str(workdir),
         input=json.dumps(stdin_payload),
@@ -352,6 +356,8 @@ class TestSessionStartContext:
             extra_env={
                 "UNITARES_CLIENT_SESSION_ID": "agent:/thread-123",
                 "UNITARES_ORCHESTRATED": "1",
+                "UNITARES_ORCHESTRATED_OWNER_PID": "12345",
+                "UNITARES_HOOK_HOST_PID": "12345",
             },
         )
         ctx = _context(stdout)
@@ -363,12 +369,59 @@ class TestSessionStartContext:
         # `start_session(force_new=true)` call line — both must be absent here.
         assert "Do NOT call `start_session(force_new=true)`" in ctx
         assert "call `start_session()` with no arguments" in ctx
-        assert "If it fails, report the failure; do not retry with `force_new`" in ctx
+        assert "If it fails, report the failure; do not" in ctx
+        assert "retry with `force_new`" in " ".join(ctx.split())
+        assert "A spawned child or reviewer must start its own" in ctx
         assert "Identity attribution: bind this process" not in ctx
         assert "SessionStart has not created an identity yet" not in ctx
         # The lineage hint also nudges force_new / a concrete parent declaration;
         # it must be suppressed on anchored sessions.
         assert "parent_agent_id=\"" not in ctx
+
+    def test_unmarked_anchor_is_ignored(self, tmp_path):
+        stdout, _ = _serve_and_run(
+            tmp_path,
+            extra_env={
+                "UNITARES_CLIENT_SESSION_ID": "agent:/thread-123",
+                "UNITARES_ORCHESTRATED": "1",
+            },
+        )
+        ctx = _context(stdout)
+        assert "anchored session" not in ctx
+        assert "call `start_session()` with no arguments" not in ctx
+
+    def test_owner_mismatch_ignores_inherited_anchor(self, tmp_path):
+        stdout, _ = _serve_and_run(
+            tmp_path,
+            extra_env={
+                "UNITARES_CLIENT_SESSION_ID": "agent:/thread-123",
+                "UNITARES_ORCHESTRATED": "1",
+                "UNITARES_ORCHESTRATED_OWNER_PID": "12345",
+                "UNITARES_HOOK_HOST_PID": "67890",
+            },
+        )
+        assert "anchored session" not in _context(stdout)
+
+    def test_nested_launcher_must_clear_anchor_before_declaring_lineage(self, tmp_path):
+        parent = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+        inherited = {
+            "UNITARES_CLIENT_SESSION_ID": "agent:/thread-parent",
+            "UNITARES_ORCHESTRATED": "1",
+            "UNITARES_ORCHESTRATED_OWNER_PID": "1",
+            "UNITARES_PARENT_AGENT_ID": parent,
+            "UNITARES_SPAWN_REASON": "reviewer",
+        }
+        stdout, _ = _serve_and_run(tmp_path, extra_env=inherited, through_runner=True)
+        assert parent not in _context(stdout)
+
+        # The nested CLI launcher removes the inherited anchor before adding
+        # its own lineage. The runner then preserves that explicit candidate.
+        declared = {**inherited,
+                    "UNITARES_CLIENT_SESSION_ID": None,
+                    "UNITARES_ORCHESTRATED": None,
+                    "UNITARES_ORCHESTRATED_OWNER_PID": None}
+        stdout, _ = _serve_and_run(tmp_path, extra_env=declared, through_runner=True)
+        assert f'parent_agent_id="{parent}"' in _context(stdout)
 
     def test_bare_anchor_without_orchestrated_marker_uses_normal_onboard_nudge(self, tmp_path):
         """A leaked anchor alone must not suppress fresh-process onboarding guidance."""

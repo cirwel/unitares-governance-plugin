@@ -306,7 +306,7 @@ def test_codex_stop_hook_recovers_after_plugin_cache_rollover(tmp_path: Path):
     )
     current_runner.parent.mkdir(parents=True)
     current_runner.write_text(
-        '#!/bin/sh\nprintf \'%s\\n\' "$*"\n',
+        '#!/bin/sh\n# UNITARES_ORCHESTRATED_OWNER_PID\nprintf \'%s\\n\' "$*"\n',
         encoding="utf-8",
     )
     current_runner.chmod(0o755)

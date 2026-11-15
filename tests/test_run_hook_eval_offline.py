@@ -155,4 +155,4 @@ def test_every_claude_hook_goes_through_the_dispatcher() -> None:
 
     assert commands
     for command in commands:
-        assert command.startswith('"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd" '), command
+        assert command.startswith('exec "${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd" '), command

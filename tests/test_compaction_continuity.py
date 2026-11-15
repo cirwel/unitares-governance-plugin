@@ -209,8 +209,10 @@ def test_compaction_keeps_orchestrated_anchor_precedence(tmp_path, host):
     _cache(tmp_path)
     stdout, calls = _serve_and_run(
         tmp_path, host=host, hook_payload=_event(),
-        extra_env={"UNITARES_CLIENT_SESSION_ID": "agent-orchestrated",
-                   "UNITARES_ORCHESTRATED": "1"},
+        extra_env={"UNITARES_CLIENT_SESSION_ID": "agent:/thread-orchestrated",
+                   "UNITARES_ORCHESTRATED": "1",
+                   "UNITARES_ORCHESTRATED_OWNER_PID": "12345",
+                   "UNITARES_HOOK_HOST_PID": "12345"},
     )
     ctx = _context(stdout)
     assert "ONLINE (anchored session)" in ctx
