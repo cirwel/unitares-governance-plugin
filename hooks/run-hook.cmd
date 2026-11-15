@@ -97,4 +97,41 @@ if [ "$HOOK_HOST" = "codex" ] && [ -f "$REPORTER" ] && command -v python3 >/dev/
     exec python3 "$REPORTER" run --plugin-root "${SCRIPT_DIR}/.." \
         --hook "$SCRIPT_NAME" -- "$BASH_BIN" "${SCRIPT_DIR}/${SCRIPT_NAME}" "$@"
 fi
+# Claude runs the Stop hook asynchronously and kills it when the CLI process
+# exits. A one-shot `claude -p` turn exits within a second of Stop, so the
+# hook never reached its check-in: orchestrated sessions (one process per
+# turn) recorded nothing and were never lazily onboarded. Read the payload
+# now, hand it to a child that ignores the exit signals, and return at once.
+# UNITARES_STOP_DETACH=0 keeps the hook in the foreground. Codex and agy run
+# Stop synchronously and need its stdout, so they are left alone.
+#
+# The ignored signals are inherited by the hook and its helpers, so nothing
+# short of KILL stops one that hangs, and the host no longer ends it at exit.
+# A watchdog therefore kills the hook's process tree after
+# UNITARES_STOP_HOOK_LIMIT_S seconds (default 120; the hook's own onboard and
+# check-in budgets add up to well under that).
+if [ "$SCRIPT_NAME" = "post-stop" ] && [ "$HOOK_HOST" = "claude" ] \
+        && [ "${UNITARES_STOP_DETACH:-1}" != "0" ]; then
+    STOP_PAYLOAD="$(cat 2>/dev/null || true)"
+    STOP_LIMIT="${UNITARES_STOP_HOOK_LIMIT_S:-120}"
+    case "$STOP_LIMIT" in
+        ''|*[!0-9]*) STOP_LIMIT=120 ;;
+    esac
+    (
+        trap '' HUP TERM INT
+        kill_tree() {
+            for child in $(pgrep -P "$1" 2>/dev/null); do
+                kill_tree "$child"
+            done
+            kill -KILL "$1" 2>/dev/null
+        }
+        printf '%s' "$STOP_PAYLOAD" | "$BASH_BIN" "${SCRIPT_DIR}/${SCRIPT_NAME}" "$@" &
+        HOOK_PID=$!
+        ( sleep "$STOP_LIMIT"; kill_tree "$HOOK_PID" ) &
+        WATCHDOG_PID=$!
+        wait "$HOOK_PID"
+        kill_tree "$WATCHDOG_PID"
+    ) </dev/null >/dev/null 2>&1 &
+    exit 0
+fi
 exec "$BASH_BIN" "${SCRIPT_DIR}/${SCRIPT_NAME}" "$@"
