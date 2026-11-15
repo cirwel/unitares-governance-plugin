@@ -362,6 +362,8 @@ class TestSessionStartContext:
         # "Identity attribution: bind this process" nudge + a bare
         # `start_session(force_new=true)` call line — both must be absent here.
         assert "Do NOT call `start_session(force_new=true)`" in ctx
+        assert "call `start_session()` with no arguments" in ctx
+        assert "If it fails, report the failure; do not retry with `force_new`" in ctx
         assert "Identity attribution: bind this process" not in ctx
         assert "SessionStart has not created an identity yet" not in ctx
         # The lineage hint also nudges force_new / a concrete parent declaration;
