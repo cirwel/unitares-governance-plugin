@@ -592,6 +592,10 @@ def test_post_stop_posts_tool_outcomes_beside_the_checkin(tmp_path, host):
     assert body["repeat_failure_delta"] == 1
     assert body["window_truncated"] is False
     assert body["window_basis"] == "transcript_cursor"
+    # Secondary telemetry cannot use up the main check-in's time budget.
+    primary_index = next(i for i, c in enumerate(RecordingHandler.calls)
+                         if c.get("name") == "process_agent_update")
+    assert primary_index < RecordingHandler.calls.index(body)
     wire = json.dumps(body)
     for private in ("private", "make", "Bash", "Exit code", slot):
         assert private not in wire

@@ -101,6 +101,11 @@ Only counts and provenance leave the machine. The cursor advances before
 delivery, so retries cannot double-count a window but a failed delivery loses
 that window. `UNITARES_TOOL_OUTCOMES=off` disables this collection. These
 unscored host observations remain separate from EISV and prediction outcomes.
+Delivery follows the main check-in and uses a two-second HTTP timeout on Codex.
+The initial metadata line is bounded to 1 MiB and the event window to 8 MiB;
+an unreadable session header or absent first-turn boundary produces no reading.
+Items flushed after Stop are collected at the next Stop; without one, that
+final tail is unavailable.
 
 Identity-bearing emissions share one helper (`scripts/checkin.py`) that:
 - Applies secret-pattern redaction to `response_text` before POST

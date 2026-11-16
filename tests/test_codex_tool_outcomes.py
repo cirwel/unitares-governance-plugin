@@ -68,6 +68,8 @@ def test_first_window_does_not_count_prior_turn(transcript):
     ("declined", None, 1, 1, 0), ("cancelled", None, 0, 0, 1),
     ("failed", None, 0, 0, 1), ("completed", True, 0, 0, 1),
     ({"malformed": True}, None, 0, 0, 1),
+    ("cancelled", 0, 0, 0, 1), ("failed", 0, 0, 0, 1),
+    ("bogus", 0, 0, 0, 1), ("inProgress", 1, 0, 0, 1),
 ])
 def test_missing_exit_status_is_not_success(transcript, status, code, error, never, unknown):
     append(transcript, item("x", status=status, code=code))
@@ -115,9 +117,9 @@ def test_partial_line_waits_for_next_window(transcript):
 
 
 def test_unknown_native_activity_marks_incomplete_coverage(transcript):
-    append(transcript, item("x", kind="FutureTool"))
+    append(transcript, item("known"), item("x", kind="FutureTool"))
     counts, _ = collect_window(str(transcript), None, slot=SLOT)
-    assert counts["tool_delta"] == 0
+    assert counts["tool_delta"] == 1
     assert counts["window_truncated"] is True
 
 
@@ -159,6 +161,7 @@ def test_rotated_rollout_rechecks_identity_and_resets_cursor(transcript):
            start(), item("second"))
     counts, _ = collect_window(str(transcript), state, slot=SLOT)
     assert counts["tool_delta"] == 1
+    assert counts["window_truncated"] is True
 
 
 def test_bounded_first_read_without_turn_boundary_is_unavailable(transcript):
@@ -170,3 +173,45 @@ def test_symlink_transcript_is_not_followed(transcript, tmp_path):
     link = tmp_path / "link.jsonl"
     link.symlink_to(transcript)
     assert collect_window(str(link), None, slot=SLOT) is None
+
+
+def test_messages_do_not_establish_tool_coverage(transcript):
+    append(transcript, item("message", kind="AgentMessage"),
+           {"type": "response_item", "payload": {
+               "type": "function_call_output", "call_id": "legacy", "output": "done"}})
+    assert collect_window(str(transcript), None, slot=SLOT) is None
+
+
+def test_later_unmatched_tool_result_marks_incomplete_coverage(transcript):
+    append(transcript, item("known"))
+    _, state = collect_window(str(transcript), None, slot=SLOT)
+    append(transcript, {"type": "response_item", "payload": {
+        "type": "function_call_output", "call_id": "not-itemized", "output": "done"}})
+    counts, _ = collect_window(str(transcript), state, slot=SLOT)
+    assert counts["tool_delta"] == 0
+    assert counts["window_truncated"] is True
+
+
+def test_code_mode_wrapper_across_windows_does_not_claim_missing_nested_result(transcript):
+    append(transcript, item("nested"), {"type": "response_item", "payload": {
+        "type": "custom_tool_call", "name": "functions.exec", "call_id": "wrapper"}})
+    _, state = collect_window(str(transcript), None, slot=SLOT)
+    append(transcript, {"type": "response_item", "payload": {
+        "type": "custom_tool_call_output", "call_id": "wrapper", "output": "done"}})
+    counts, _ = collect_window(str(transcript), state, slot=SLOT)
+    assert counts["tool_delta"] == 0
+    assert counts["window_truncated"] is False
+
+
+def test_codex_delivery_has_bounded_http_timeout(transcript, tmp_path, monkeypatch):
+    import runtime_observer
+    observed = []
+    def post(url, body, *, timeout):
+        observed.append(timeout)
+        return True
+    monkeypatch.setattr(runtime_observer, "_post_runtime", post)
+    append(transcript, item("x"))
+    payload = json.dumps({"session_id": SLOT, "transcript_path": str(transcript)})
+    assert run(payload, agent_uuid="a", client_session_id="c", slot=SLOT,
+               server_url="x", home=tmp_path, host="codex") == "sent"
+    assert observed == [2.0]

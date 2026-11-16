@@ -28,8 +28,12 @@ def _status(item: Mapping[str, Any]) -> tuple[bool, bool, bool]:
     if status in {"declined", "rejected"}:
         return True, True, False
     if item.get("type") == "CommandExecution":
+        if status not in {"completed", "failed"}:
+            return False, False, True
         code = item.get("exit_code")
         if isinstance(code, int) and not isinstance(code, bool):
+            if status == "failed" and code == 0:
+                return False, False, True
             return code != 0, False, False
         # Failed without an exit code does not establish whether it executed.
         return False, False, True
@@ -91,8 +95,9 @@ def collect_window(
         offset = previous.get("offset", 0) if same else 0
         if not isinstance(offset, int) or offset < 0:
             offset, same = 0, False
-        truncated = offset > info.st_size
-        if truncated:
+        truncated = bool(previous) and not same
+        if offset > info.st_size:
+            truncated = True
             offset, same = 0, False
         start = max(offset, info.st_size - read_bound)
         if start > offset:
@@ -122,11 +127,22 @@ def collect_window(
             return None
     completed = list(previous.get("completed", [])) if same else []
     failed = list(previous.get("failed", [])) if same else []
+    wrappers = list(previous.get("wrappers", [])) if same else []
+    response_results: set[str] = set()
     seen = set(completed)
     supported = bool(previous.get("native_items_seen")) if same else False
     total = errors = not_executed = repeats = unknown = 0
     for _, entry in entries:
         p = entry.get("payload")
+        if entry.get("type") == "response_item" and isinstance(p, dict):
+            call_id = p.get("call_id")
+            if isinstance(call_id, str) and call_id:
+                key = hashlib.sha256(call_id.encode()).hexdigest()
+                if p.get("type") in {"custom_tool_call", "function_call"} and p.get("name") in {"functions.exec", "functions.wait"}:
+                    wrappers.append(key)
+                elif p.get("type") in {"custom_tool_call_output", "function_call_output"}:
+                    response_results.add(key)
+            continue
         if entry.get("type") != "event_msg" or not isinstance(p, dict):
             continue
         if p.get("type") != "item_completed" or p.get("thread_id") != slot:
@@ -135,7 +151,6 @@ def collect_window(
         if not isinstance(item, dict):
             truncated = True
             continue
-        supported = True
         kind = item.get("type")
         if not isinstance(kind, str):
             truncated = True
@@ -146,6 +161,7 @@ def collect_window(
             # New/unsupported activity is missing coverage, not success.
             truncated = True
             continue
+        supported = True
         call_id = item.get("id")
         if not isinstance(call_id, str) or not call_id:
             truncated = True
@@ -170,6 +186,10 @@ def collect_window(
             failed.remove(digest)
     if not supported:
         return None
+    # A mixed/older host can itemize messages but omit native tool results.
+    # Only explicitly known code-mode wrappers are exempt from matching.
+    if response_results - seen - set(wrappers):
+        truncated = True
     return {
         "tool_delta": total,
         "tool_error_delta": errors,
@@ -189,4 +209,5 @@ def collect_window(
         "native_items_seen": supported,
         "completed": completed[-common.MAX_COMPLETED_IDS:],
         "failed": failed[-common.MAX_FAILED_DIGESTS:],
+        "wrappers": wrappers[-common.MAX_COMPLETED_IDS:],
     }

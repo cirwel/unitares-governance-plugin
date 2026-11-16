@@ -497,7 +497,9 @@ def run(
     from checkin import _plugin_version
 
     if sender is None:
-        from runtime_observer import _post_runtime as sender
+        from functools import partial
+        from runtime_observer import _post_runtime, DEFAULT_HTTP_TIMEOUT_S
+        sender = partial(_post_runtime, timeout=2.0 if host == "codex" else DEFAULT_HTTP_TIMEOUT_S)
     body = build_payload(
         counts,
         state,
