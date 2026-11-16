@@ -90,6 +90,18 @@ turn/item event stream and post the same identity-bound host observations to
 `/v1/runtime/observe`. The route name is retained for compatibility; it is not
 a claim that the observation represents continuous agent runtime.
 
+At Stop, Codex also forwards counts from structured `item_completed` records
+in the hook-named rollout, after matching its session metadata to this slot.
+Command exit codes and MCP error flags supply outcomes; printed tool text does
+not. Nested commands and MCP calls in code mode are counted once, without also
+counting their `response_item` wrapper. Unsupported older rollouts produce no
+reading. Unknown terminal statuses are counted in `tool_unknown_status_delta`,
+and incomplete coverage sets `window_truncated`; neither is reported as success.
+Only counts and provenance leave the machine. The cursor advances before
+delivery, so retries cannot double-count a window but a failed delivery loses
+that window. `UNITARES_TOOL_OUTCOMES=off` disables this collection. These
+unscored host observations remain separate from EISV and prediction outcomes.
+
 Identity-bearing emissions share one helper (`scripts/checkin.py`) that:
 - Applies secret-pattern redaction to `response_text` before POST
 - Truncates `response_text` to 512 chars
