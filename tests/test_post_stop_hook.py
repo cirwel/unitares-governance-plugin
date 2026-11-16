@@ -6,6 +6,7 @@ import json
 import subprocess
 import sys
 import threading
+import pytest
 from pathlib import Path
 
 PLUGIN_ROOT = Path(__file__).parent.parent
@@ -494,7 +495,8 @@ def test_agy_post_stop_skips_unbound_invoke_subagent_child(tmp_path):
     assert LazyOnboardHandler.calls == []
 
 
-def test_claude_post_stop_posts_tool_outcomes_beside_the_checkin(tmp_path):
+@pytest.mark.parametrize("host", ["claude", "codex"])
+def test_post_stop_posts_tool_outcomes_beside_the_checkin(tmp_path, host):
     """A bound Claude Stop posts counts from the transcript and one check-in."""
     RecordingHandler.calls = []
     RecordingHandler.paths = []
@@ -532,6 +534,17 @@ def test_claude_post_stop_posts_tool_outcomes_beside_the_checkin(tmp_path):
         {"type": "user", "message": {"role": "user", "content": "private prompt"}},
         call("a"), result("a", True), call("b"), result("b", True), call("c"), result("c", False),
     ]))
+    if host == "codex":
+        transcript.write_text("".join(json.dumps(entry) + "\n" for entry in [
+            {"type": "session_meta", "payload": {"id": slot}},
+            {"type": "event_msg", "payload": {"type": "task_started"}},
+            *[{"type": "event_msg", "payload": {
+                "type": "item_completed", "thread_id": slot,
+                "item": {"type": "CommandExecution", "id": call_id,
+                         "command": "make private-target", "cwd": "/private",
+                         "status": "failed" if code else "completed", "exit_code": code}}}
+              for call_id, code in (("a", 2), ("b", 2), ("c", 0))],
+        ]))
 
     stop_payload = json.dumps({
         "hook_event_name": "Stop",
@@ -551,7 +564,7 @@ def test_claude_post_stop_posts_tool_outcomes_beside_the_checkin(tmp_path):
             "PWD": str(tmp_path),
         }
         subprocess.run(
-            [str(PLUGIN_ROOT / "hooks" / "post-stop")],
+            [str(PLUGIN_ROOT / "hooks" / "post-stop"), "--host", host],
             env=env,
             cwd=str(tmp_path),
             input=stop_payload,
@@ -572,13 +585,17 @@ def test_claude_post_stop_posts_tool_outcomes_beside_the_checkin(tmp_path):
     assert "/v1/runtime/observe" in RecordingHandler.paths
     assert body["agent_uuid"] == "86ae619f-87e0-4040-8f29-eacece0c7904"
     assert body["client_session_id"] == "agent-test1234"
-    assert body["host_family"] == "claude"
+    assert body["host_family"] == host
     assert body["tool_delta"] == 3
     assert body["tool_error_delta"] == 2
     assert body["tool_not_executed_delta"] == 0
     assert body["repeat_failure_delta"] == 1
     assert body["window_truncated"] is False
     assert body["window_basis"] == "transcript_cursor"
+    # Secondary telemetry cannot use up the main check-in's time budget.
+    primary_index = next(i for i, c in enumerate(RecordingHandler.calls)
+                         if c.get("name") == "process_agent_update")
+    assert primary_index < RecordingHandler.calls.index(body)
     wire = json.dumps(body)
     for private in ("private", "make", "Bash", "Exit code", slot):
         assert private not in wire
