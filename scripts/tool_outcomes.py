@@ -492,7 +492,8 @@ def run(
     if advanced is None:
         return "skip_no_transcript"
     counts, state = advanced
-    if state.get("offset") == state.get("window_start") and counts["tool_delta"] == 0:
+    if (state.get("offset") == state.get("window_start")
+            and counts["tool_delta"] == 0 and not counts["window_truncated"]):
         return "skip_nothing_new"
     from checkin import _plugin_version
 

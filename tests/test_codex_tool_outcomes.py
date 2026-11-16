@@ -215,3 +215,23 @@ def test_codex_delivery_has_bounded_http_timeout(transcript, tmp_path, monkeypat
     assert run(payload, agent_uuid="a", client_session_id="c", slot=SLOT,
                server_url="x", home=tmp_path, host="codex") == "sent"
     assert observed == [2.0]
+
+
+def test_oversized_unterminated_line_still_reports_lost_coverage(transcript, tmp_path, monkeypatch):
+    import tool_outcomes
+    append(transcript, item("known"))
+    _, state = collect_window(str(transcript), None, slot=SLOT)
+    with transcript.open("a") as f:
+        f.write("x" * 2000)
+    counts, next_state = collect_window(str(transcript), state, slot=SLOT, read_bound=1000)
+    assert counts["window_truncated"] is True
+    assert counts["tool_delta"] == 0
+    monkeypatch.setattr(tool_outcomes, "advance", lambda *a, **kw: (counts, next_state))
+    sent = []
+    def sender(url, body):
+        sent.append(body)
+        return True
+    payload = json.dumps({"session_id": SLOT, "transcript_path": str(transcript)})
+    assert run(payload, agent_uuid="a", client_session_id="c", slot=SLOT,
+               server_url="x", home=tmp_path, host="codex", sender=sender) == "sent"
+    assert sent[0]["window_truncated"] is True
