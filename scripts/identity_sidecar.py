@@ -43,7 +43,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from audit_identity_contract import audit_checkin_log, audit_session_caches, parse_since  # noqa: E402
 from checkin import _plugin_version, submit_checkin  # noqa: E402
-from governance_call_inject import INJECT_SUFFIXES, PROOF_FIELDS  # noqa: E402
+from governance_call_inject import (  # noqa: E402
+    GATEWAY_SUFFIXES,
+    INJECT_SUFFIXES,
+    PROOF_FIELDS,
+)
 from _http_auth import authorization_safe_urlopen, read_limited_response  # noqa: E402
 from _redact import sanitize_model_visible_payload  # noqa: E402
 from onboard_helper import (  # noqa: E402
@@ -464,15 +468,30 @@ class IdentitySidecar:
             authority = ensured.get("session")
             if not isinstance(authority, dict):
                 authority = ensured
-            provided = {
-                field: value
+            proof_sources = [("", arguments)]
+            gateway_name = name
+            gateway_arguments = arguments
+            gateway_prefix = ""
+            while gateway_name in GATEWAY_SUFFIXES:
+                nested = gateway_arguments.get("arguments")
+                if isinstance(nested, dict):
+                    gateway_prefix += "arguments."
+                    proof_sources.append((gateway_prefix, nested))
+                    target = gateway_arguments.get("tool_name")
+                    gateway_name = target.strip().casefold() if isinstance(target, str) else ""
+                    gateway_arguments = nested
+                    continue
+                break
+            provided = [
+                (prefix, field, value)
+                for prefix, source in proof_sources
                 for field in PROOF_FIELDS
-                if (value := arguments.get(field)) is not None
+                if (value := source.get(field)) is not None
                 and (not isinstance(value, str) or value.strip())
-            }
+            ]
             mismatched = [
-                field
-                for field, value in provided.items()
+                f"{prefix}{field}"
+                for prefix, field, value in provided
                 if not isinstance(value, str)
                 or not isinstance(authority.get(field), str)
                 or value.strip() != str(authority.get(field)).strip()
@@ -482,7 +501,8 @@ class IdentitySidecar:
                     "sidecar proof does not match its configured slot binding: "
                     + ", ".join(sorted(mismatched))
                 )
-            if isinstance(sid, str) and sid.strip() and not provided:
+            top_level_provided = any(not prefix for prefix, _field, _value in provided)
+            if isinstance(sid, str) and sid.strip() and not top_level_provided:
                 arguments["client_session_id"] = sid.strip()
                 lifecycle["session_proof_injected"] = True
         return arguments, lifecycle
