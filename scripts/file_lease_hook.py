@@ -397,15 +397,7 @@ def _bearer_token_with_source() -> tuple[str, str]:
             scheme = urllib.parse.urlsplit(url).scheme.lower()
         except ValueError:
             scheme = ""
-        insecure_loopback_opt_in = os.environ.get(
-            "UNITARES_ALLOW_INSECURE_LOOPBACK_LEASE_HTTP",
-            "0",
-        ).strip().lower() in {"1", "true", "on", "yes"}
-        if scheme == "https" or (
-            scheme == "http"
-            and _is_loopback_url(url)
-            and insecure_loopback_opt_in
-        ):
+        if scheme == "https":
             return token, "configured"
         return "", "insecure_transport"
     # Required mode is an explicit fail-closed policy; it names its bearer
@@ -1491,8 +1483,8 @@ def _status_line(status: dict[str, Any]) -> str:
     elif reason == "insecure_transport":
         why = f"the configured bearer would cross unauthenticated HTTP at {url}"
         fix = (
-            "Use HTTPS (recommended), local authenticated IPC, or explicitly opt in "
-            "to insecure loopback development transport."
+            "Use HTTPS for configured lease credentials. Cleartext loopback "
+            "development uses only the public Docker Compose default."
         )
     elif reason == "not_a_lease_plane":
         why = f"the service at {url} does not answer as a v1 lease plane"

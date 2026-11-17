@@ -169,7 +169,7 @@ def test_codex_release_handler_does_not_depend_on_session_cache(
             },
         },
         tool_use_id,
-        token="lease-token",
+        token=file_lease_hook.COMPOSE_DEFAULT_BEARER,
     )
     payload = {
         "hook_event_name": "PostToolUse",
@@ -186,9 +186,7 @@ def test_codex_release_handler_does_not_depend_on_session_cache(
         "LEASE_PLANE_BASE_URL": (
             f"http://127.0.0.1:{server.server_address[1]}"
         ),
-        "LEASE_PLANE_BEARER_TOKEN": "lease-token",
-        "UNITARES_SECRETS_ENV": "/dev/null",
-            "UNITARES_ALLOW_INSECURE_LOOPBACK_LEASE_HTTP": "1",
+        "UNITARES_SECRETS_ENV": "/missing/secrets.env",
     }
 
     try:

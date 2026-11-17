@@ -16,12 +16,12 @@ from scripts import file_lease_hook
 
 
 @pytest.fixture(autouse=True)
-def _allow_explicit_test_loopback_http(
+def _isolate_test_environment(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    monkeypatch.setenv("UNITARES_ALLOW_INSECURE_LOOPBACK_LEASE_HTTP", "1")
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("LEASE_PLANE_BASE_URL", "https://lease.example.test")
 
 
 class _ReusableTCPServer(socketserver.TCPServer):
@@ -147,8 +147,10 @@ def _codex_payload(
 
 def _lease_env(monkeypatch, lease_server):
     monkeypatch.setenv("LEASE_PLANE_BASE_URL", f"http://127.0.0.1:{lease_server.server_address[1]}")
-    monkeypatch.setenv("LEASE_PLANE_BEARER_TOKEN", "lease-token")
-    monkeypatch.setenv("UNITARES_SECRETS_ENV", "/dev/null")
+    for name in file_lease_hook._BEARER_ENV_NAMES:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("UNITARES_SECRETS_ENV", "/missing/secrets.env")
+    LeaseHandler.health_token = file_lease_hook.COMPOSE_DEFAULT_BEARER
 
 
 def _seed_state(
@@ -158,6 +160,7 @@ def _seed_state(
     leases: dict[str, dict],
     *,
     holder_uuid: str = "33333333-3333-4333-8333-333333333333",
+    token: str = "lease-token",
 ) -> Path:
     bound_leases = {}
     for surface, row in leases.items():
@@ -180,26 +183,53 @@ def _seed_state(
         slot,
         state,
         tool_use_id,
-        token="lease-token",
+        token=token,
     )
     return file_lease_hook._state_path(workspace, slot, tool_use_id)
 
 
-def test_configured_loopback_bearer_is_withheld_without_explicit_opt_in(
+@pytest.mark.parametrize(("required", "expected_rc"), [("0", 0), ("1", 2)])
+def test_configured_loopback_bearer_is_withheld_even_with_legacy_opt_in(
     tmp_path,
     monkeypatch,
     lease_server,
+    required,
+    expected_rc,
 ):
     _lease_env(monkeypatch, lease_server)
-    monkeypatch.delenv("UNITARES_ALLOW_INSECURE_LOOPBACK_LEASE_HTTP", raising=False)
+    monkeypatch.setenv("LEASE_PLANE_BEARER_TOKEN", "operator-token")
+    monkeypatch.setenv("UNITARES_ALLOW_INSECURE_LOOPBACK_LEASE_HTTP", "1")
+    monkeypatch.setenv("UNITARES_FILE_LEASES_REQUIRED", required)
 
     rc = file_lease_hook.main(
         ["pre-edit", "--workspace", str(tmp_path)],
         stdin_text=_payload(tool_use_id="toolu_untrusted_loopback"),
     )
 
-    assert rc == 0
+    assert rc == expected_rc
     assert LeaseHandler.calls == []
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://127.0.0.1:8788",
+        "http://localhost:8788",
+        "http://[::1]:8788",
+        "http://lease-plane.example.test:8788",
+    ],
+)
+def test_configured_bearer_rejects_every_cleartext_origin(
+    tmp_path,
+    monkeypatch,
+    url,
+):
+    _no_configured_bearer(monkeypatch, tmp_path)
+    monkeypatch.setenv("LEASE_PLANE_BASE_URL", url)
+    monkeypatch.setenv("LEASE_PLANE_BEARER_TOKEN", "operator-token")
+    monkeypatch.setenv("UNITARES_ALLOW_INSECURE_LOOPBACK_LEASE_HTTP", "1")
+
+    assert file_lease_hook._bearer_token_with_source() == ("", "insecure_transport")
 
 
 def test_required_mode_blocks_when_worktree_namespace_probe_fails(
@@ -210,6 +240,8 @@ def test_required_mode_blocks_when_worktree_namespace_probe_fails(
 ):
     _lease_env(monkeypatch, lease_server)
     monkeypatch.setenv("UNITARES_FILE_LEASES_REQUIRED", "1")
+    monkeypatch.setenv("LEASE_PLANE_BASE_URL", "https://lease.example.test")
+    monkeypatch.setenv("LEASE_PLANE_BEARER_TOKEN", "lease-token")
     monkeypatch.setattr(file_lease_hook, "_worktree_roots", lambda *_args, **_kwargs: None)
 
     rc = file_lease_hook.main(
@@ -234,7 +266,7 @@ def test_pre_edit_acquires_file_lease_and_records_state(tmp_path, monkeypatch, l
     assert rc == 0
     acquire = LeaseHandler.calls[0]
     assert acquire["path"] == "/v1/lease/acquire"
-    assert acquire["authorization"] == "Bearer lease-token"
+    assert acquire["authorization"] == f"Bearer {file_lease_hook.COMPOSE_DEFAULT_BEARER}"
     assert acquire["body"]["surface_id"] == f"file://{tmp_path / 'a.py'}"
     assert acquire["body"]["holder_kind"] == "remote_heartbeat"
 
@@ -374,6 +406,7 @@ def test_release_session_releases_and_removes_state(tmp_path, monkeypatch, lease
                 "path": "a.py",
             }
         },
+        token=file_lease_hook.COMPOSE_DEFAULT_BEARER,
     )
 
     rc = file_lease_hook.main(["release-session", "--workspace", str(tmp_path)], stdin_text=_payload())
@@ -400,6 +433,7 @@ def test_release_edit_releases_only_edited_file_and_keeps_others(tmp_path, monke
                 "path": "b.py",
             },
         },
+        token=file_lease_hook.COMPOSE_DEFAULT_BEARER,
     )
 
     rc = file_lease_hook.main(
@@ -430,6 +464,7 @@ def test_release_edit_noop_when_file_not_leased(tmp_path, monkeypatch, lease_ser
                 "path": "b.py",
             }
         },
+        token=file_lease_hook.COMPOSE_DEFAULT_BEARER,
     )
 
     rc = file_lease_hook.main(
@@ -491,6 +526,7 @@ def test_workspace_state_cannot_substitute_foreign_lease(
                 "path": "a.py",
             }
         },
+        token=file_lease_hook.COMPOSE_DEFAULT_BEARER,
     )
     workspace_state = file_lease_hook._legacy_state_path(
         tmp_path, "slot-1", tool_use_id
@@ -540,6 +576,7 @@ def test_tampered_protected_row_cannot_release_foreign_lease(
                 "path": "a.py",
             }
         },
+        token=file_lease_hook.COMPOSE_DEFAULT_BEARER,
     )
     tampered = json.loads(state_path.read_text(encoding="utf-8"))
     tampered["leases"]["file:///tmp/a.py"]["lease_id"] = (
@@ -1456,9 +1493,9 @@ def test_loopback_lease_plane_uses_the_compose_default_bearer(tmp_path, monkeypa
     assert acquires[0]["authorization"] == f"Bearer {file_lease_hook.COMPOSE_DEFAULT_BEARER}"
 
 
-def test_configured_bearer_wins_over_the_compose_default(tmp_path, monkeypatch, lease_server):
+def test_https_configured_bearer_wins_over_the_compose_default(tmp_path, monkeypatch):
     _no_configured_bearer(monkeypatch, tmp_path)
-    monkeypatch.setenv("LEASE_PLANE_BASE_URL", f"http://127.0.0.1:{lease_server.server_address[1]}")
+    monkeypatch.setenv("LEASE_PLANE_BASE_URL", "https://lease.example.com")
     monkeypatch.setenv("LEASE_PLANE_BEARER_TOKEN", "operator-token")
     assert file_lease_hook._bearer_token_with_source() == ("operator-token", "configured")
 
@@ -1471,7 +1508,7 @@ def test_remote_lease_plane_never_gets_the_compose_default(tmp_path, monkeypatch
 
 def test_required_mode_never_uses_the_compose_default(tmp_path, monkeypatch):
     _no_configured_bearer(monkeypatch, tmp_path)
-    monkeypatch.setenv("LEASE_PLANE_BASE_URL", "http://127.0.0.1:8788")
+    monkeypatch.setenv("LEASE_PLANE_BASE_URL", "https://lease.example.com")
     monkeypatch.setenv("UNITARES_FILE_LEASES_REQUIRED", "1")
     assert file_lease_hook._bearer_token_with_source() == ("", "none")
 
@@ -1523,7 +1560,7 @@ def test_secrets_file_lines_may_carry_a_shell_export_prefix(tmp_path, monkeypatc
     # Record the name as absent so teardown removes what the loader inserts.
     monkeypatch.setenv("LEASE_PLANE_BEARER_TOKEN", "placeholder")
     monkeypatch.delenv("LEASE_PLANE_BEARER_TOKEN")
-    monkeypatch.setenv("LEASE_PLANE_BASE_URL", "http://127.0.0.1:8788")
+    monkeypatch.setenv("LEASE_PLANE_BASE_URL", "https://lease.example.com")
     secrets = tmp_path / "secrets.env"
     secrets.write_text(f"# shell-sourced\n{line}\n", encoding="utf-8")
     monkeypatch.setenv("UNITARES_SECRETS_ENV", str(secrets))
@@ -1548,11 +1585,11 @@ def test_a_key_that_only_starts_with_export_is_kept_whole(tmp_path, monkeypatch)
     assert "EXPORTED_TEST_KEY" not in os.environ
 
 
-def test_status_on_when_the_bearer_authenticates(tmp_path, monkeypatch, lease_server):
+def test_status_on_when_the_compose_default_authenticates(tmp_path, monkeypatch, lease_server):
     _lease_env(monkeypatch, lease_server)
     status = file_lease_hook.lease_status()
     assert status["state"] == "on"
-    assert status["bearer"] == "configured"
+    assert status["bearer"] == "compose_default"
     assert file_lease_hook._status_line(status) == ""
 
 
@@ -1628,13 +1665,13 @@ def test_session_start_says_when_file_leases_are_off(tmp_path):
 def test_session_start_adds_nothing_when_file_leases_work(tmp_path, lease_server):
     from tests.test_session_start_golden import _render
 
+    LeaseHandler.health_token = file_lease_hook.COMPOSE_DEFAULT_BEARER
     context = _render(
         tmp_path,
         extra_env={
             "UNITARES_FILE_LEASES_ENABLED": "1",
             "LEASE_PLANE_BASE_URL": f"http://127.0.0.1:{lease_server.server_address[1]}",
-            "LEASE_PLANE_BEARER_TOKEN": "lease-token",
-            "UNITARES_ALLOW_INSECURE_LOOPBACK_LEASE_HTTP": "1",
+            "UNITARES_SECRETS_ENV": "/missing/secrets.env",
         },
     )
     assert "File leases" not in context

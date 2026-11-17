@@ -63,7 +63,6 @@ including `0` and `off` kill switches:
 | `UNITARES_HOOK_FUNDAMENTALS_EXCERPT` | `off` | SessionStart points both hosts at the `governance-fundamentals` and `governance-lifecycle` skills; `on` inlines the ~4 KB Fundamentals excerpt instead, for a host build that does not load plugin skills |
 | `UNITARES_FILE_LEASES_ENABLED` | `1` | Enable host edit leases (Claude Edit/Write/MultiEdit; Codex apply_patch) |
 | `UNITARES_FILE_LEASES_REQUIRED` | `0` | Block edits when lease infrastructure is missing/unreachable; truthy values take precedence over `UNITARES_FILE_LEASES_ENABLED=0` |
-| `UNITARES_ALLOW_INSECURE_LOOPBACK_LEASE_HTTP` | `0` | Development-only opt-in to send a configured lease bearer over cleartext loopback HTTP; use HTTPS or authenticated local IPC for enforced deployments |
 | `UNITARES_FILE_LEASE_TTL_S` | `30` | Crash/failure backstop for a lease not released by PostToolUse |
 | `UNITARES_FILE_LEASE_BATCH_TIMEOUT_S` | `3.5` | Total bounded lease work per edit hook (clamped to four seconds) |
 | `UNITARES_MILESTONE_LOCK_TIMEOUT_S` | `2.0` | Maximum wait for the cross-process milestone lock (clamped to four seconds) |
@@ -77,7 +76,7 @@ including `0` and `off` kill switches:
 | `UNITARES_CODEX_HOST_HEARTBEATS` | `off` | Opt in to hook-parent PID heartbeats; a shared host PID never proves per-agent runtime |
 | `UNITARES_CODEX_RUNTIME_IDLE_EXIT_S` | `3600` | Stop a detached slot worker after this many seconds without a completed-tool receipt |
 | `LEASE_PLANE_BASE_URL` | `http://127.0.0.1:8788` | BEAM lease-plane HTTP base URL |
-| `LEASE_PLANE_BEARER_TOKEN` | unset | Bearer used for lease-plane acquire, heartbeat, and release calls. Read from the environment, then `UNITARES_SECRETS_ENV`, `~/.config/unitares/secrets.env`, or the older `~/.config/cirwel/secrets.env`. When none is set and the lease plane is on loopback, the hook tries the UNITARES Docker Compose default (`unitares-local-lease-plane`), except in required mode. SessionStart says when leases are enabled but would not work |
+| `LEASE_PLANE_BEARER_TOKEN` | unset | Bearer used for lease-plane acquire, heartbeat, and release calls over HTTPS. Read from the environment, then `UNITARES_SECRETS_ENV`, `~/.config/unitares/secrets.env`, or the older `~/.config/cirwel/secrets.env`. Configured bearers are never sent over cleartext HTTP. When none is set and the lease plane is on loopback, the hook tries the public UNITARES Docker Compose default (`unitares-local-lease-plane`), except in required mode. SessionStart says when leases are enabled but would not work |
 
 See [adapter behavior](./adapters.md) for host-specific hooks and
 [check-in diagnostics](./check-ins.md) for triggers, logs, and upgrade steps.
