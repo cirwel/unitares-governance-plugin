@@ -199,6 +199,26 @@ def test_resume_marks_the_inherited_cache(tmp_path):
     assert data["uuid"] == UUID and data["client_session_id"] == CSID
 
 
+def test_anchored_resume_preserves_usable_cache_without_prior_process_marker(tmp_path):
+    cache = tmp_path / ".unitares" / _slot_filename(SLOT)
+    _seed_cache(cache, client_session_id="agent:/thread-123")
+    stdout, onboards = _serve(
+        tmp_path,
+        hook_payload={"session_id": SLOT, "source": "resume"},
+        extra_env={
+            "UNITARES_CLIENT_SESSION_ID": "agent:/thread-123",
+            "UNITARES_ORCHESTRATED": "1",
+            "UNITARES_ORCHESTRATED_OWNER_PID": "12345",
+            "UNITARES_HOOK_HOST_PID": "12345",
+        },
+    )
+    assert onboards == []
+    data = json.loads(cache.read_text())
+    assert data.get("prior_process") is not True
+    assert data["uuid"] == UUID and data["client_session_id"] == "agent:/thread-123"
+    assert "anchored session" in _context(stdout)
+
+
 def test_resume_with_home_only_binding_writes_a_complete_marked_cache(tmp_path):
     workspace = tmp_path / "elsewhere"
     workspace.mkdir()

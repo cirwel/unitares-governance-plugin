@@ -705,7 +705,9 @@ fi
 # predecessor as parent, per the ontology) stays allowed. The whole resolved
 # binding is merged with the marker, so a binding found only in the HOME
 # mirror is written out complete rather than shadowed by an identity-less file.
-if [[ "${EAGER_SOURCE}" == "resume" && -n "${EAGER_EXISTING}" ]]; then
+# Orchestrated anchors (ANCHOR_RESUME_ENABLED=1, e.g. Discord / dispatch_beam)
+# deliberately keep one identity across turns, so their cache stays usable.
+if [[ "${EAGER_SOURCE}" == "resume" && "${ANCHOR_RESUME_ENABLED}" != "1" && -n "${EAGER_EXISTING}" ]]; then
   EAGER_INHERITED=$(python3 - "${PLUGIN_ROOT}/scripts" "${SESSION_START_STDIN}" <<'PY' 2>/dev/null || true
 import json
 import sys
