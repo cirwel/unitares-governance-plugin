@@ -47,7 +47,9 @@ from governance_call_inject import (  # noqa: E402
     GATEWAY_SUFFIXES,
     INJECT_SUFFIXES,
     PROOF_FIELDS,
+    SLOT_BOUND_PROOF_FIELDS,
 )
+from governance_tool_name import parse_mcp_tool_name  # noqa: E402
 from _http_auth import authorization_safe_urlopen, read_limited_response  # noqa: E402
 from _redact import sanitize_model_visible_payload  # noqa: E402
 from onboard_helper import (  # noqa: E402
@@ -80,6 +82,19 @@ class RequestBodyError(ValueError):
     def __init__(self, status: int, message: str) -> None:
         super().__init__(message)
         self.status = status
+
+
+#: use_tool layers the sidecar unwraps before it refuses the call outright.
+MAX_GATEWAY_DEPTH = 4
+
+
+def _tool_key(value: object) -> str:
+    """Normalized tool name: trimmed, casefolded, MCP prefix removed."""
+    if not isinstance(value, str):
+        return ""
+    stripped = value.strip()
+    parsed = parse_mcp_tool_name(stripped)
+    return parsed[1] if parsed else stripped.casefold()
 
 
 class ForeignSlotProofError(ValueError):
@@ -461,31 +476,43 @@ class IdentitySidecar:
             arguments.setdefault("force_new", True)
             arguments.setdefault("name", self.agent_name)
             arguments.setdefault("model_type", self.model_type)
-        elif name in INJECT_SUFFIXES:
+        elif _tool_key(name) in INJECT_SUFFIXES:
             ensured = self.ensure_session(slot)
             lifecycle["ensure_session"] = {k: v for k, v in ensured.items() if k != "session"}
             sid = ensured.get("client_session_id")
             authority = ensured.get("session")
             if not isinstance(authority, dict):
                 authority = ensured
-            proof_sources = [("", arguments)]
-            gateway_name = name
+            # Top level: every proof field. Inside use_tool layers only the
+            # slot-bound proofs, as the PreToolUse hook does: agent_id and
+            # agent_uuid there commonly name the agent a tool should look up.
+            proof_sources = [("", arguments, PROOF_FIELDS)]
+            gateway_name = _tool_key(name)
             gateway_arguments = arguments
             gateway_prefix = ""
+            depth = 0
             while gateway_name in GATEWAY_SUFFIXES:
                 nested = gateway_arguments.get("arguments")
-                if isinstance(nested, dict):
-                    gateway_prefix += "arguments."
-                    proof_sources.append((gateway_prefix, nested))
-                    target = gateway_arguments.get("tool_name")
-                    gateway_name = target.strip().casefold() if isinstance(target, str) else ""
-                    gateway_arguments = nested
-                    continue
-                break
+                if nested is None:
+                    break
+                if not isinstance(nested, dict):
+                    raise ForeignSlotProofError(
+                        "sidecar refuses use_tool arguments that are not an object: "
+                        + gateway_prefix + "arguments"
+                    )
+                depth += 1
+                if depth > MAX_GATEWAY_DEPTH:
+                    raise ForeignSlotProofError(
+                        f"sidecar refuses use_tool nested more than {MAX_GATEWAY_DEPTH} deep"
+                    )
+                gateway_prefix += "arguments."
+                proof_sources.append((gateway_prefix, nested, SLOT_BOUND_PROOF_FIELDS))
+                gateway_name = _tool_key(gateway_arguments.get("tool_name"))
+                gateway_arguments = nested
             provided = [
                 (prefix, field, value)
-                for prefix, source in proof_sources
-                for field in PROOF_FIELDS
+                for prefix, source, fields in proof_sources
+                for field in fields
                 if (value := source.get(field)) is not None
                 and (not isinstance(value, str) or value.strip())
             ]

@@ -554,7 +554,7 @@ def test_foreign_explicit_proof_cannot_override_configured_slot(tmp_path: Path, 
     assert FakeGovernanceHandler.calls == []
 
 
-@pytest.mark.parametrize("proof_field", identity_sidecar.PROOF_FIELDS)
+@pytest.mark.parametrize("proof_field", identity_sidecar.SLOT_BOUND_PROOF_FIELDS)
 def test_foreign_nested_gateway_proof_cannot_override_configured_slot(
     tmp_path: Path,
     fake_server: str,
@@ -582,6 +582,102 @@ def test_foreign_nested_gateway_proof_cannot_override_configured_slot(
 
     assert status == 409
     assert f"arguments.{proof_field}" in payload["error"]
+    assert FakeGovernanceHandler.calls == []
+
+
+def _slot_a(sidecar) -> None:
+    sidecar.write_session("slot-a", {
+        "uuid": "11111111-2222-4333-8444-555555555555",
+        "agent_id": "Sidecar_Test",
+        "client_session_id": "agent-sidecar-111",
+        "schema_version": 2,
+        "slot": "slot-a",
+    })
+
+
+@pytest.mark.parametrize("target_field", ["agent_id", "agent_uuid"])
+def test_nested_lookup_target_is_not_treated_as_a_slot_proof(
+    tmp_path: Path, fake_server: str, target_field: str,
+) -> None:
+    sidecar = _sidecar(tmp_path, fake_server)
+    _slot_a(sidecar)
+
+    status, _payload = sidecar.tool_call(
+        {
+            "name": "use_tool",
+            "arguments": {
+                "tool_name": "observe",
+                "arguments": {target_field: "another-agent"},
+            },
+        },
+        headers={},
+    )
+
+    assert status == 200
+    sent = FakeGovernanceHandler.calls[0]["arguments"]
+    assert sent["client_session_id"] == "agent-sidecar-111"
+    assert sent["arguments"][target_field] == "another-agent"
+
+
+@pytest.mark.parametrize(
+    "outer_name, inner_tool",
+    [
+        ("USE_TOOL", "knowledge"),
+        (" use_tool ", "knowledge"),
+        ("mcp__unitares-governance__use_tool", "knowledge"),
+        ("use_tool", "mcp__unitares__use_tool"),
+    ],
+)
+def test_gateway_name_variants_cannot_skip_the_nested_proof_check(
+    tmp_path: Path, fake_server: str, outer_name: str, inner_tool: str,
+) -> None:
+    sidecar = _sidecar(tmp_path, fake_server)
+    _slot_a(sidecar)
+    inner = {"action": "search", "client_session_id": "agent-foreign-111"}
+    if inner_tool != "knowledge":
+        inner = {"tool_name": "knowledge", "arguments": inner}
+
+    status, payload = sidecar.tool_call(
+        {"name": outer_name, "arguments": {"tool_name": inner_tool, "arguments": inner}},
+        headers={},
+    )
+
+    assert status == 409, payload
+    assert "client_session_id" in payload["error"]
+    assert FakeGovernanceHandler.calls == []
+
+
+@pytest.mark.parametrize("nested", ['{"client_session_id": "agent-foreign-111"}', ["x"], 7])
+def test_non_object_gateway_arguments_are_refused(
+    tmp_path: Path, fake_server: str, nested: object,
+) -> None:
+    sidecar = _sidecar(tmp_path, fake_server)
+    _slot_a(sidecar)
+
+    status, payload = sidecar.tool_call(
+        {"name": "use_tool", "arguments": {"tool_name": "knowledge", "arguments": nested}},
+        headers={},
+    )
+
+    assert status == 409
+    assert "not an object" in payload["error"]
+    assert FakeGovernanceHandler.calls == []
+
+
+def test_gateway_nesting_beyond_the_cap_is_refused(tmp_path: Path, fake_server: str) -> None:
+    sidecar = _sidecar(tmp_path, fake_server)
+    _slot_a(sidecar)
+    inner: dict = {"action": "search"}
+    for _ in range(identity_sidecar.MAX_GATEWAY_DEPTH + 1):
+        inner = {"tool_name": "use_tool", "arguments": inner}
+
+    status, payload = sidecar.tool_call(
+        {"name": "use_tool", "arguments": inner},
+        headers={},
+    )
+
+    assert status == 409
+    assert "nested more than" in payload["error"]
     assert FakeGovernanceHandler.calls == []
 
 
