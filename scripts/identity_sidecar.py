@@ -43,7 +43,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from audit_identity_contract import audit_checkin_log, audit_session_caches, parse_since  # noqa: E402
 from checkin import _plugin_version, submit_checkin  # noqa: E402
-from governance_call_inject import INJECT_SUFFIXES, PROOF_FIELDS  # noqa: E402
+from governance_call_inject import (  # noqa: E402
+    GATEWAY_SUFFIXES,
+    INJECT_SUFFIXES,
+    PROOF_FIELDS,
+    SLOT_BOUND_PROOF_FIELDS,
+)
+from governance_tool_name import parse_mcp_tool_name  # noqa: E402
 from _http_auth import authorization_safe_urlopen, read_limited_response  # noqa: E402
 from _redact import sanitize_model_visible_payload  # noqa: E402
 from onboard_helper import (  # noqa: E402
@@ -76,6 +82,19 @@ class RequestBodyError(ValueError):
     def __init__(self, status: int, message: str) -> None:
         super().__init__(message)
         self.status = status
+
+
+#: use_tool layers the sidecar unwraps before it refuses the call outright.
+MAX_GATEWAY_DEPTH = 4
+
+
+def _tool_key(value: object) -> str:
+    """Normalized tool name: trimmed, casefolded, MCP prefix removed."""
+    if not isinstance(value, str):
+        return ""
+    stripped = value.strip()
+    parsed = parse_mcp_tool_name(stripped)
+    return parsed[1] if parsed else stripped.casefold()
 
 
 class ForeignSlotProofError(ValueError):
@@ -457,22 +476,49 @@ class IdentitySidecar:
             arguments.setdefault("force_new", True)
             arguments.setdefault("name", self.agent_name)
             arguments.setdefault("model_type", self.model_type)
-        elif name in INJECT_SUFFIXES:
+        elif _tool_key(name) in INJECT_SUFFIXES:
             ensured = self.ensure_session(slot)
             lifecycle["ensure_session"] = {k: v for k, v in ensured.items() if k != "session"}
             sid = ensured.get("client_session_id")
             authority = ensured.get("session")
             if not isinstance(authority, dict):
                 authority = ensured
-            provided = {
-                field: value
-                for field in PROOF_FIELDS
-                if (value := arguments.get(field)) is not None
+            # Top level: every proof field. Inside use_tool layers only the
+            # slot-bound proofs, as the PreToolUse hook does: agent_id and
+            # agent_uuid there commonly name the agent a tool should look up.
+            proof_sources = [("", arguments, PROOF_FIELDS)]
+            gateway_name = _tool_key(name)
+            gateway_arguments = arguments
+            gateway_prefix = ""
+            depth = 0
+            while gateway_name in GATEWAY_SUFFIXES:
+                nested = gateway_arguments.get("arguments")
+                if nested is None:
+                    break
+                if not isinstance(nested, dict):
+                    raise ForeignSlotProofError(
+                        "sidecar refuses use_tool arguments that are not an object: "
+                        + gateway_prefix + "arguments"
+                    )
+                depth += 1
+                if depth > MAX_GATEWAY_DEPTH:
+                    raise ForeignSlotProofError(
+                        f"sidecar refuses use_tool nested more than {MAX_GATEWAY_DEPTH} deep"
+                    )
+                gateway_prefix += "arguments."
+                proof_sources.append((gateway_prefix, nested, SLOT_BOUND_PROOF_FIELDS))
+                gateway_name = _tool_key(gateway_arguments.get("tool_name"))
+                gateway_arguments = nested
+            provided = [
+                (prefix, field, value)
+                for prefix, source, fields in proof_sources
+                for field in fields
+                if (value := source.get(field)) is not None
                 and (not isinstance(value, str) or value.strip())
-            }
+            ]
             mismatched = [
-                field
-                for field, value in provided.items()
+                f"{prefix}{field}"
+                for prefix, field, value in provided
                 if not isinstance(value, str)
                 or not isinstance(authority.get(field), str)
                 or value.strip() != str(authority.get(field)).strip()
@@ -482,7 +528,8 @@ class IdentitySidecar:
                     "sidecar proof does not match its configured slot binding: "
                     + ", ".join(sorted(mismatched))
                 )
-            if isinstance(sid, str) and sid.strip() and not provided:
+            top_level_provided = any(not prefix for prefix, _field, _value in provided)
+            if isinstance(sid, str) and sid.strip() and not top_level_provided:
                 arguments["client_session_id"] = sid.strip()
                 lifecycle["session_proof_injected"] = True
         return arguments, lifecycle
