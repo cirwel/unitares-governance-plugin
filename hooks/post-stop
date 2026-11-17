@@ -312,18 +312,6 @@ if [[ -z "${CSID:-}" ]]; then
   exit 0
 fi
 
-# Tool outcomes for the part of the transcript this Stop closes (Claude only:
-# its Stop payload names the transcript and carries no tool calls). Counts
-# only, sent as identity-bound host evidence; nothing in it is scored and it
-# does not touch the check-in below. Disable with UNITARES_TOOL_OUTCOMES=off.
-if [[ "${HOOK_HOST}" == "claude" && -f "${PLUGIN_ROOT}/scripts/tool_outcomes.py" ]]; then
-  printf '%s' "${PAYLOAD}" | python3 "${PLUGIN_ROOT}/scripts/tool_outcomes.py" \
-    --uuid "${UUID}" \
-    --client-session-id "${CSID}" \
-    --slot "${SLOT:-${RAW_SLOT:-}}" \
-    --server-url "${SERVER_URL}" \
-    >/dev/null 2>&1 || true
-fi
 
 SUMMARY=$(_stop_field summary)
 COMPLEXITY=$(_stop_field complexity)
@@ -353,5 +341,19 @@ python3 "${PLUGIN_ROOT}/scripts/checkin.py" \
   --harness-version "${HARNESS_VERSION}" \
   --harness-source "${HARNESS_SOURCE}" \
   >/dev/null 2>&1 || true
+
+# Optional outcome evidence follows the primary check-in so it cannot delay it.
+# Tool outcomes for the part of the transcript this Stop closes. Counts
+# only, sent as identity-bound host evidence; nothing in it is scored and it
+# does not alter the check-in above. Disable with UNITARES_TOOL_OUTCOMES=off.
+if [[ ( "${HOOK_HOST}" == "claude" || "${HOOK_HOST}" == "codex" ) && -f "${PLUGIN_ROOT}/scripts/tool_outcomes.py" ]]; then
+  printf '%s' "${PAYLOAD}" | python3 "${PLUGIN_ROOT}/scripts/tool_outcomes.py" \
+    --host "${HOOK_HOST}" \
+    --uuid "${UUID}" \
+    --client-session-id "${CSID}" \
+    --slot "${RAW_SLOT:-${SLOT:-}}" \
+    --server-url "${SERVER_URL}" \
+    >/dev/null 2>&1 || true
+fi
 
 exit 0

@@ -164,6 +164,8 @@ def test_post_stop_orchestrated_anchor_resumes(tmp_path):
         extra_env={
             "UNITARES_CLIENT_SESSION_ID": "agent:/thread-123",
             "UNITARES_ORCHESTRATED": "yes",
+            "UNITARES_ORCHESTRATED_OWNER_PID": "12345",
+            "UNITARES_HOOK_HOST_PID": "12345",
         },
         return_all=True,
     )
@@ -174,6 +176,23 @@ def test_post_stop_orchestrated_anchor_resumes(tmp_path):
     assert "force_new" not in args
     assert "parent_agent_id" not in args
     assert "#" not in args["name"]
+
+
+def test_post_stop_unmarked_anchor_does_not_resume(tmp_path):
+    calls = _run_hook_with_mock_server(
+        "post-stop",
+        tmp_path,
+        "turn-slot-unmarked-anchor",
+        extra_env={
+            "UNITARES_CLIENT_SESSION_ID": "agent:/thread-123",
+            "UNITARES_ORCHESTRATED": "yes",
+        },
+        return_all=True,
+    )
+    args = _onboard_args(calls)
+    assert args["force_new"] is True
+    assert "client_session_id" not in args
+    assert "orchestrated" not in args
 
 
 def test_session_end_does_not_duplicate_stop_checkin(tmp_path):

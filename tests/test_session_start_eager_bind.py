@@ -126,12 +126,14 @@ def test_existing_slot_cache_is_not_reminted(tmp_path):
     assert onboards == []
 
 
-def test_orchestrated_anchor_is_left_to_resume(tmp_path):
+def test_unowned_orchestrated_anchor_does_not_resume(tmp_path):
     _, onboards = _serve(
         tmp_path, claude_session_id=SLOT,
         extra_env={"UNITARES_CLIENT_SESSION_ID": "agent:/thread-x",
                    "UNITARES_ORCHESTRATED": "1"})
-    assert onboards == []
+    assert len(onboards) == 1
+    assert onboards[0]["arguments"]["force_new"] is True
+    assert "client_session_id" not in onboards[0]["arguments"]
 
 
 def test_home_mirror_counts_as_bound(tmp_path):
@@ -195,6 +197,26 @@ def test_resume_marks_the_inherited_cache(tmp_path):
     data = json.loads(cache.read_text())
     assert data["prior_process"] is True
     assert data["uuid"] == UUID and data["client_session_id"] == CSID
+
+
+def test_anchored_resume_preserves_usable_cache_without_prior_process_marker(tmp_path):
+    cache = tmp_path / ".unitares" / _slot_filename(SLOT)
+    _seed_cache(cache, client_session_id="agent:/thread-123")
+    stdout, onboards = _serve(
+        tmp_path,
+        hook_payload={"session_id": SLOT, "source": "resume"},
+        extra_env={
+            "UNITARES_CLIENT_SESSION_ID": "agent:/thread-123",
+            "UNITARES_ORCHESTRATED": "1",
+            "UNITARES_ORCHESTRATED_OWNER_PID": "12345",
+            "UNITARES_HOOK_HOST_PID": "12345",
+        },
+    )
+    assert onboards == []
+    data = json.loads(cache.read_text())
+    assert data.get("prior_process") is not True
+    assert data["uuid"] == UUID and data["client_session_id"] == "agent:/thread-123"
+    assert "anchored session" in _context(stdout)
 
 
 def test_resume_with_home_only_binding_writes_a_complete_marked_cache(tmp_path):

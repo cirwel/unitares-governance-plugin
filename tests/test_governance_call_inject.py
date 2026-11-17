@@ -9,6 +9,7 @@ scripts/governance_call_inject.py for the full contract.
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -313,26 +314,47 @@ class TestAnchoredMintingTools:
         # of falling back to server-side pin/name heuristics.
         monkeypatch.setenv("UNITARES_CLIENT_SESSION_ID", "agent:/thread-123")
         monkeypatch.setenv("UNITARES_ORCHESTRATED", "1")
+        monkeypatch.setenv("UNITARES_ORCHESTRATED_OWNER_PID", "12345")
+        monkeypatch.setenv("UNITARES_HOOK_HOST_PID", "12345")
         result = _run(_hook_input(
             "mcp__unitares-governance__start_session", {}), tmp_path)
         updated = _updated_input(result)
         assert updated is not None
         assert updated["client_session_id"] == "agent:/thread-123"
+        assert updated["orchestrated"] is True
 
     def test_anchored_onboard_without_force_new_injects_env_anchor(self, tmp_path, monkeypatch):
         monkeypatch.setenv("UNITARES_CLIENT_SESSION_ID", "agent:/thread-123")
         monkeypatch.setenv("UNITARES_ORCHESTRATED", "yes")
+        monkeypatch.setenv("UNITARES_ORCHESTRATED_OWNER_PID", "12345")
+        monkeypatch.setenv("UNITARES_HOOK_HOST_PID", "12345")
         result = _run(_hook_input(
             "mcp__unitares-governance__onboard", {"name": "claude-thread"}), tmp_path)
         updated = _updated_input(result)
         assert updated is not None
         assert updated["name"] == "claude-thread"
         assert updated["client_session_id"] == "agent:/thread-123"
+        assert updated["orchestrated"] is True
 
     def test_unanchored_bare_start_session_stays_bare(self, tmp_path, monkeypatch):
         monkeypatch.delenv("UNITARES_CLIENT_SESSION_ID", raising=False)
         result = _run(_hook_input(
             "mcp__unitares-governance__start_session", {}), tmp_path)
+        assert result.stdout.strip() == ""
+
+    def test_unmarked_anchor_cannot_first_bind(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("UNITARES_CLIENT_SESSION_ID", "agent:/thread-123")
+        monkeypatch.setenv("UNITARES_ORCHESTRATED", "1")
+        monkeypatch.delenv("UNITARES_ORCHESTRATED_OWNER_PID", raising=False)
+        result = _run(_hook_input("mcp__unitares-governance__start_session", {}), tmp_path)
+        assert result.stdout.strip() == ""
+
+    def test_direct_hook_rejects_mismatched_owner(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("UNITARES_CLIENT_SESSION_ID", "agent:/thread-123")
+        monkeypatch.setenv("UNITARES_ORCHESTRATED", "1")
+        monkeypatch.setenv("UNITARES_ORCHESTRATED_OWNER_PID", "12345")
+        monkeypatch.delenv("UNITARES_HOOK_HOST_PID", raising=False)
+        result = _run(_hook_input("mcp__unitares-governance__start_session", {}), tmp_path)
         assert result.stdout.strip() == ""
 
     def test_leaked_anchor_without_orchestration_marker_stays_bare(self, tmp_path, monkeypatch):
@@ -351,11 +373,73 @@ class TestAnchoredMintingTools:
             "mcp__unitares-governance__start_session", {"force_new": True}), tmp_path)
         assert result.stdout.strip() == ""
 
-    def test_force_new_key_blocks_anchor_injection_even_when_false(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize("declared", [
+        {"parent_agent_id": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"},
+        {"spawn_reason": "subagent"},
+        {"orchestrated": False},
+        {"resume": False},
+    ])
+    def test_declared_child_or_explicit_mode_is_not_rewritten(self, tmp_path, monkeypatch, declared):
         monkeypatch.setenv("UNITARES_CLIENT_SESSION_ID", "agent:/thread-123")
-        result = _run(_hook_input(
-            "mcp__unitares-governance__start_session", {"force_new": False}), tmp_path)
+        monkeypatch.setenv("UNITARES_ORCHESTRATED", "1")
+        monkeypatch.setenv("UNITARES_ORCHESTRATED_OWNER_PID", "12345")
+        monkeypatch.setenv("UNITARES_HOOK_HOST_PID", "12345")
+        result = _run(_hook_input("mcp__unitares-governance__start_session", declared), tmp_path)
         assert result.stdout.strip() == ""
+
+    @pytest.mark.parametrize("force_new", [False, "false", "0"])
+    def test_false_force_new_still_attaches_first_bind(self, tmp_path, monkeypatch, force_new):
+        monkeypatch.setenv("UNITARES_CLIENT_SESSION_ID", "agent:/thread-123")
+        monkeypatch.setenv("UNITARES_ORCHESTRATED", "1")
+        monkeypatch.setenv("UNITARES_ORCHESTRATED_OWNER_PID", "12345")
+        monkeypatch.setenv("UNITARES_HOOK_HOST_PID", "12345")
+        result = _run(_hook_input(
+            "mcp__unitares-governance__start_session", {"force_new": force_new}), tmp_path)
+        assert _updated_input(result)["orchestrated"] is True
+
+    @pytest.mark.parametrize("host,manifest,root_var", [
+        ("claude", "claude-hooks.json", "CLAUDE_PLUGIN_ROOT"),
+        ("codex", "codex-hooks.json", "PLUGIN_ROOT"),
+    ])
+    def test_manifest_command_scopes_anchor_to_launched_cli(
+        self, tmp_path, host, manifest, root_var,
+    ):
+        payload = json.dumps(_hook_input("mcp__unitares-governance__start_session", {}))
+        entries = json.loads((PLUGIN_ROOT / "hooks" / manifest).read_text())["hooks"]["PreToolUse"]
+        command = next(entry["hooks"][0]["command"] for entry in entries
+                       if "pre-governance-call" in str(entry))
+        env = {
+            **os.environ,
+            root_var: str(PLUGIN_ROOT),
+            "UNITARES_CLIENT_SESSION_ID": "agent:/thread-123",
+            "UNITARES_ORCHESTRATED": "1",
+            "UNITARES_ORCHESTRATED_OWNER_PID": str(os.getpid()),
+        }
+        owner = subprocess.run(
+            ["/bin/sh", "-c", command],
+            input=payload, text=True, capture_output=True, cwd=tmp_path, env=env, timeout=10,
+        )
+        assert owner.returncode == 0
+        assert owner.stderr.strip() == ""
+        assert _updated_input(owner)["orchestrated"] is True
+
+        # A reviewer CLI launched by that host inherits the same env, but its
+        # hook-host PID differs. No thread anchor reaches its governance call.
+        env["UNITARES_ORCHESTRATED_OWNER_PID"] = "1"
+        child = subprocess.run(
+            ["/bin/sh", "-c", command],
+            input=payload, text=True, capture_output=True, cwd=tmp_path, env=env, timeout=10,
+        )
+        assert child.returncode == 0
+        assert child.stdout.strip() == ""
+
+        env.pop("UNITARES_ORCHESTRATED_OWNER_PID")
+        unmarked = subprocess.run(
+            ["/bin/sh", "-c", command],
+            input=payload, text=True, capture_output=True, cwd=tmp_path, env=env, timeout=10,
+        )
+        assert unmarked.returncode == 0
+        assert unmarked.stdout.strip() == ""
 
     def test_explicit_proof_field_blocks_anchor_injection(self, tmp_path, monkeypatch):
         monkeypatch.setenv("UNITARES_CLIENT_SESSION_ID", "agent:/thread-123")
@@ -364,6 +448,30 @@ class TestAnchoredMintingTools:
             {"client_session_id": "agent:/explicit"},
         ), tmp_path)
         assert result.stdout.strip() == ""
+
+    def test_codex_fallback_skips_hook_runner_without_owner_check(self, tmp_path):
+        cache = tmp_path / "cache"
+        legacy = cache / "0.4.9" / "hooks" / "run-hook.cmd"
+        safe = cache / "0.4.31" / "hooks" / "run-hook.cmd"
+        for path in (legacy, safe):
+            path.parent.mkdir(parents=True)
+            path.write_text(
+                "#!/bin/sh\n"
+                + ("# UNITARES_ORCHESTRATED_OWNER_PID\n" if path == safe else "")
+                + f"printf '%s\\n' {'safe' if path == safe else 'legacy'}\n"
+            )
+            path.chmod(0o755)
+
+        entries = json.loads((PLUGIN_ROOT / "hooks" / "codex-hooks.json").read_text())["hooks"]["PreToolUse"]
+        command = next(entry["hooks"][0]["command"] for entry in entries
+                       if "pre-governance-call" in str(entry))
+        result = subprocess.run(
+            ["/bin/sh", "-c", command],
+            env={"PATH": os.environ.get("PATH", ""), "PLUGIN_ROOT": str(cache / "removed")},
+            text=True, capture_output=True, timeout=10,
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "safe"
 
 
 class TestExclusions:

@@ -26,10 +26,12 @@ Contract:
   verified to accept client_session_id (schemas inherit AgentIdentityMixin
   server-side). Unknown/new tools get NO injection — they degrade to today's
   pin behavior rather than risking an extra-field validation error.
-- For identity minting tools, only fires for orchestrated anchored bare
+- For identity minting tools, only fires for orchestrated anchored
   onboard/start_session calls: UNITARES_CLIENT_SESSION_ID and a truthy
   UNITARES_ORCHESTRATED marker must both be present, and force_new must be
-  absent. Explicit force_new and explicit proof fields still win. Never
+  false. A process-owned anchor adds orchestrated=true so strict first bind
+  succeeds; an unmarked or inherited anchor is ignored.
+  Explicit fresh mint and explicit proof fields still win. Never
   injects into bind_session/identity.
 - Denies a force_new onboard/start_session when the slot cache already names
   an identity and the call declares neither parent_agent_id nor a deliberate
@@ -288,6 +290,9 @@ def _env_anchor() -> str:
     orchestrated = os.environ.get("UNITARES_ORCHESTRATED", "").strip().lower()
     if orchestrated not in {"1", "true", "yes", "on"}:
         return ""
+    owner = os.environ.get("UNITARES_ORCHESTRATED_OWNER_PID", "").strip()
+    if not owner or owner != os.environ.get("UNITARES_HOOK_HOST_PID", "").strip():
+        return ""
     value = os.environ.get("UNITARES_CLIENT_SESSION_ID", "")
     return value.strip()
 
@@ -414,8 +419,19 @@ def main(argv: list[str] | None = None) -> int:
             if duplicate:
                 print(json.dumps(_deny_output(duplicate)))
                 return 0
-        if anchor and "force_new" not in tool_input and not _has_proof_field(tool_input):
+        if (
+            anchor
+            and not _truthy(tool_input.get("force_new"))
+            and not _has_proof_field(tool_input)
+            and not tool_input.get("parent_agent_id")
+            and not tool_input.get("spawn_reason")
+            and "orchestrated" not in tool_input
+            and "resume" not in tool_input
+        ):
             updated["client_session_id"] = anchor
+            # The process-owner check in _env_anchor authorizes this first-bind
+            # declaration; inherited or unmarked env pairs never reach here.
+            updated["orchestrated"] = True
             changed = True
         if not changed:
             return 0

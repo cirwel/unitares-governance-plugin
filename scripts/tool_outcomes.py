@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Count what the host's transcript says happened to tool calls (Claude Stop).
+"""Count what the host's transcript says happened to tool calls at Stop.
+
+Claude tool-use/result blocks are collected here; Codex's native completed
+items are handled by ``codex_tool_outcomes``. Both use the same bound,
+counts-only delivery. Codex additionally reports unknown terminal statuses.
 
 The Claude Stop payload carries no tool calls, so the per-turn check-in says
 "tool count unavailable". The host does write every tool call and its result to
@@ -107,15 +111,16 @@ def enabled() -> bool:
     )
 
 
-def ledger_path(home: Path, slot: str) -> Path:
+def ledger_path(home: Path, slot: str, host: str = "claude") -> Path:
     configured = os.environ.get("UNITARES_TOOL_OUTCOMES_DIR")
     root = (
         Path(configured).expanduser().resolve()
         if configured
-        else home / ".unitares" / LEDGER_DIRNAME
+        else home / ".unitares" / (LEDGER_DIRNAME if host == "claude" else "codex-tool-outcomes")
     )
     # Named by digest only: the raw host session id is not written anywhere.
-    return root / f"outcomes-{_slot_hash(slot)}.json"
+    key = slot if host == "claude" else f"{host}:{slot}"
+    return root / f"outcomes-{_slot_hash(key)}.json"
 
 
 def _slot_hash(slot: str) -> str:
@@ -383,14 +388,19 @@ def advance(
     slot: str,
     *,
     home: Path | None = None,
+    host: str = "claude",
 ) -> tuple[dict[str, Any], dict[str, Any]] | None:
     """Collect one window and store the cursor, under the slot's lock."""
-    path = ledger_path(home or Path.home(), slot)
+    path = ledger_path(home or Path.home(), slot, host)
     with _state_lock(path, timeout_s=_lock_timeout_s()):
         state = _read_state(path)
         if state.get("slot_hash") not in (None, _slot_hash(slot)):
             state = {}
-        collected = collect_window(transcript_path, state)
+        if host == "codex":
+            from codex_tool_outcomes import collect_window as collect_codex
+            collected = collect_codex(transcript_path, state, slot=slot)
+        else:
+            collected = collect_window(transcript_path, state)
         if collected is None:
             return None
         counts, next_state = collected
@@ -409,6 +419,7 @@ def build_payload(
     slot: str,
     plugin_version: str,
     now: float | None = None,
+    host: str = "claude",
 ) -> dict[str, Any]:
     observed_at = datetime.fromtimestamp(
         time.time() if now is None else now, timezone.utc
@@ -421,11 +432,11 @@ def build_payload(
         str(state.get("window_start")),
         str(state.get("offset")),
     ])
-    return {
+    result = {
         "agent_uuid": agent_uuid,
         "client_session_id": client_session_id,
         "observation_kind": OBSERVATION_KIND,
-        "host_family": "claude",
+        "host_family": host,
         "execution_mode": "unknown",
         "execution_mode_source": "unspecified",
         "slot_hash": _slot_hash(slot),
@@ -441,6 +452,9 @@ def build_payload(
             "window_basis",
         )},
     }
+    if "tool_unknown_status_delta" in counts:
+        result["tool_unknown_status_delta"] = counts["tool_unknown_status_delta"]
+    return result
 
 
 def run(
@@ -452,8 +466,11 @@ def run(
     server_url: str,
     home: Path | None = None,
     sender: Any = None,
+    host: str = "claude",
 ) -> str:
     """Count the window this Stop closes and post it. Returns a status word."""
+    if host not in {"claude", "codex"}:
+        return "skip_unsupported_host"
     if not enabled():
         return "skip_disabled"
     if not agent_uuid or not client_session_id or not slot:
@@ -465,18 +482,25 @@ def run(
     if not isinstance(payload, dict):
         return "skip_invalid_payload"
     try:
-        advanced = advance(payload.get("transcript_path"), slot, home=home)
+        # A supplied transcript must belong to this hook's session. Codex also
+        # checks the file's session_meta before reading any event window.
+        if host == "codex" and payload.get("session_id") != slot:
+            return "skip_session_mismatch"
+        advanced = advance(payload.get("transcript_path"), slot, home=home, host=host)
     except Exception:
         return "ledger_error"
     if advanced is None:
         return "skip_no_transcript"
     counts, state = advanced
-    if state.get("offset") == state.get("window_start") and counts["tool_delta"] == 0:
+    if (state.get("offset") == state.get("window_start")
+            and counts["tool_delta"] == 0 and not counts["window_truncated"]):
         return "skip_nothing_new"
     from checkin import _plugin_version
 
     if sender is None:
-        from runtime_observer import _post_runtime as sender
+        from functools import partial
+        from runtime_observer import _post_runtime, DEFAULT_HTTP_TIMEOUT_S
+        sender = partial(_post_runtime, timeout=2.0 if host == "codex" else DEFAULT_HTTP_TIMEOUT_S)
     body = build_payload(
         counts,
         state,
@@ -484,6 +508,7 @@ def run(
         client_session_id=client_session_id,
         slot=slot,
         plugin_version=_plugin_version(),
+        host=host,
     )
     try:
         return "sent" if sender(server_url, body) else "post_failed"
@@ -492,7 +517,8 @@ def run(
 
 
 def _cli() -> int:
-    parser = argparse.ArgumentParser(description="Post Claude tool outcomes for one Stop")
+    parser = argparse.ArgumentParser(description="Post host tool outcomes for one Stop")
+    parser.add_argument("--host", choices=("claude", "codex"), default="claude")
     parser.add_argument("--uuid", default="")
     parser.add_argument("--client-session-id", default="")
     parser.add_argument("--slot", default="")
@@ -505,6 +531,7 @@ def _cli() -> int:
         client_session_id=args.client_session_id.strip(),
         slot=args.slot.strip(),
         server_url=args.server_url,
+        host=args.host,
     ))
     return 0
 

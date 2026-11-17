@@ -69,6 +69,24 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SCRIPT_NAME="$1"
 shift
+# Dispatch sets this to the PID of the CLI it launches. A nested CLI inherits
+# the thread anchor but has a different hook host PID; it must not resume the
+# dispatch turn's identity. Keep the check here so SessionStart, PreToolUse and
+# Stop all see the same process-scoped environment. An unmarked anchor also
+# fails closed; older launchers must add the owner marker before upgrading.
+# A launcher that deliberately declares lineage for a nested CLI must clear
+# the inherited anchor/owner first. Otherwise inherited and newly declared
+# lineage are indistinguishable here, so both are discarded.
+UNITARES_HOOK_HOST_PID="$PPID"
+export UNITARES_HOOK_HOST_PID
+if { [ -n "${UNITARES_CLIENT_SESSION_ID:-}" ] \
+        || [ -n "${UNITARES_ORCHESTRATED_OWNER_PID:-}" ]; } \
+    && [ "$UNITARES_HOOK_HOST_PID" != "${UNITARES_ORCHESTRATED_OWNER_PID:-}" ]; then
+    UNITARES_ANCHOR_IGNORED=1
+    export UNITARES_ANCHOR_IGNORED
+    unset UNITARES_CLIENT_SESSION_ID UNITARES_ORCHESTRATED \
+        UNITARES_ORCHESTRATED_OWNER_PID UNITARES_PARENT_AGENT_ID UNITARES_SPAWN_REASON
+fi
 if [ -x /bin/bash ]; then
     BASH_BIN=/bin/bash
 elif [ -x /usr/bin/bash ]; then
@@ -92,9 +110,44 @@ REPORTER="${SCRIPT_DIR}/../scripts/hook_invocations.py"
 if [ "$HOOK_HOST" = "codex" ] && [ -f "$REPORTER" ] && command -v python3 >/dev/null 2>&1; then
     # The child used to be exec'd directly, so its PPID was the hook host.
     # Keep that PID available across the reporting process boundary.
-    UNITARES_HOOK_HOST_PID="$PPID"
-    export UNITARES_HOOK_HOST_PID
     exec python3 "$REPORTER" run --plugin-root "${SCRIPT_DIR}/.." \
         --hook "$SCRIPT_NAME" -- "$BASH_BIN" "${SCRIPT_DIR}/${SCRIPT_NAME}" "$@"
+fi
+# Claude runs the Stop hook asynchronously and kills it when the CLI process
+# exits. A one-shot `claude -p` turn exits within a second of Stop, so the
+# hook never reached its check-in: orchestrated sessions (one process per
+# turn) recorded nothing and were never lazily onboarded. Read the payload
+# now, hand it to a child that ignores the exit signals, and return at once.
+# UNITARES_STOP_DETACH=0 keeps the hook in the foreground. Codex and agy run
+# Stop synchronously and need its stdout, so they are left alone.
+#
+# The ignored signals are inherited by the hook and its helpers, so nothing
+# short of KILL stops one that hangs, and the host no longer ends it at exit.
+# A watchdog therefore kills the hook's process tree after
+# UNITARES_STOP_HOOK_LIMIT_S seconds (default 120; the hook's own onboard and
+# check-in budgets add up to well under that).
+if [ "$SCRIPT_NAME" = "post-stop" ] && [ "$HOOK_HOST" = "claude" ] \
+        && [ "${UNITARES_STOP_DETACH:-1}" != "0" ]; then
+    STOP_PAYLOAD="$(cat 2>/dev/null || true)"
+    STOP_LIMIT="${UNITARES_STOP_HOOK_LIMIT_S:-120}"
+    case "$STOP_LIMIT" in
+        ''|*[!0-9]*) STOP_LIMIT=120 ;;
+    esac
+    (
+        trap '' HUP TERM INT
+        kill_tree() {
+            for child in $(pgrep -P "$1" 2>/dev/null); do
+                kill_tree "$child"
+            done
+            kill -KILL "$1" 2>/dev/null
+        }
+        printf '%s' "$STOP_PAYLOAD" | "$BASH_BIN" "${SCRIPT_DIR}/${SCRIPT_NAME}" "$@" &
+        HOOK_PID=$!
+        ( sleep "$STOP_LIMIT"; kill_tree "$HOOK_PID" ) &
+        WATCHDOG_PID=$!
+        wait "$HOOK_PID"
+        kill_tree "$WATCHDOG_PID"
+    ) </dev/null >/dev/null 2>&1 &
+    exit 0
 fi
 exec "$BASH_BIN" "${SCRIPT_DIR}/${SCRIPT_NAME}" "$@"
