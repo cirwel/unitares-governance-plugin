@@ -1258,16 +1258,17 @@ def test_stop_hook_event_shell_format_and_parent_conversation_subagent(tmp_path,
         old_home = os.environ.get("HOME")
         os.environ["HOME"] = str(fake_home)
         try:
-            assert (
-                stop_hook_event.guard_agy_orchestrated_anchor(
-                    anchor,
-                    str(os.getpid()),
-                    "contended-slot",
-                    claim=True,
-                    lock_timeout_s=0.05,
+            for claim_mode in (True, False):
+                assert (
+                    stop_hook_event.guard_agy_orchestrated_anchor(
+                        anchor,
+                        str(os.getpid()),
+                        "contended-slot",
+                        claim=claim_mode,
+                        lock_timeout_s=0.05,
+                    )
+                    is True
                 )
-                is True
-            )
             # Live holder still holds LOCK_EX (a second non-blocking LOCK_EX from another fd fails).
             probe_fd = os.open(str(lock_file), os.O_RDWR)
             try:

@@ -185,7 +185,7 @@ unset STOP_FORMAT_OK STOP_WORKSPACE_DIR STOP_IS_SUBAGENT STOP_HOST_SESSION_ID \
   STOP_FLOOR_TOOLS STOP_FLOOR_SUMMARY STOP_SUMMARY STOP_COMPLEXITY \
   STOP_MODEL STOP_MODEL_PROVIDER STOP_MODEL_SOURCE \
   STOP_HARNESS_TYPE STOP_HARNESS_VERSION STOP_HARNESS_SOURCE
-STOP_EVENT_ARGS=(--host "${HOOK_HOST}" --workspace "${HOOK_STOP_WORKSPACE}" --format shell)
+STOP_EVENT_ARGS=(--host="${HOOK_HOST}" --workspace="${HOOK_STOP_WORKSPACE}" --format=shell)
 if [[ "${HOOK_MODE}" == "session_start" ]]; then
   STOP_EVENT_ARGS+=(--session-start)
 else
@@ -193,8 +193,8 @@ else
 fi
 if [[ "${HOOK_HOST}" == "agy" && "${ANCHOR_RESUME_ENABLED}" == "1" ]]; then
   STOP_EVENT_ARGS+=(
-    --agy-anchor "${UNITARES_CLIENT_SESSION_ID}"
-    --agy-owner-pid "${UNITARES_ORCHESTRATED_OWNER_PID}"
+    "--agy-anchor=${UNITARES_CLIENT_SESSION_ID}"
+    "--agy-owner-pid=${UNITARES_ORCHESTRATED_OWNER_PID}"
   )
 fi
 if ! STOP_VARS=$(printf '%s' "${PAYLOAD}" | python3 "${STOP_EVENT_HELPER}" \

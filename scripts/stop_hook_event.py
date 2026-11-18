@@ -1047,7 +1047,8 @@ def guard_agy_orchestrated_anchor(
 
     Uses an OS-managed ``fcntl.flock`` advisory lock so crashed/SIGKILLed hooks
     never leave stuck locks, live holders never lose their lock to a waiter,
-    and contended ``claim=True`` (SessionStart) callers fail closed.
+    and contended callers fail closed (already-bound top-level Stop slots keep
+    their cached CSID, while unbound children cannot claim the anchor).
     """
     anchor_clean = (anchor or "").strip()
     pid_clean = (owner_pid or "").strip()
@@ -1080,11 +1081,11 @@ def guard_agy_orchestrated_anchor(
             0o600,
         )
     except OSError:
-        return bool(claim)
+        return True
 
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
-            return bool(claim)
+            return True
         deadline = time.monotonic() + max(0.01, lock_timeout_s)
         acquired = False
         while True:
@@ -1097,10 +1098,10 @@ def guard_agy_orchestrated_anchor(
                     break
                 time.sleep(0.02)
             except OSError:
-                return bool(claim)
+                return True
         if not acquired:
-            # Preserve the live holder's lock; fail closed on SessionStart.
-            return bool(claim)
+            # Preserve the live holder's lock and fail closed for unbound callers.
+            return True
 
         os.lseek(fd, 0, os.SEEK_SET)
         lines = os.read(fd, 4096).decode("utf-8", errors="replace").splitlines()
@@ -1118,7 +1119,7 @@ def guard_agy_orchestrated_anchor(
             os.write(fd, f"{owner_proc_key}\n{slot_clean}\n".encode("utf-8"))
         return False
     except OSError:
-        return bool(claim)
+        return True
     finally:
         try:
             os.close(fd)
