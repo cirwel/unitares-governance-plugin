@@ -1241,4 +1241,44 @@ def test_stop_hook_event_shell_format_and_parent_conversation_subagent(tmp_path,
     )
     assert top_ev.is_subagent is False
 
+    # Contended fcntl.flock held beyond lock_timeout_s preserves the live holder's
+    # lock and fails closed (returns True on claim=True so SessionStart skips binding).
+    import fcntl
+    import hashlib
+    import os
 
+    fake_home = tmp_path / "flock_home"
+    (fake_home / ".unitares").mkdir(parents=True)
+    anchor = "agent:/thread-held-lock"
+    digest = hashlib.sha256(anchor.encode("utf-8")).hexdigest()[:24]
+    lock_file = fake_home / ".unitares" / f".orchestrated-anchor-{digest}"
+    held_fd = os.open(str(lock_file), os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(held_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        old_home = os.environ.get("HOME")
+        os.environ["HOME"] = str(fake_home)
+        try:
+            assert (
+                stop_hook_event.guard_agy_orchestrated_anchor(
+                    anchor,
+                    str(os.getpid()),
+                    "contended-slot",
+                    claim=True,
+                    lock_timeout_s=0.05,
+                )
+                is True
+            )
+            # Live holder still holds LOCK_EX (a second non-blocking LOCK_EX from another fd fails).
+            probe_fd = os.open(str(lock_file), os.O_RDWR)
+            try:
+                with pytest.raises(BlockingIOError):
+                    fcntl.flock(probe_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            finally:
+                os.close(probe_fd)
+        finally:
+            if old_home is None:
+                os.environ.pop("HOME", None)
+            else:
+                os.environ["HOME"] = old_home
+    finally:
+        os.close(held_fd)

@@ -925,4 +925,3 @@ def test_post_stop_timeout_at_most_preserves_float_spellings():
     assert got["2.5"] == "2.5"
     for invalid in ("0", "-1", "nan", "inf", "1e999", "garbage"):
         assert got[invalid] == "15"
-

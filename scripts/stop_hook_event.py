@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
+import hashlib
 import json
 import os
 import re
@@ -12,16 +14,17 @@ import signal
 import stat
 import subprocess
 import sys
+import time
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping
 
 try:
     from _redact import redact_secrets
-    from _slot_from_stdin import host_session_id_from_payload
+    from _slot_from_stdin import host_session_id_from_payload, slot_from_payload
 except ModuleNotFoundError:  # Imported as ``scripts.stop_hook_event`` in tests.
     from scripts._redact import redact_secrets
-    from scripts._slot_from_stdin import host_session_id_from_payload
+    from scripts._slot_from_stdin import host_session_id_from_payload, slot_from_payload
 
 
 SUPPORTED_HOSTS = ("claude", "codex", "agy")
@@ -1032,6 +1035,97 @@ def format_shell_vars(event: StopHookEvent, *, host_session_id: str = "") -> str
     return "\n".join(lines)
 
 
+def guard_agy_orchestrated_anchor(
+    anchor: str,
+    owner_pid: str,
+    slot: str,
+    *,
+    claim: bool,
+    lock_timeout_s: float = 1.0,
+) -> bool:
+    """Return True when ``slot`` must be skipped because another slot in ``owner_pid`` owns ``anchor``.
+
+    Uses an OS-managed ``fcntl.flock`` advisory lock so crashed/SIGKILLed hooks
+    never leave stuck locks, live holders never lose their lock to a waiter,
+    and contended ``claim=True`` (SessionStart) callers fail closed.
+    """
+    anchor_clean = (anchor or "").strip()
+    pid_clean = (owner_pid or "").strip()
+    slot_clean = (slot or "").strip()
+    if not anchor_clean or not slot_clean or not pid_clean.isdigit():
+        return False
+
+    owner_lstart = ""
+    try:
+        proc = subprocess.run(
+            ["ps", "-o", "lstart=", "-p", pid_clean],
+            capture_output=True,
+            text=True,
+            timeout=1.0,
+            check=False,
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            owner_lstart = proc.stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        owner_lstart = ""
+    owner_proc_key = f"{pid_clean}|{owner_lstart}"
+
+    digest = hashlib.sha256(anchor_clean.encode("utf-8")).hexdigest()[:24]
+    state_dir = Path.home() / ".unitares"
+    try:
+        state_dir.mkdir(parents=True, exist_ok=True)
+        fd = os.open(
+            str(state_dir / f".orchestrated-anchor-{digest}"),
+            os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+    except OSError:
+        return bool(claim)
+
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return bool(claim)
+        deadline = time.monotonic() + max(0.01, lock_timeout_s)
+        acquired = False
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(0.02)
+            except OSError:
+                return bool(claim)
+        if not acquired:
+            # Preserve the live holder's lock; fail closed on SessionStart.
+            return bool(claim)
+
+        os.lseek(fd, 0, os.SEEK_SET)
+        lines = os.read(fd, 4096).decode("utf-8", errors="replace").splitlines()
+        recorded_proc_key = lines[0] if len(lines) >= 1 else ""
+        recorded_slot = lines[1] if len(lines) >= 2 else ""
+        if (
+            recorded_proc_key == owner_proc_key
+            and recorded_slot
+            and recorded_slot != slot_clean
+        ):
+            return True
+        if claim:
+            os.lseek(fd, 0, os.SEEK_SET)
+            os.ftruncate(fd, 0)
+            os.write(fd, f"{owner_proc_key}\n{slot_clean}\n".encode("utf-8"))
+        return False
+    except OSError:
+        return bool(claim)
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
 def main(argv: list[str] | None = None, stdin_text: str | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", choices=SUPPORTED_HOSTS, required=True)
@@ -1040,6 +1134,10 @@ def main(argv: list[str] | None = None, stdin_text: str | None = None) -> int:
     parser.add_argument("--slot", default="")
     parser.add_argument("--probe-git", action="store_true")
     parser.add_argument("--format", choices=("json", "shell"), default="json")
+    parser.add_argument("--agy-anchor", default="")
+    parser.add_argument("--agy-owner-pid", default="")
+    parser.add_argument("--session-start", action="store_true")
+    parser.add_argument("--agy-lock-timeout", type=float, default=1.0)
     args = parser.parse_args(argv)
     raw = sys.stdin.read() if stdin_text is None else stdin_text
     if args.recover_agy_identity:
@@ -1064,6 +1162,15 @@ def main(argv: list[str] | None = None, stdin_text: str | None = None) -> int:
     except StopHookPayloadError as exc:
         print(f"stop_hook_event.py: {exc}", file=sys.stderr)
         return 2
+    if args.host == "agy" and args.agy_anchor and args.agy_owner_pid and not event.is_subagent:
+        if guard_agy_orchestrated_anchor(
+            args.agy_anchor,
+            args.agy_owner_pid,
+            slot_from_payload(raw),
+            claim=args.session_start,
+            lock_timeout_s=args.agy_lock_timeout,
+        ):
+            event = replace(event, is_subagent=True)
     if args.format == "shell":
         print(
             format_shell_vars(

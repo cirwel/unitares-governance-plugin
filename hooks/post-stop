@@ -186,8 +186,16 @@ unset STOP_FORMAT_OK STOP_WORKSPACE_DIR STOP_IS_SUBAGENT STOP_HOST_SESSION_ID \
   STOP_MODEL STOP_MODEL_PROVIDER STOP_MODEL_SOURCE \
   STOP_HARNESS_TYPE STOP_HARNESS_VERSION STOP_HARNESS_SOURCE
 STOP_EVENT_ARGS=(--host "${HOOK_HOST}" --workspace "${HOOK_STOP_WORKSPACE}" --format shell)
-if [[ "${HOOK_MODE}" != "session_start" ]]; then
+if [[ "${HOOK_MODE}" == "session_start" ]]; then
+  STOP_EVENT_ARGS+=(--session-start)
+else
   STOP_EVENT_ARGS+=(--probe-git)
+fi
+if [[ "${HOOK_HOST}" == "agy" && "${ANCHOR_RESUME_ENABLED}" == "1" ]]; then
+  STOP_EVENT_ARGS+=(
+    --agy-anchor "${UNITARES_CLIENT_SESSION_ID}"
+    --agy-owner-pid "${UNITARES_ORCHESTRATED_OWNER_PID}"
+  )
 fi
 if ! STOP_VARS=$(printf '%s' "${PAYLOAD}" | python3 "${STOP_EVENT_HELPER}" \
   "${STOP_EVENT_ARGS[@]}" 2>/dev/null); then
@@ -228,59 +236,10 @@ if [[ "${HOOK_HOST}" == "agy" && "${HOOK_MODE}" != "session_start" && -n "${RAW_
   fi
 fi
 
-# Antigravity invoke_subagent child conversations start at step_index 0 with a
-# SYSTEM_MESSAGE (or carry parentConversationId) and share the parent's HOME
-# hooks and OS PID. In addition, an in-process child spawned inside an
-# orchestrated agy turn may fire SessionStart before transcript.jsonl exists
-# and with parentConversationId stripped; atomically claim the thread anchor on
-# SessionStart so at most one top-level conversation slot per live owner
-# process may bind it.
-if [[ "${HOOK_HOST}" == "agy" && "${ANCHOR_RESUME_ENABLED}" == "1" && -n "${RAW_SLOT:-}" \
-      && "${UNITARES_ORCHESTRATED_OWNER_PID}" =~ ^[0-9]+$ ]]; then
-  SAFE_ANCHOR_KEY="$(printf '%s' "${UNITARES_CLIENT_SESSION_ID}" | tr -c 'A-Za-z0-9_-' '_' | cut -c1-80)"
-  ANCHOR_OWNER_FILE="${HOME}/.unitares/.orchestrated-anchor-${SAFE_ANCHOR_KEY}"
-  ANCHOR_LOCK_DIR="${ANCHOR_OWNER_FILE}.lock"
-  OWNER_LSTART="$(ps -o lstart= -p "${UNITARES_ORCHESTRATED_OWNER_PID}" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' || true)"
-  OWNER_PROC_KEY="${UNITARES_ORCHESTRATED_OWNER_PID}|${OWNER_LSTART}"
-  mkdir -p "${HOME}/.unitares" 2>/dev/null || true
-  LOCK_ACQUIRED=0
-  for _attempt in 1 2 3 4 5 6 7 8 9 10; do
-    if mkdir "${ANCHOR_LOCK_DIR}" 2>/dev/null; then
-      LOCK_ACQUIRED=1
-      break
-    fi
-    sleep 0.05
-  done
-  if [[ "${LOCK_ACQUIRED}" != "1" ]]; then
-    rmdir "${ANCHOR_LOCK_DIR}" 2>/dev/null || true
-    if mkdir "${ANCHOR_LOCK_DIR}" 2>/dev/null; then
-      LOCK_ACQUIRED=1
-    fi
-  fi
-  if [[ -f "${ANCHOR_OWNER_FILE}" && ! -L "${ANCHOR_OWNER_FILE}" ]]; then
-    RECORDED_PROC_KEY="$(sed -n '1p' "${ANCHOR_OWNER_FILE}" 2>/dev/null || true)"
-    RECORDED_SLOT="$(sed -n '2p' "${ANCHOR_OWNER_FILE}" 2>/dev/null || true)"
-    if [[ "${RECORDED_PROC_KEY}" == "${OWNER_PROC_KEY}" \
-          && -n "${RECORDED_SLOT}" \
-          && "${RECORDED_SLOT}" != "${RAW_SLOT}" ]]; then
-      AGY_IS_SUBAGENT="true"
-    fi
-  fi
-  if [[ "${HOOK_MODE}" == "session_start" \
-        && "${LOCK_ACQUIRED}" == "1" \
-        && "${AGY_IS_SUBAGENT}" != "True" \
-        && "${AGY_IS_SUBAGENT}" != "true" ]]; then
-    ANCHOR_TMP="${ANCHOR_OWNER_FILE}.$$.tmp"
-    rm -f "${ANCHOR_TMP}" 2>/dev/null || true
-    if ( umask 077 && set -C && printf '%s\n%s\n' "${OWNER_PROC_KEY}" "${RAW_SLOT}" >"${ANCHOR_TMP}" ) 2>/dev/null; then
-      mv -f "${ANCHOR_TMP}" "${ANCHOR_OWNER_FILE}" 2>/dev/null || rm -f "${ANCHOR_TMP}" 2>/dev/null || true
-    fi
-  fi
-  if [[ "${LOCK_ACQUIRED}" == "1" ]]; then
-    rmdir "${ANCHOR_LOCK_DIR}" 2>/dev/null || true
-  fi
-fi
-
+# Antigravity invoke_subagent child conversations (detected via transcript step 0,
+# parentConversationId, or fcntl.flock anchor ownership in stop_hook_event.py)
+# share the parent's HOME hooks and OS PID. Skip lazy onboarding and floor
+# telemetry when the child did not explicitly bind its own governance session.
 if [[ "${HOOK_HOST}" == "agy" && -z "${CSID:-}" \
       && ( "${AGY_IS_SUBAGENT}" == "True" || "${AGY_IS_SUBAGENT}" == "true" ) ]]; then
   exit 0
