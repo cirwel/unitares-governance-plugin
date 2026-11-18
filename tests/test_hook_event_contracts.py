@@ -1175,3 +1175,111 @@ def test_git_state_breadcrumb_strips_overrides_handles_unborn_behind_conflict_an
     assert agy_multi.git_context.startswith("git=branch-a@")
 
 
+def test_stop_hook_event_shell_format_and_parent_conversation_subagent(tmp_path, capsys):
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    marker = tmp_path / "never-created"
+    tricky = f"Done $(touch {marker}) `id` 'quote'\ud800\x00end"
+    payload = (
+        '{"conversationId":"conv-shell-123","workspacePaths":['
+        + json.dumps(str(ws))
+        + '],"last_assistant_message":'
+        + json.dumps(tricky)
+        + ',"modelName":"gemini-4-carbon-high"}'
+    )
+    rc_json = stop_hook_event.main(["--host", "agy"], stdin_text=payload)
+    assert rc_json == 0
+    json_out = json.loads(capsys.readouterr().out)
+    assert json_out["is_subagent"] is False
+    assert json_out["model"] == "gemini-4-carbon-high"
+
+    rc_shell = stop_hook_event.main(
+        ["--host", "agy", "--format", "shell"], stdin_text=payload
+    )
+    assert rc_shell == 0
+    shell_out = capsys.readouterr().out
+    assert "\x00" not in shell_out
+    assert shell_out.splitlines()[-1] == "STOP_FORMAT_OK=1"
+    for line in shell_out.splitlines():
+        key, _, _ = line.partition("=")
+        assert stop_hook_event._SHELL_VAR_NAME_RE.fullmatch(key)
+
+    import subprocess
+
+    probe = subprocess.run(
+        [
+            "/bin/bash",
+            "-c",
+            f'{shell_out}\nprintf "%s|%s|%s|%s" "$STOP_FORMAT_OK" "$STOP_HOST_SESSION_ID" "$STOP_IS_SUBAGENT" "$STOP_MODEL"',
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert probe.stdout == "1|conv-shell-123|false|gemini-4-carbon-high"
+    assert not marker.exists()
+
+    # Transcript-free SessionStart payload with parentConversationId -> is_subagent=True.
+    sub_ev = stop_hook_event.normalize_stop_hook(
+        {
+            "conversationId": "sub-conv-1",
+            "parentConversationId": "parent-conv-1",
+            "workspacePaths": [str(ws)],
+        },
+        host="agy",
+    )
+    assert sub_ev.is_subagent is True
+
+    # Top-level forked/resumed session with rootConversationId but no parentConversationId stays False.
+    top_ev = stop_hook_event.normalize_stop_hook(
+        {
+            "conversationId": "top-conv-2",
+            "rootConversationId": "orig-root-conv",
+            "workspacePaths": [str(ws)],
+        },
+        host="agy",
+    )
+    assert top_ev.is_subagent is False
+
+    # Contended fcntl.flock held beyond lock_timeout_s preserves the live holder's
+    # lock and fails closed (returns True on claim=True so SessionStart skips binding).
+    import fcntl
+    import hashlib
+    import os
+
+    fake_home = tmp_path / "flock_home"
+    (fake_home / ".unitares").mkdir(parents=True)
+    anchor = "agent:/thread-held-lock"
+    digest = hashlib.sha256(anchor.encode("utf-8")).hexdigest()[:24]
+    lock_file = fake_home / ".unitares" / f".orchestrated-anchor-{digest}"
+    held_fd = os.open(str(lock_file), os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(held_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        old_home = os.environ.get("HOME")
+        os.environ["HOME"] = str(fake_home)
+        try:
+            for claim_mode in (True, False):
+                assert (
+                    stop_hook_event.guard_agy_orchestrated_anchor(
+                        anchor,
+                        str(os.getpid()),
+                        "contended-slot",
+                        claim=claim_mode,
+                        lock_timeout_s=0.05,
+                    )
+                    is True
+                )
+            # Live holder still holds LOCK_EX (a second non-blocking LOCK_EX from another fd fails).
+            probe_fd = os.open(str(lock_file), os.O_RDWR)
+            try:
+                with pytest.raises(BlockingIOError):
+                    fcntl.flock(probe_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            finally:
+                os.close(probe_fd)
+        finally:
+            if old_home is None:
+                os.environ.pop("HOME", None)
+            else:
+                os.environ["HOME"] = old_home
+    finally:
+        os.close(held_fd)

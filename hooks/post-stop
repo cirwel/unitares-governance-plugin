@@ -13,15 +13,33 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PLUGIN_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 HOOK_HOST="claude"
-if [[ "${1:-}" == "--host" && -n "${2:-}" ]]; then
-  HOOK_HOST="$2"
-fi
+HOOK_MODE="stop"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --host)
+      if [[ $# -ge 2 && -n "${2:-}" ]]; then
+        HOOK_HOST="$2"
+        shift 2
+      else
+        shift
+      fi
+      ;;
+    --session-start)
+      HOOK_MODE="session_start"
+      shift
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
 if [[ "${HOOK_HOST}" != "claude" && "${HOOK_HOST}" != "codex" && "${HOOK_HOST}" != "agy" ]]; then
   exit 0
 fi
 # Codex and Antigravity (agy) treat empty or plain-text stdout from a
-# successful Stop hook as an invalid response. Emit one neutral JSON object on
-# every synchronous host exit path; Claude's asynchronous Stop hook remains silent.
+# successful Stop or SessionStart hook as an invalid response. Emit one neutral
+# JSON object on every synchronous host exit path; Claude's asynchronous Stop
+# hook remains silent.
 _emit_codex_stop_output() {
   [[ "${HOOK_HOST}" == "codex" || "${HOOK_HOST}" == "agy" ]] && printf '{}\n'
 }
@@ -31,28 +49,33 @@ HOST_MODEL_TYPE="codex"
 [[ "${HOOK_HOST}" == "claude" ]] && HOST_MODEL_TYPE="claude-code"
 [[ "${HOOK_HOST}" == "agy" ]] && HOST_MODEL_TYPE="antigravity"
 
-# Codex Stop has a 30-second outer timeout. Keep network work at or below
-# 20 seconds so payload normalization, cache I/O, and process startup retain
-# a meaningful margin. A pending continuity answer (only after an opted-in
-# compaction) adds at most 3 seconds, capped by its own wall clock. Operator overrides may lower these caps, never raise
-# them for Codex. Claude's asynchronous hook keeps the configured defaults.
+# Codex and agy Stop have a 30-second outer timeout. Keep network work at or
+# below 20 seconds so payload normalization, cache I/O, and process startup
+# retain a meaningful margin. A pending continuity answer (only after an
+# opted-in compaction) adds at most 3 seconds, capped by its own wall clock.
+# Operator overrides may lower these caps, never raise them for Codex/agy.
+# Claude's asynchronous hook keeps the configured defaults.
 CODEX_ONBOARD_TIMEOUT_CAP="5"
 CODEX_CHECKIN_TIMEOUT_CAP="15"
 
 _timeout_at_most() {
-  python3 - "$1" "$2" <<'PY' 2>/dev/null || printf '%s\n' "$2"
-import math
-import sys
-
-cap = float(sys.argv[2])
-try:
-    value = float(sys.argv[1])
-except (TypeError, ValueError):
-    value = cap
-if not math.isfinite(value) or value <= 0:
-    value = cap
-print(f"{min(value, cap):g}")
-PY
+  if command -v awk >/dev/null 2>&1; then
+    _TMO_VAL="${1:-}" _TMO_CAP="${2:-}" LC_ALL=C awk 'BEGIN {
+      val = ENVIRON["_TMO_VAL"]
+      c = ENVIRON["_TMO_CAP"] + 0
+      gsub(/^[ \t\r\n]+|[ \t\r\n]+$/, "", val)
+      if (val ~ /^[+-]?(([0-9]+([.][0-9]*)?)|([.][0-9]+))([eE][+-]?[0-9]+)?$/) {
+        v = val + 0
+        if (v > 0 && v < c) {
+          printf "%g\n", v
+          exit 0
+        }
+      }
+      printf "%g\n", c
+    }' 2>/dev/null || printf '%s\n' "$2"
+  else
+    printf '%s\n' "$2"
+  fi
 }
 
 DEFAULTS_FILE=""
@@ -122,6 +145,28 @@ if [[ "${HOOK_HOST}" == "codex" || "${HOOK_HOST}" == "agy" ]]; then
   CHECKIN_TIMEOUT="$(_timeout_at_most "${CHECKIN_TIMEOUT}" "${CODEX_CHECKIN_TIMEOUT_CAP}")"
 fi
 
+ORCHESTRATED_MODE="$(printf '%s' "${UNITARES_ORCHESTRATED:-0}" | tr '[:upper:]' '[:lower:]')"
+ANCHOR_RESUME_ENABLED=0
+if [[ -n "${UNITARES_CLIENT_SESSION_ID:-}" \
+      && ( "${ORCHESTRATED_MODE}" == "1" \
+           || "${ORCHESTRATED_MODE}" == "true" \
+           || "${ORCHESTRATED_MODE}" == "yes" \
+           || "${ORCHESTRATED_MODE}" == "on" ) \
+      && -n "${UNITARES_ORCHESTRATED_OWNER_PID:-}" \
+      && "${UNITARES_HOOK_HOST_PID:-}" == "${UNITARES_ORCHESTRATED_OWNER_PID}" ]]; then
+  ANCHOR_RESUME_ENABLED=1
+fi
+
+# SessionStart mode (--session-start) is strictly for pre-binding orchestrated
+# thread anchors (e.g. dispatch_beam Turn 1) so GitHub writes during Turn 1
+# carry the thread's UNITARES agent UUID before the first Stop. Interactive
+# sessions drain stdin and exit immediately in pure bash without spawning
+# Python or touching the network, preserving explicit Turn-1 start_session().
+if [[ "${HOOK_MODE}" == "session_start" && "${ANCHOR_RESUME_ENABLED}" != "1" ]]; then
+  cat >/dev/null 2>&1 || true
+  exit 0
+fi
+
 # Read stdin once for host normalization and session-cache lookup.
 PAYLOAD=$(cat 2>/dev/null || echo "{}")
 [[ -z "${PAYLOAD}" ]] && PAYLOAD="{}"
@@ -136,23 +181,30 @@ if [[ "${HOOK_HOST}" == "claude" ]]; then
 elif [[ "${HOOK_HOST}" == "codex" ]]; then
   HOOK_STOP_WORKSPACE="${PWD}"
 fi
-if ! STOP_EVENT=$(printf '%s' "${PAYLOAD}" | python3 "${STOP_EVENT_HELPER}" \
-  --host "${HOOK_HOST}" --workspace "${HOOK_STOP_WORKSPACE}" --probe-git 2>/dev/null); then
+unset STOP_FORMAT_OK STOP_WORKSPACE_DIR STOP_IS_SUBAGENT STOP_HOST_SESSION_ID \
+  STOP_FLOOR_TOOLS STOP_FLOOR_SUMMARY STOP_SUMMARY STOP_COMPLEXITY \
+  STOP_MODEL STOP_MODEL_PROVIDER STOP_MODEL_SOURCE \
+  STOP_HARNESS_TYPE STOP_HARNESS_VERSION STOP_HARNESS_SOURCE
+STOP_EVENT_ARGS=(--host="${HOOK_HOST}" --workspace="${HOOK_STOP_WORKSPACE}" --format=shell)
+if [[ "${HOOK_MODE}" == "session_start" ]]; then
+  STOP_EVENT_ARGS+=(--session-start)
+else
+  STOP_EVENT_ARGS+=(--probe-git)
+fi
+if [[ "${HOOK_HOST}" == "agy" && "${ANCHOR_RESUME_ENABLED}" == "1" ]]; then
+  STOP_EVENT_ARGS+=(
+    "--agy-anchor=${UNITARES_CLIENT_SESSION_ID}"
+    "--agy-owner-pid=${UNITARES_ORCHESTRATED_OWNER_PID}"
+  )
+fi
+if ! STOP_VARS=$(printf '%s' "${PAYLOAD}" | python3 "${STOP_EVENT_HELPER}" \
+  "${STOP_EVENT_ARGS[@]}" 2>/dev/null); then
   exit 0
 fi
-
-_stop_field() {
-  python3 - "$1" "${STOP_EVENT}" <<'PY' 2>/dev/null || true
-import json, sys
-field = sys.argv[1]
-try:
-    payload = json.loads(sys.argv[2])
-except Exception:
-    payload = {}
-value = payload.get(field, "")
-print(value if value is not None else "")
-PY
-}
+eval "${STOP_VARS}"
+if [[ "${STOP_FORMAT_OK:-}" != "1" ]]; then
+  exit 0
+fi
 
 # Resolve slot-aware session cache via shared helper.
 SESSION_LOOKUP="${PLUGIN_ROOT}/scripts/_session_lookup.py"
@@ -162,8 +214,8 @@ fi
 AGY_WORKSPACE=""
 AGY_IS_SUBAGENT="false"
 if [[ "${HOOK_HOST}" == "agy" ]]; then
-  AGY_WORKSPACE="$(_stop_field workspace_dir)"
-  AGY_IS_SUBAGENT="$(_stop_field is_subagent)"
+  AGY_WORKSPACE="${STOP_WORKSPACE_DIR:-}"
+  AGY_IS_SUBAGENT="${STOP_IS_SUBAGENT:-false}"
   LOOKUP_WORKSPACE="${AGY_WORKSPACE:-${HOME}}"
 else
   LOOKUP_WORKSPACE="${PWD}"
@@ -174,7 +226,7 @@ eval "$(printf '%s' "${PAYLOAD}" | python3 "${SESSION_LOOKUP}" --workspace "${LO
 # so an explicit start_session/onboard call during the turn is recorded in the
 # conversation transcript before it reaches the slot cache. Recover or upgrade
 # it before deciding whether the slot is unbound.
-if [[ "${HOOK_HOST}" == "agy" && -n "${RAW_SLOT:-}" ]]; then
+if [[ "${HOOK_HOST}" == "agy" && "${HOOK_MODE}" != "session_start" && -n "${RAW_SLOT:-}" ]]; then
   if printf '%s' "${PAYLOAD}" | python3 "${STOP_EVENT_HELPER}" \
       --host agy \
       --recover-agy-identity \
@@ -184,10 +236,10 @@ if [[ "${HOOK_HOST}" == "agy" && -n "${RAW_SLOT:-}" ]]; then
   fi
 fi
 
-# Antigravity invoke_subagent child conversations start at step_index 0 with a
-# SYSTEM_MESSAGE and share the user's HOME hooks. Do not lazy-onboard a
-# harness_backstop identity or emit unbound floor telemetry for an internal
-# subagent that did not explicitly bind its own governance session.
+# Antigravity invoke_subagent child conversations (detected via transcript step 0,
+# parentConversationId, or fcntl.flock anchor ownership in stop_hook_event.py)
+# share the parent's HOME hooks and OS PID. Skip lazy onboarding and floor
+# telemetry when the child did not explicitly bind its own governance session.
 if [[ "${HOOK_HOST}" == "agy" && -z "${CSID:-}" \
       && ( "${AGY_IS_SUBAGENT}" == "True" || "${AGY_IS_SUBAGENT}" == "true" ) ]]; then
   exit 0
@@ -198,10 +250,10 @@ fi
 # from other concurrent sessions in the workspace remain untouched.
 SNAPSHOT_SLOT=""
 SLOT_HELPER="${PLUGIN_ROOT}/scripts/_slot_from_stdin.py"
-if [[ "${HOOK_HOST}" == "codex" && -f "${SLOT_HELPER}" ]]; then
+if [[ "${HOOK_HOST}" == "codex" && "${HOOK_MODE}" != "session_start" && -f "${SLOT_HELPER}" ]]; then
   SNAPSHOT_SLOT=$(printf '%s' "${PAYLOAD}" | python3 "${SLOT_HELPER}" 2>/dev/null || true)
 fi
-if [[ "${HOOK_HOST}" == "codex" && -n "${SNAPSHOT_SLOT}" ]]; then
+if [[ "${HOOK_HOST}" == "codex" && "${HOOK_MODE}" != "session_start" && -n "${SNAPSHOT_SLOT}" ]]; then
   SESSION_CACHE_HELPER="${PLUGIN_ROOT}/scripts/session_cache.py"
   if [[ -f "${SESSION_CACHE_HELPER}" ]]; then
     python3 "${SESSION_CACHE_HELPER}" discard-milestone-snapshots \
@@ -210,8 +262,8 @@ if [[ "${HOOK_HOST}" == "codex" && -n "${SNAPSHOT_SLOT}" ]]; then
   fi
 fi
 
-# If the agent did not explicitly onboard before the turn ended, provision a
-# slot-scoped identity now so the turn can still produce a real check-in.
+# If the agent did not explicitly onboard before the turn ended (or at
+# SessionStart for an orchestrated anchor), provision a slot-scoped identity.
 # This is harness-managed attribution for the host process, not an
 # agent-authored claim. onboard_helper.py owns the safety constraints:
 # force_new=true, per-slot name scoping, lineage via parent_agent_id, no
@@ -264,7 +316,7 @@ if [[ -z "${CSID:-}" && -n "${RAW_SLOT:-}" \
       --slot "${RAW_SLOT}" \
       --client-session-id "${UNITARES_CLIENT_SESSION_ID:-}" \
       --host-harness "${HOST_MODEL_TYPE}" \
-      --host-session-id "$(printf '%s' "${PAYLOAD}" | python3 "${PLUGIN_ROOT}/scripts/_slot_from_stdin.py" --host-session-id 2>/dev/null || true)" \
+      --host-session-id "${STOP_HOST_SESSION_ID:-}" \
       --host-session-dir "${WORKSPACE_DIR}" \
       --timeout "${ONBOARD_TIMEOUT}" \
       >/dev/null 2>&1 || true
@@ -272,13 +324,17 @@ if [[ -z "${CSID:-}" && -n "${RAW_SLOT:-}" \
   fi
 fi
 
-# Record that this bound slot ended a turn. A binding idle past the server's
+# Record that this bound slot is active. A binding idle past the server's
 # session lifetime is instead marked prior_process: the host resumed an earlier
 # session without SessionStart (Codex often does), so this process has not
 # minted its own identity yet (scripts/binding_activity.py).
 if [[ -n "${CSID:-}" && -f "${PLUGIN_ROOT}/scripts/binding_activity.py" ]]; then
   printf '%s' "${PAYLOAD}" | python3 "${PLUGIN_ROOT}/scripts/binding_activity.py" mark \
     --workspace "${LOOKUP_WORKSPACE}" >/dev/null 2>&1 || true
+fi
+
+if [[ "${HOOK_MODE}" == "session_start" ]]; then
+  exit 0
 fi
 
 # The opt-in continuity question asked at a compaction is answered at the end
@@ -300,46 +356,34 @@ fi
 # exists.
 if [[ -z "${CSID:-}" ]]; then
   if [[ -n "${RAW_SLOT:-}" ]]; then
-    FLOOR_TOOLS=$(_stop_field floor_tool_count)
-    FLOOR_SUMMARY=$(_stop_field floor_summary)
     python3 "${PLUGIN_ROOT}/scripts/substrate_floor.py" \
       --slot "${RAW_SLOT}" \
       --event turn_stop \
-      --tool-count "${FLOOR_TOOLS}" \
-      --summary "${FLOOR_SUMMARY}" \
+      --tool-count "${STOP_FLOOR_TOOLS}" \
+      --summary "${STOP_FLOOR_SUMMARY}" \
       >/dev/null 2>&1 || true
   fi
   exit 0
 fi
-
-
-SUMMARY=$(_stop_field summary)
-COMPLEXITY=$(_stop_field complexity)
-MODEL=$(_stop_field model)
-MODEL_PROVIDER=$(_stop_field model_provider)
-MODEL_SOURCE=$(_stop_field model_source)
-HARNESS_TYPE=$(_stop_field harness_type)
-HARNESS_VERSION=$(_stop_field harness_version)
-HARNESS_SOURCE=$(_stop_field harness_source)
 
 # No --confidence: this turn summary is a substrate reading of tool shape, not
 # an agent's belief about its own work. A supplied value mints a tactical
 # prediction server-side and is scored into the fleet calibration curve.
 python3 "${PLUGIN_ROOT}/scripts/checkin.py" \
   --event turn_stop \
-  --response-text "${SUMMARY}" \
-  --complexity "${COMPLEXITY}" \
+  --response-text "${STOP_SUMMARY}" \
+  --complexity "${STOP_COMPLEXITY}" \
   --epistemic-class substrate_interpretation \
   --client-session-id "${CSID}" \
   --uuid "${UUID}" \
   --slot "${SLOT:-${RAW_SLOT:-}}" \
   --timeout "${CHECKIN_TIMEOUT}" \
-  --model "${MODEL}" \
-  --model-provider "${MODEL_PROVIDER}" \
-  --model-source "${MODEL_SOURCE}" \
-  --harness-type "${HARNESS_TYPE}" \
-  --harness-version "${HARNESS_VERSION}" \
-  --harness-source "${HARNESS_SOURCE}" \
+  --model "${STOP_MODEL}" \
+  --model-provider "${STOP_MODEL_PROVIDER}" \
+  --model-source "${STOP_MODEL_SOURCE}" \
+  --harness-type "${STOP_HARNESS_TYPE}" \
+  --harness-version "${STOP_HARNESS_VERSION}" \
+  --harness-source "${STOP_HARNESS_SOURCE}" \
   >/dev/null 2>&1 || true
 
 # Optional outcome evidence follows the primary check-in so it cannot delay it.

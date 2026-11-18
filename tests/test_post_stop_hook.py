@@ -714,3 +714,214 @@ def test_post_stop_attaches_git_breadcrumb_to_checkin_and_keeps_it_out_of_floor(
     assert "feature/test" not in floor_summary
     assert sha not in floor_summary
 
+
+def test_agy_session_start_binds_orchestrated_anchor_only_and_guards_subagents(tmp_path):
+    """--session-start is a fast no-op for interactive agy sessions, pre-binds
+    orchestrated thread anchors before Turn 1 tools run, and blocks in-process
+    subagents (both with parentConversationId and with stripped lineage under
+    the same owner PID) from claiming the parent thread anchor."""
+    LazyOnboardHandler.calls = []
+    srv = _ReusableTCPServer(("127.0.0.1", 0), LazyOnboardHandler)
+    port = srv.server_address[1]
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+
+    home_dir = tmp_path / "agy_home"
+    home_dir.mkdir()
+    ws = tmp_path / "wt"
+    ws.mkdir()
+    top_cid = "aaaaaaaa-1111-4222-8333-444444444444"
+    sub_cid_proto = "bbbbbbbb-1111-4222-8333-444444444444"
+    sub_cid_stripped = "cccccccc-1111-4222-8333-444444444444"
+    next_turn_cid = "dddddddd-1111-4222-8333-444444444444"
+
+    base_env = {
+        "PATH": "/usr/bin:/bin:/usr/local/bin",
+        "HOME": str(home_dir),
+        "UNITARES_SERVER_URL": f"http://127.0.0.1:{port}",
+        "UNITARES_CHECKIN_LOG": str(tmp_path / "checkins.log"),
+        "UNITARES_AUTO_ONBOARD": "on",
+        "UNITARES_AUTO_ONBOARD_TIMEOUT": "invalid-garbage",
+        "CLAUDE_PLUGIN_ROOT": str(PLUGIN_ROOT),
+        "PLUGIN_ROOT": str(PLUGIN_ROOT),
+        "PWD": str(ws),
+    }
+
+    try:
+        # 1) Interactive (unanchored) SessionStart -> pure-bash no-op, emits {}\n.
+        res_interactive = subprocess.run(
+            [str(PLUGIN_ROOT / "hooks" / "post-stop"), "--host", "agy", "--session-start"],
+            env=base_env,
+            cwd=str(ws),
+            input=json.dumps({"conversationId": top_cid, "workspacePaths": [str(ws)]}),
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+        assert res_interactive.returncode == 0
+        assert res_interactive.stdout == "{}\n"
+        assert LazyOnboardHandler.calls == []
+        assert not (home_dir / ".unitares" / _slot_filename(top_cid)).exists()
+
+        # 2) Orchestrated SessionStart -> pre-binds thread anchor without check-in.
+        orch_env = {
+            **base_env,
+            "UNITARES_CLIENT_SESSION_ID": "agent:/thread-98765",
+            "UNITARES_ORCHESTRATED": "1",
+            "UNITARES_ORCHESTRATED_OWNER_PID": "42424",
+            "UNITARES_HOOK_HOST_PID": "42424",
+        }
+        res_orch = subprocess.run(
+            [str(PLUGIN_ROOT / "hooks" / "post-stop"), "--host", "agy", "--session-start"],
+            env=orch_env,
+            cwd=str(ws),
+            input=json.dumps({"conversationId": top_cid, "workspacePaths": [str(ws)]}),
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+        assert res_orch.returncode == 0
+        assert res_orch.stdout == "{}\n"
+        assert [c.get("name") for c in LazyOnboardHandler.calls] == ["onboard"]
+        assert (
+            LazyOnboardHandler.calls[0]["arguments"]["client_session_id"]
+            == "agent:/thread-98765"
+        )
+        assert (home_dir / ".unitares" / _slot_filename(top_cid)).exists()
+        assert (ws / ".unitares" / _slot_filename(top_cid)).exists()
+
+        # 3a) In-process child with parentConversationId under same OWNER_PID -> skipped.
+        LazyOnboardHandler.calls = []
+        res_sub_proto = subprocess.run(
+            [str(PLUGIN_ROOT / "hooks" / "post-stop"), "--host", "agy", "--session-start"],
+            env=orch_env,
+            cwd=str(ws),
+            input=json.dumps(
+                {
+                    "conversationId": sub_cid_proto,
+                    "parentConversationId": top_cid,
+                    "workspacePaths": [str(ws)],
+                }
+            ),
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+        assert res_sub_proto.returncode == 0
+        assert res_sub_proto.stdout == "{}\n"
+        assert LazyOnboardHandler.calls == []
+        assert not (home_dir / ".unitares" / _slot_filename(sub_cid_proto)).exists()
+
+        # 3b) In-process child with stripped parentConversationId & no transcript yet
+        # under the SAME OWNER_PID -> blocked by .orchestrated-anchor-* owner guard!
+        res_sub_stripped = subprocess.run(
+            [str(PLUGIN_ROOT / "hooks" / "post-stop"), "--host", "agy", "--session-start"],
+            env=orch_env,
+            cwd=str(ws),
+            input=json.dumps({"conversationId": sub_cid_stripped, "workspacePaths": [str(ws)]}),
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+        assert res_sub_stripped.returncode == 0
+        assert res_sub_stripped.stdout == "{}\n"
+        assert LazyOnboardHandler.calls == []
+        assert not (home_dir / ".unitares" / _slot_filename(sub_cid_stripped)).exists()
+
+        # 4) Turn 1 Stop on top_cid reuses the SessionStart binding (no second onboard).
+        res_stop = subprocess.run(
+            [str(PLUGIN_ROOT / "hooks" / "post-stop"), "--host", "agy"],
+            env=orch_env,
+            cwd=str(ws),
+            input=json.dumps(
+                {
+                    "conversationId": top_cid,
+                    "workspacePaths": [str(ws)],
+                    "last_assistant_message": "Opened PR with Turn-1 attribution.",
+                    "modelName": "gemini-4-carbon-high",
+                }
+            ),
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+        assert res_stop.returncode == 0
+        assert res_stop.stdout == "{}\n"
+        assert [c.get("name") for c in LazyOnboardHandler.calls] == [
+            "process_agent_update"
+        ]
+
+        # 5) Subsequent turn in a NEW agy OS process (real run-hook.cmd PPID == os.getpid())
+        # with a new conversation slot is allowed to bind the thread anchor, and
+        # concurrent callbacks under the same owner PID allow only one slot to bind.
+        import os
+        from concurrent.futures import ThreadPoolExecutor
+
+        LazyOnboardHandler.calls = []
+        real_owner_env = {
+            **base_env,
+            "UNITARES_AUTO_ONBOARD_TIMEOUT": " .5 ",
+            "UNITARES_CLIENT_SESSION_ID": "agent:/thread-98765",
+            "UNITARES_ORCHESTRATED": "1",
+            "UNITARES_ORCHESTRATED_OWNER_PID": str(os.getpid()),
+        }
+
+        def _invoke_run_hook(cid: str):
+            return subprocess.run(
+                [
+                    "/bin/sh",
+                    "-c",
+                    f'exec "{PLUGIN_ROOT / "hooks" / "run-hook.cmd"}" post-stop --host agy --session-start',
+                ],
+                env=real_owner_env,
+                cwd=str(ws),
+                input=json.dumps({"conversationId": cid, "workspacePaths": [str(ws)]}),
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+
+        race_a = next_turn_cid
+        race_b = "eeeeeeee-1111-4222-8333-444444444444"
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            f1 = pool.submit(_invoke_run_hook, race_a)
+            f2 = pool.submit(_invoke_run_hook, race_b)
+            r1, r2 = f1.result(), f2.result()
+
+        assert r1.returncode == 0 and r1.stdout == "{}\n"
+        assert r2.returncode == 0 and r2.stdout == "{}\n"
+        onboards = [c for c in LazyOnboardHandler.calls if c.get("name") == "onboard"]
+        assert len(onboards) == 1
+    finally:
+        srv.shutdown()
+        thread.join(timeout=2)
+
+
+def test_post_stop_timeout_at_most_preserves_float_spellings():
+    script = """
+    eval "$(sed -n '/^_timeout_at_most()/,/^}/p' hooks/post-stop)"
+    for v in '.5' '+0.5' '1.' ' 0.5 ' '2.5' '0' '-1' 'nan' 'inf' '1e999' 'garbage'; do
+      printf '%s=%s\\n' "$v" "$(_timeout_at_most "$v" 15)"
+    done
+    """
+    res = subprocess.run(
+        ["/bin/bash", "-c", script],
+        cwd=str(PLUGIN_ROOT),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    got = dict(line.split("=", 1) for line in res.stdout.strip().splitlines())
+    assert got[".5"] == "0.5"
+    assert got["+0.5"] == "0.5"
+    assert got["1."] == "1"
+    assert got[" 0.5 "] == "0.5"
+    assert got["2.5"] == "2.5"
+    for invalid in ("0", "-1", "nan", "inf", "1e999", "garbage"):
+        assert got[invalid] == "15"

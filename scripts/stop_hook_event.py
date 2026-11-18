@@ -4,21 +4,27 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
+import hashlib
 import json
 import os
 import re
+import shlex
 import signal
 import stat
 import subprocess
 import sys
+import time
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping
 
 try:
     from _redact import redact_secrets
+    from _slot_from_stdin import host_session_id_from_payload, slot_from_payload
 except ModuleNotFoundError:  # Imported as ``scripts.stop_hook_event`` in tests.
     from scripts._redact import redact_secrets
+    from scripts._slot_from_stdin import host_session_id_from_payload, slot_from_payload
 
 
 SUPPORTED_HOSTS = ("claude", "codex", "agy")
@@ -776,13 +782,20 @@ def recover_agy_identity_from_transcript(
 
 
 def normalize_agy(payload: Mapping[str, Any]) -> StopHookEvent:
-    """Normalize Antigravity (agy) Stop input and its transcript tail."""
+    """Normalize Antigravity (agy) Stop/SessionStart input and its transcript tail."""
     session_id = str(
         payload.get("conversationId") or payload.get("session_id") or ""
     ).strip()
     transcript_text, tool_count, tool_names, is_subagent = _agy_turn_from_transcript(
         payload, session_id
     )
+    parent_cid = str(
+        payload.get("parentConversationId")
+        or payload.get("parent_conversation_id")
+        or ""
+    ).strip()
+    if parent_cid:
+        is_subagent = True
     if "last_assistant_message" in payload and payload.get("last_assistant_message") is not None:
         raw_message = payload.get("last_assistant_message")
         if not isinstance(raw_message, str):
@@ -984,6 +997,136 @@ def normalize_stop_hook(
     return event
 
 
+_SHELL_VAR_NAME_RE = re.compile(r"^STOP_[A-Z0-9_]+$")
+
+
+def format_shell_vars(event: StopHookEvent, *, host_session_id: str = "") -> str:
+    """Format ``event`` as POSIX-safe ``STOP_*`` shell variable assignments."""
+    pairs: tuple[tuple[str, str], ...] = (
+        ("STOP_WORKSPACE_DIR", event.workspace_dir),
+        ("STOP_IS_SUBAGENT", "true" if event.is_subagent else "false"),
+        ("STOP_HOST_SESSION_ID", host_session_id),
+        (
+            "STOP_FLOOR_TOOLS",
+            str(event.tool_count if event.tool_count is not None else 0),
+        ),
+        ("STOP_FLOOR_SUMMARY", event.floor_summary),
+        ("STOP_SUMMARY", event.summary),
+        ("STOP_COMPLEXITY", str(event.complexity)),
+        ("STOP_MODEL", event.model),
+        ("STOP_MODEL_PROVIDER", event.model_provider),
+        ("STOP_MODEL_SOURCE", event.model_source),
+        ("STOP_HARNESS_TYPE", event.harness_type),
+        ("STOP_HARNESS_VERSION", event.harness_version),
+        ("STOP_HARNESS_SOURCE", event.harness_source),
+    )
+    lines: list[str] = []
+    for key, raw_val in pairs:
+        if not _SHELL_VAR_NAME_RE.fullmatch(key):
+            raise ValueError(f"unsafe shell variable name: {key!r}")
+        clean = (
+            str(raw_val or "")
+            .replace("\x00", "")
+            .encode("utf-8", "replace")
+            .decode("utf-8")
+        )
+        lines.append(f"{key}={shlex.quote(clean)}")
+    lines.append("STOP_FORMAT_OK=1")
+    return "\n".join(lines)
+
+
+def guard_agy_orchestrated_anchor(
+    anchor: str,
+    owner_pid: str,
+    slot: str,
+    *,
+    claim: bool,
+    lock_timeout_s: float = 1.0,
+) -> bool:
+    """Return True when ``slot`` must be skipped because another slot in ``owner_pid`` owns ``anchor``.
+
+    Uses an OS-managed ``fcntl.flock`` advisory lock so crashed/SIGKILLed hooks
+    never leave stuck locks, live holders never lose their lock to a waiter,
+    and contended callers fail closed (already-bound top-level Stop slots keep
+    their cached CSID, while unbound children cannot claim the anchor).
+    """
+    anchor_clean = (anchor or "").strip()
+    pid_clean = (owner_pid or "").strip()
+    slot_clean = (slot or "").strip()
+    if not anchor_clean or not slot_clean or not pid_clean.isdigit():
+        return False
+
+    owner_lstart = ""
+    try:
+        proc = subprocess.run(
+            ["ps", "-o", "lstart=", "-p", pid_clean],
+            capture_output=True,
+            text=True,
+            timeout=1.0,
+            check=False,
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            owner_lstart = proc.stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        owner_lstart = ""
+    owner_proc_key = f"{pid_clean}|{owner_lstart}"
+
+    digest = hashlib.sha256(anchor_clean.encode("utf-8")).hexdigest()[:24]
+    state_dir = Path.home() / ".unitares"
+    try:
+        state_dir.mkdir(parents=True, exist_ok=True)
+        fd = os.open(
+            str(state_dir / f".orchestrated-anchor-{digest}"),
+            os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+    except OSError:
+        return True
+
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return True
+        deadline = time.monotonic() + max(0.01, lock_timeout_s)
+        acquired = False
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(0.02)
+            except OSError:
+                return True
+        if not acquired:
+            # Preserve the live holder's lock and fail closed for unbound callers.
+            return True
+
+        os.lseek(fd, 0, os.SEEK_SET)
+        lines = os.read(fd, 4096).decode("utf-8", errors="replace").splitlines()
+        recorded_proc_key = lines[0] if len(lines) >= 1 else ""
+        recorded_slot = lines[1] if len(lines) >= 2 else ""
+        if (
+            recorded_proc_key == owner_proc_key
+            and recorded_slot
+            and recorded_slot != slot_clean
+        ):
+            return True
+        if claim:
+            os.lseek(fd, 0, os.SEEK_SET)
+            os.ftruncate(fd, 0)
+            os.write(fd, f"{owner_proc_key}\n{slot_clean}\n".encode("utf-8"))
+        return False
+    except OSError:
+        return True
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
 def main(argv: list[str] | None = None, stdin_text: str | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", choices=SUPPORTED_HOSTS, required=True)
@@ -991,6 +1134,11 @@ def main(argv: list[str] | None = None, stdin_text: str | None = None) -> int:
     parser.add_argument("--workspace", default="")
     parser.add_argument("--slot", default="")
     parser.add_argument("--probe-git", action="store_true")
+    parser.add_argument("--format", choices=("json", "shell"), default="json")
+    parser.add_argument("--agy-anchor", default="")
+    parser.add_argument("--agy-owner-pid", default="")
+    parser.add_argument("--session-start", action="store_true")
+    parser.add_argument("--agy-lock-timeout", type=float, default=1.0)
     args = parser.parse_args(argv)
     raw = sys.stdin.read() if stdin_text is None else stdin_text
     if args.recover_agy_identity:
@@ -1015,7 +1163,24 @@ def main(argv: list[str] | None = None, stdin_text: str | None = None) -> int:
     except StopHookPayloadError as exc:
         print(f"stop_hook_event.py: {exc}", file=sys.stderr)
         return 2
-    print(json.dumps(event.to_json_dict(), separators=(",", ":")))
+    if args.host == "agy" and args.agy_anchor and args.agy_owner_pid and not event.is_subagent:
+        if guard_agy_orchestrated_anchor(
+            args.agy_anchor,
+            args.agy_owner_pid,
+            slot_from_payload(raw),
+            claim=args.session_start,
+            lock_timeout_s=args.agy_lock_timeout,
+        ):
+            event = replace(event, is_subagent=True)
+    if args.format == "shell":
+        print(
+            format_shell_vars(
+                event,
+                host_session_id=host_session_id_from_payload(raw),
+            )
+        )
+    else:
+        print(json.dumps(event.to_json_dict(), separators=(",", ":")))
     return 0
 
 
