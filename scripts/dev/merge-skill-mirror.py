@@ -124,20 +124,11 @@ def deliver(number: int, *, apply: bool) -> str:
     # Read the actual branch for ancestry, fetch validation and race checks.
     base = api("branches/master")["commit"]["sha"]
     runs = api(f"actions/runs?event=pull_request&head_sha={head}&per_page=100")
-    if ci_failed(runs["workflow_runs"], head):
-        # A mirror that failed on an older base may already be fixed by master
-        # (e.g. a plugin test updated after a canonical edit). Without this, a
-        # red head is never re-tested and the mirror waits for the next
-        # canonical change. Re-run once per base move; red on the current base
-        # stays held. No merge happens here: the new head needs green CI and
-        # the full verification below.
-        if not api(f"compare/{base}...{head}").get("behind_by"):
-            raise Hold("CI failed on the current base; the mirror needs a fix on master")
-        if not apply:
-            return f"#{number} failed CI on an older base; action=update base and re-run CI"
-        api(f"pulls/{number}/update-branch", "PUT", {"expected_head_sha": head})
-        return f"Updated #{number}: CI failed on an older base; re-running on current master"
-    require_checks(runs["workflow_runs"], head)
+    # A failed head is still verified below; it may only be re-tested on a
+    # newer base, never merged. Pending or missing CI holds here.
+    failed = ci_failed(runs["workflow_runs"], head)
+    if not failed:
+        require_checks(runs["workflow_runs"], head)
     # Fixed remotes/refspecs only. Fetch data, never check out or import PR code.
     git("fetch", "--quiet", "--no-tags", "origin",
         f"+refs/pull/{number}/head:refs/mirror/head", "+refs/heads/master:refs/mirror/base")
@@ -159,6 +150,18 @@ def deliver(number: int, *, apply: bool) -> str:
     behind = subprocess.run(["git", "merge-base", "--is-ancestor", base, head]).returncode
     if behind not in (0, 1):
         raise Hold("Could not establish base ancestry")
+    if failed:
+        # A mirror that failed on an older base may already be fixed by master
+        # (e.g. a plugin test updated after a canonical edit). Without this, a
+        # red head is never re-tested and waits for the next canonical change.
+        # Updating makes the head contain master, so this fires once per base
+        # move; red on the current base stays held.
+        if not behind:
+            raise Hold("CI failed on the current base; the mirror needs a fix on master")
+        if not apply:
+            return f"#{number} failed CI on an older base; action=update base and re-run CI"
+        api(f"pulls/{number}/update-branch", "PUT", {"expected_head_sha": head})
+        return f"Updated #{number}: CI failed on an older base; re-running on current master"
     if not apply:
         return f"Verified #{number} at {head}; canonical {source}; action={'update base' if behind else 'merge'}"
     if behind:
