@@ -108,7 +108,8 @@ def test_candidate_rejects_drafts_forks_and_other_branches(mutate):
     assert not delivery.candidate(p)
 
 
-def setup_api(monkeypatch, trees, *, mutate=None, pr_base=None, moved_base=None):
+def setup_api(monkeypatch, trees, *, mutate=None, pr_base=None, moved_base=None,
+              runs=None, behind_by=0):
     _, head, base = trees
     snapshot = pr(head, pr_base or base)
     calls = []
@@ -119,7 +120,9 @@ def setup_api(monkeypatch, trees, *, mutate=None, pr_base=None, moved_base=None)
         if path == "branches/master":
             return {"commit": {"sha": moved_base if moved_base and reads == 2 else base}}
         if path.startswith("actions/runs"):
-            return {"workflow_runs": [ci(head)]}
+            return {"workflow_runs": runs if runs is not None else [ci(head)]}
+        if path.startswith("compare/"):
+            return {"behind_by": behind_by}
         if method == "PUT":
             return {"merged": True, "sha": "merge"}
         reads += 1
@@ -174,6 +177,34 @@ def test_behind_base_updates_then_requires_another_ci_event(monkeypatch, trees):
     assert "waiting for new CI" in delivery.deliver(12, apply=True)
     assert [c for c in calls if c[1] == "PUT"] == [
         ("pulls/12/update-branch", "PUT", {"expected_head_sha": trees[1]})]
+
+
+def test_failed_ci_on_older_base_updates_branch_without_merging(monkeypatch, trees):
+    head = trees[1]
+    calls = setup_api(monkeypatch, trees, runs=[ci(head, conclusion="failure")], behind_by=3)
+    assert "re-running on current master" in delivery.deliver(12, apply=True)
+    assert [c for c in calls if c[1] != "GET"] == [
+        ("pulls/12/update-branch", "PUT", {"expected_head_sha": head})]
+
+
+def test_failed_ci_on_current_base_stays_held(monkeypatch, trees):
+    calls = setup_api(monkeypatch, trees, runs=[ci(trees[1], conclusion="failure")])
+    with pytest.raises(delivery.Hold, match="current base"):
+        delivery.deliver(12, apply=True)
+    assert not [c for c in calls if c[1] != "GET"]
+
+
+def test_failed_ci_dry_run_has_no_remote_writes(monkeypatch, trees):
+    calls = setup_api(monkeypatch, trees, runs=[ci(trees[1], conclusion="failure")], behind_by=1)
+    assert "action=update base" in delivery.deliver(12, apply=False)
+    assert not [c for c in calls if c[1] != "GET"]
+
+
+def test_pending_ci_never_updates_branch(monkeypatch, trees):
+    calls = setup_api(monkeypatch, trees, runs=[ci(trees[1], status="in_progress")], behind_by=2)
+    with pytest.raises(delivery.Hold, match="has not passed"):
+        delivery.deliver(12, apply=True)
+    assert not [c for c in calls if c[1] != "GET"]
 
 
 def test_current_base_race_never_writes(monkeypatch, trees):

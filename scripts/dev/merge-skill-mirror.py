@@ -52,13 +52,23 @@ def candidate(pr: dict) -> bool:
             and (pr.get("base", {}).get("repo") or {}).get("full_name") == REPO)
 
 
-def require_checks(runs: list[dict], head: str) -> None:
+def latest_ci(runs: list[dict], head: str) -> dict | None:
     eligible = [r for r in runs if r.get("path") == ".github/workflows/ci.yml"
                 and r.get("event") == "pull_request" and r.get("head_sha") == head
                 and (r.get("head_repository") or {}).get("full_name") == REPO]
-    latest = max(eligible, key=lambda r: r["id"], default=None)
+    return max(eligible, key=lambda r: r["id"], default=None)
+
+
+def require_checks(runs: list[dict], head: str) -> None:
+    latest = latest_ci(runs, head)
     if not latest or latest.get("status") != "completed" or latest.get("conclusion") != "success":
         raise Hold("The latest CI run for this exact PR head has not passed")
+
+
+def ci_failed(runs: list[dict], head: str) -> bool:
+    latest = latest_ci(runs, head)
+    return bool(latest and latest.get("status") == "completed"
+                and latest.get("conclusion") != "success")
 
 
 def tree(ref: str) -> dict[str, tuple[str, str, str]]:
@@ -114,6 +124,19 @@ def deliver(number: int, *, apply: bool) -> str:
     # Read the actual branch for ancestry, fetch validation and race checks.
     base = api("branches/master")["commit"]["sha"]
     runs = api(f"actions/runs?event=pull_request&head_sha={head}&per_page=100")
+    if ci_failed(runs["workflow_runs"], head):
+        # A mirror that failed on an older base may already be fixed by master
+        # (e.g. a plugin test updated after a canonical edit). Without this, a
+        # red head is never re-tested and the mirror waits for the next
+        # canonical change. Re-run once per base move; red on the current base
+        # stays held. No merge happens here: the new head needs green CI and
+        # the full verification below.
+        if not api(f"compare/{base}...{head}").get("behind_by"):
+            raise Hold("CI failed on the current base; the mirror needs a fix on master")
+        if not apply:
+            return f"#{number} failed CI on an older base; action=update base and re-run CI"
+        api(f"pulls/{number}/update-branch", "PUT", {"expected_head_sha": head})
+        return f"Updated #{number}: CI failed on an older base; re-running on current master"
     require_checks(runs["workflow_runs"], head)
     # Fixed remotes/refspecs only. Fetch data, never check out or import PR code.
     git("fetch", "--quiet", "--no-tags", "origin",
