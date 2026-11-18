@@ -108,7 +108,8 @@ def test_candidate_rejects_drafts_forks_and_other_branches(mutate):
     assert not delivery.candidate(p)
 
 
-def setup_api(monkeypatch, trees, *, mutate=None, pr_base=None, moved_base=None):
+def setup_api(monkeypatch, trees, *, mutate=None, pr_base=None, moved_base=None,
+              runs=None):
     _, head, base = trees
     snapshot = pr(head, pr_base or base)
     calls = []
@@ -119,7 +120,7 @@ def setup_api(monkeypatch, trees, *, mutate=None, pr_base=None, moved_base=None)
         if path == "branches/master":
             return {"commit": {"sha": moved_base if moved_base and reads == 2 else base}}
         if path.startswith("actions/runs"):
-            return {"workflow_runs": [ci(head)]}
+            return {"workflow_runs": runs if runs is not None else [ci(head)]}
         if method == "PUT":
             return {"merged": True, "sha": "merge"}
         reads += 1
@@ -174,6 +175,74 @@ def test_behind_base_updates_then_requires_another_ci_event(monkeypatch, trees):
     assert "waiting for new CI" in delivery.deliver(12, apply=True)
     assert [c for c in calls if c[1] == "PUT"] == [
         ("pulls/12/update-branch", "PUT", {"expected_head_sha": trees[1]})]
+
+
+def advance_base(trees):
+    """Move plugin master past the mirror head, as a fix landing on master would."""
+    run("checkout", "-q", "--detach", trees[2])
+    Path("README.md").write_text("base moved\n")
+    run("add", "."); run("commit", "-qm", "new base")
+    base = run("rev-parse", "HEAD")
+    run("update-ref", "refs/mirror/base", base)
+    return (trees[0], trees[1], base)
+
+
+def failed(head):
+    return [ci(head, conclusion="failure")]
+
+
+def test_failed_ci_on_older_base_updates_branch_without_merging(monkeypatch, trees):
+    moved = advance_base(trees)
+    calls = setup_api(monkeypatch, moved, pr_base=trees[2], runs=failed(trees[1]))
+    assert "re-running on current master" in delivery.deliver(12, apply=True)
+    assert [c for c in calls if c[1] != "GET"] == [
+        ("pulls/12/update-branch", "PUT", {"expected_head_sha": trees[1]})]
+
+
+def test_failed_ci_on_current_base_stays_held(monkeypatch, trees):
+    calls = setup_api(monkeypatch, trees, runs=failed(trees[1]))
+    with pytest.raises(delivery.Hold, match="current base"):
+        delivery.deliver(12, apply=True)
+    assert not [c for c in calls if c[1] != "GET"]
+
+
+def test_failed_ci_dry_run_has_no_remote_writes(monkeypatch, trees):
+    moved = advance_base(trees)
+    calls = setup_api(monkeypatch, moved, pr_base=trees[2], runs=failed(trees[1]))
+    assert "action=update base" in delivery.deliver(12, apply=False)
+    assert not [c for c in calls if c[1] != "GET"]
+
+
+def test_pending_ci_never_updates_branch(monkeypatch, trees):
+    moved = advance_base(trees)
+    calls = setup_api(monkeypatch, moved, pr_base=trees[2],
+                      runs=[ci(trees[1], status="in_progress")])
+    with pytest.raises(delivery.Hold, match="has not passed"):
+        delivery.deliver(12, apply=True)
+    assert not [c for c in calls if c[1] != "GET"]
+
+
+def test_failed_noncanonical_mirror_is_never_updated(monkeypatch, trees):
+    run("checkout", "-q", "--detach", trees[1])
+    Path("skills/guide/SKILL.md").write_text("unapproved content\n")
+    run("add", "."); run("commit", "-qm", "mutation")
+    head = run("rev-parse", "HEAD")
+    run("update-ref", "refs/mirror/head", head)
+    moved = advance_base(trees)
+    calls = setup_api(monkeypatch, (trees[0], head, moved[2]), pr_base=trees[2],
+                      runs=failed(head))
+    with pytest.raises(delivery.Hold):
+        delivery.deliver(12, apply=True)
+    assert not [c for c in calls if c[1] != "GET"]
+
+
+def test_failed_ci_respects_hold_label_added_during_verification(monkeypatch, trees):
+    moved = advance_base(trees)
+    calls = setup_api(monkeypatch, moved, pr_base=trees[2], runs=failed(trees[1]),
+                      mutate=lambda p: p["labels"].append({"name": "automerge-hold"}))
+    with pytest.raises(delivery.Hold, match="state changed"):
+        delivery.deliver(12, apply=True)
+    assert not [c for c in calls if c[1] != "GET"]
 
 
 def test_current_base_race_never_writes(monkeypatch, trees):

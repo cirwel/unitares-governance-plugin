@@ -43,6 +43,10 @@ def test_coherence_sources_and_roles_are_explicit() -> None:
         "42e86f9405e8744a",  # unitares 817424d9, historical baseline
         "40af918727ff685b",  # unitares 87dd33c3, explicit ODE influence
         "6d854721f11a6e93",  # unitares 4f6bbdcf, SN1 defaults; sources rechecked
+        # unitares 427bdbe5 (#3286), HU1/SD1/SH1 defaults: behavioral authority
+        # now reads "once behavioral confidence reaches 0.3"; rechecked against
+        # BEHAVIORAL_AUTHORITY_THRESHOLD in cold_start_risk_confirmation.py.
+        "6adb036f423f7be5",
     }
     assert _coherence_section_sha() in reviewed_snapshots
     assert "unitares/src/behavioral_sensor.py" in frontmatter
@@ -66,7 +70,11 @@ def test_legacy_controller_is_not_taught_as_health_or_balance() -> None:
 def test_e_and_i_controller_dependency_matches_the_instrument_era() -> None:
     _, body = _parts()
 
-    if _coherence_section_sha() == "6d854721f11a6e93":
+    # Only the two pre-SN1 snapshots teach the legacy controller terms; every
+    # later reviewed snapshot is SN1-or-newer. Keying on the legacy set keeps a
+    # newly reviewed hash from falling into the legacy branch.
+    pre_sn1_snapshots = {"42e86f9405e8744a", "40af918727ff685b"}
+    if _coherence_section_sha() not in pre_sn1_snapshots:
         assert "coherence-level self-loops neutralized by default" in body
         assert "coherence-trend and fleet-strategic self-loops neutralized by default" in body
         assert "UNITARES_NEUTRALIZE_SENSOR_SELF_LOOPS=1" in body
