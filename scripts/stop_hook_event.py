@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import signal
 import stat
 import subprocess
@@ -17,8 +18,10 @@ from typing import Any, Mapping
 
 try:
     from _redact import redact_secrets
+    from _slot_from_stdin import host_session_id_from_payload
 except ModuleNotFoundError:  # Imported as ``scripts.stop_hook_event`` in tests.
     from scripts._redact import redact_secrets
+    from scripts._slot_from_stdin import host_session_id_from_payload
 
 
 SUPPORTED_HOSTS = ("claude", "codex", "agy")
@@ -776,13 +779,20 @@ def recover_agy_identity_from_transcript(
 
 
 def normalize_agy(payload: Mapping[str, Any]) -> StopHookEvent:
-    """Normalize Antigravity (agy) Stop input and its transcript tail."""
+    """Normalize Antigravity (agy) Stop/SessionStart input and its transcript tail."""
     session_id = str(
         payload.get("conversationId") or payload.get("session_id") or ""
     ).strip()
     transcript_text, tool_count, tool_names, is_subagent = _agy_turn_from_transcript(
         payload, session_id
     )
+    parent_cid = str(
+        payload.get("parentConversationId")
+        or payload.get("parent_conversation_id")
+        or ""
+    ).strip()
+    if parent_cid:
+        is_subagent = True
     if "last_assistant_message" in payload and payload.get("last_assistant_message") is not None:
         raw_message = payload.get("last_assistant_message")
         if not isinstance(raw_message, str):
@@ -984,6 +994,39 @@ def normalize_stop_hook(
     return event
 
 
+_SHELL_VAR_NAME_RE = re.compile(r"^STOP_[A-Z0-9_]+$")
+
+
+def format_shell_vars(event: StopHookEvent, *, host_session_id: str = "") -> str:
+    """Format ``event`` as POSIX-safe ``STOP_*`` shell variable assignments."""
+    pairs: tuple[tuple[str, str], ...] = (
+        ("STOP_WORKSPACE_DIR", event.workspace_dir),
+        ("STOP_IS_SUBAGENT", "true" if event.is_subagent else "false"),
+        ("STOP_HOST_SESSION_ID", host_session_id),
+        (
+            "STOP_FLOOR_TOOLS",
+            str(event.tool_count if event.tool_count is not None else 0),
+        ),
+        ("STOP_FLOOR_SUMMARY", event.floor_summary),
+        ("STOP_SUMMARY", event.summary),
+        ("STOP_COMPLEXITY", str(event.complexity)),
+        ("STOP_MODEL", event.model),
+        ("STOP_MODEL_PROVIDER", event.model_provider),
+        ("STOP_MODEL_SOURCE", event.model_source),
+        ("STOP_HARNESS_TYPE", event.harness_type),
+        ("STOP_HARNESS_VERSION", event.harness_version),
+        ("STOP_HARNESS_SOURCE", event.harness_source),
+    )
+    lines: list[str] = []
+    for key, raw_val in pairs:
+        if not _SHELL_VAR_NAME_RE.fullmatch(key):
+            raise ValueError(f"unsafe shell variable name: {key!r}")
+        clean = str(raw_val or "").replace("\x00", "")
+        lines.append(f"{key}={shlex.quote(clean)}")
+    lines.append("STOP_FORMAT_OK=1")
+    return "\n".join(lines)
+
+
 def main(argv: list[str] | None = None, stdin_text: str | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", choices=SUPPORTED_HOSTS, required=True)
@@ -991,6 +1034,7 @@ def main(argv: list[str] | None = None, stdin_text: str | None = None) -> int:
     parser.add_argument("--workspace", default="")
     parser.add_argument("--slot", default="")
     parser.add_argument("--probe-git", action="store_true")
+    parser.add_argument("--format", choices=("json", "shell"), default="json")
     args = parser.parse_args(argv)
     raw = sys.stdin.read() if stdin_text is None else stdin_text
     if args.recover_agy_identity:
@@ -1015,7 +1059,15 @@ def main(argv: list[str] | None = None, stdin_text: str | None = None) -> int:
     except StopHookPayloadError as exc:
         print(f"stop_hook_event.py: {exc}", file=sys.stderr)
         return 2
-    print(json.dumps(event.to_json_dict(), separators=(",", ":")))
+    if args.format == "shell":
+        print(
+            format_shell_vars(
+                event,
+                host_session_id=host_session_id_from_payload(raw),
+            )
+        )
+    else:
+        print(json.dumps(event.to_json_dict(), separators=(",", ":")))
     return 0
 
 

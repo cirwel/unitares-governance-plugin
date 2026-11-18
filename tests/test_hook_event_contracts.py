@@ -1175,3 +1175,70 @@ def test_git_state_breadcrumb_strips_overrides_handles_unborn_behind_conflict_an
     assert agy_multi.git_context.startswith("git=branch-a@")
 
 
+def test_stop_hook_event_shell_format_and_parent_conversation_subagent(tmp_path, capsys):
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    tricky = "Done $(touch /tmp/pwn) `id` 'quote'\x00end"
+    payload = json.dumps(
+        {
+            "conversationId": "conv-shell-123",
+            "workspacePaths": [str(ws)],
+            "last_assistant_message": tricky,
+            "modelName": "gemini-4-carbon-high",
+        }
+    )
+    rc_json = stop_hook_event.main(["--host", "agy"], stdin_text=payload)
+    assert rc_json == 0
+    json_out = json.loads(capsys.readouterr().out)
+    assert json_out["is_subagent"] is False
+    assert json_out["model"] == "gemini-4-carbon-high"
+
+    rc_shell = stop_hook_event.main(
+        ["--host", "agy", "--format", "shell"], stdin_text=payload
+    )
+    assert rc_shell == 0
+    shell_out = capsys.readouterr().out
+    assert "\x00" not in shell_out
+    assert shell_out.splitlines()[-1] == "STOP_FORMAT_OK=1"
+    for line in shell_out.splitlines():
+        key, _, _ = line.partition("=")
+        assert stop_hook_event._SHELL_VAR_NAME_RE.fullmatch(key)
+
+    import subprocess
+
+    probe = subprocess.run(
+        [
+            "/bin/bash",
+            "-c",
+            f'{shell_out}\nprintf "%s|%s|%s|%s" "$STOP_FORMAT_OK" "$STOP_HOST_SESSION_ID" "$STOP_IS_SUBAGENT" "$STOP_MODEL"',
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert probe.stdout == "1|conv-shell-123|false|gemini-4-carbon-high"
+
+    # Transcript-free SessionStart payload with parentConversationId -> is_subagent=True.
+    sub_ev = stop_hook_event.normalize_stop_hook(
+        {
+            "conversationId": "sub-conv-1",
+            "parentConversationId": "parent-conv-1",
+            "workspacePaths": [str(ws)],
+        },
+        host="agy",
+    )
+    assert sub_ev.is_subagent is True
+
+    # Top-level forked/resumed session with rootConversationId but no parentConversationId stays False.
+    top_ev = stop_hook_event.normalize_stop_hook(
+        {
+            "conversationId": "top-conv-2",
+            "rootConversationId": "orig-root-conv",
+            "workspacePaths": [str(ws)],
+        },
+        host="agy",
+    )
+    assert top_ev.is_subagent is False
+
+
+
