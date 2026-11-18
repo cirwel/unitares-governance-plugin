@@ -1021,7 +1021,12 @@ def format_shell_vars(event: StopHookEvent, *, host_session_id: str = "") -> str
     for key, raw_val in pairs:
         if not _SHELL_VAR_NAME_RE.fullmatch(key):
             raise ValueError(f"unsafe shell variable name: {key!r}")
-        clean = str(raw_val or "").replace("\x00", "")
+        clean = (
+            str(raw_val or "")
+            .replace("\x00", "")
+            .encode("utf-8", "replace")
+            .decode("utf-8")
+        )
         lines.append(f"{key}={shlex.quote(clean)}")
     lines.append("STOP_FORMAT_OK=1")
     return "\n".join(lines)

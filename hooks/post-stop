@@ -60,9 +60,11 @@ CODEX_CHECKIN_TIMEOUT_CAP="15"
 
 _timeout_at_most() {
   if command -v awk >/dev/null 2>&1; then
-    LC_ALL=C awk -v val="${1:-}" -v cap="${2:-}" 'BEGIN {
-      c = cap + 0
-      if (val ~ /^[0-9]+([.][0-9]+)?([eE][+-]?[0-9]+)?$/) {
+    _TMO_VAL="${1:-}" _TMO_CAP="${2:-}" LC_ALL=C awk 'BEGIN {
+      val = ENVIRON["_TMO_VAL"]
+      c = ENVIRON["_TMO_CAP"] + 0
+      gsub(/^[ \t\r\n]+|[ \t\r\n]+$/, "", val)
+      if (val ~ /^[+-]?(([0-9]+([.][0-9]*)?)|([.][0-9]+))([eE][+-]?[0-9]+)?$/) {
         v = val + 0
         if (v > 0 && v < c) {
           printf "%g\n", v
@@ -158,9 +160,10 @@ fi
 # SessionStart mode (--session-start) is strictly for pre-binding orchestrated
 # thread anchors (e.g. dispatch_beam Turn 1) so GitHub writes during Turn 1
 # carry the thread's UNITARES agent UUID before the first Stop. Interactive
-# sessions exit immediately in pure bash without spawning Python or touching
-# the network, preserving explicit Turn-1 start_session() + Stop backstop.
+# sessions drain stdin and exit immediately in pure bash without spawning
+# Python or touching the network, preserving explicit Turn-1 start_session().
 if [[ "${HOOK_MODE}" == "session_start" && "${ANCHOR_RESUME_ENABLED}" != "1" ]]; then
+  cat >/dev/null 2>&1 || true
   exit 0
 fi
 
@@ -228,15 +231,32 @@ fi
 # Antigravity invoke_subagent child conversations start at step_index 0 with a
 # SYSTEM_MESSAGE (or carry parentConversationId) and share the parent's HOME
 # hooks and OS PID. In addition, an in-process child spawned inside an
-# orchestrated agy turn may fire before transcript.jsonl exists and with
-# parentConversationId stripped; guard the thread anchor so at most one
-# top-level conversation slot per live owner process may claim it.
+# orchestrated agy turn may fire SessionStart before transcript.jsonl exists
+# and with parentConversationId stripped; atomically claim the thread anchor on
+# SessionStart so at most one top-level conversation slot per live owner
+# process may bind it.
 if [[ "${HOOK_HOST}" == "agy" && "${ANCHOR_RESUME_ENABLED}" == "1" && -n "${RAW_SLOT:-}" \
       && "${UNITARES_ORCHESTRATED_OWNER_PID}" =~ ^[0-9]+$ ]]; then
   SAFE_ANCHOR_KEY="$(printf '%s' "${UNITARES_CLIENT_SESSION_ID}" | tr -c 'A-Za-z0-9_-' '_' | cut -c1-80)"
   ANCHOR_OWNER_FILE="${HOME}/.unitares/.orchestrated-anchor-${SAFE_ANCHOR_KEY}"
+  ANCHOR_LOCK_DIR="${ANCHOR_OWNER_FILE}.lock"
   OWNER_LSTART="$(ps -o lstart= -p "${UNITARES_ORCHESTRATED_OWNER_PID}" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' || true)"
   OWNER_PROC_KEY="${UNITARES_ORCHESTRATED_OWNER_PID}|${OWNER_LSTART}"
+  mkdir -p "${HOME}/.unitares" 2>/dev/null || true
+  LOCK_ACQUIRED=0
+  for _attempt in 1 2 3 4 5 6 7 8 9 10; do
+    if mkdir "${ANCHOR_LOCK_DIR}" 2>/dev/null; then
+      LOCK_ACQUIRED=1
+      break
+    fi
+    sleep 0.05
+  done
+  if [[ "${LOCK_ACQUIRED}" != "1" ]]; then
+    rmdir "${ANCHOR_LOCK_DIR}" 2>/dev/null || true
+    if mkdir "${ANCHOR_LOCK_DIR}" 2>/dev/null; then
+      LOCK_ACQUIRED=1
+    fi
+  fi
   if [[ -f "${ANCHOR_OWNER_FILE}" && ! -L "${ANCHOR_OWNER_FILE}" ]]; then
     RECORDED_PROC_KEY="$(sed -n '1p' "${ANCHOR_OWNER_FILE}" 2>/dev/null || true)"
     RECORDED_SLOT="$(sed -n '2p' "${ANCHOR_OWNER_FILE}" 2>/dev/null || true)"
@@ -246,12 +266,18 @@ if [[ "${HOOK_HOST}" == "agy" && "${ANCHOR_RESUME_ENABLED}" == "1" && -n "${RAW_
       AGY_IS_SUBAGENT="true"
     fi
   fi
-  if [[ "${AGY_IS_SUBAGENT}" != "True" && "${AGY_IS_SUBAGENT}" != "true" ]]; then
-    mkdir -p "${HOME}/.unitares" 2>/dev/null || true
+  if [[ "${HOOK_MODE}" == "session_start" \
+        && "${LOCK_ACQUIRED}" == "1" \
+        && "${AGY_IS_SUBAGENT}" != "True" \
+        && "${AGY_IS_SUBAGENT}" != "true" ]]; then
     ANCHOR_TMP="${ANCHOR_OWNER_FILE}.$$.tmp"
-    if ( umask 077 && printf '%s\n%s\n' "${OWNER_PROC_KEY}" "${RAW_SLOT}" >"${ANCHOR_TMP}" ) 2>/dev/null; then
+    rm -f "${ANCHOR_TMP}" 2>/dev/null || true
+    if ( umask 077 && set -C && printf '%s\n%s\n' "${OWNER_PROC_KEY}" "${RAW_SLOT}" >"${ANCHOR_TMP}" ) 2>/dev/null; then
       mv -f "${ANCHOR_TMP}" "${ANCHOR_OWNER_FILE}" 2>/dev/null || rm -f "${ANCHOR_TMP}" 2>/dev/null || true
     fi
+  fi
+  if [[ "${LOCK_ACQUIRED}" == "1" ]]; then
+    rmdir "${ANCHOR_LOCK_DIR}" 2>/dev/null || true
   fi
 fi
 

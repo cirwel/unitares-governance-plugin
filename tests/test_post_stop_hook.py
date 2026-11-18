@@ -856,29 +856,73 @@ def test_agy_session_start_binds_orchestrated_anchor_only_and_guards_subagents(t
             "process_agent_update"
         ]
 
-        # 5) Subsequent turn in a NEW agy OS process (OWNER_PID=42425) with a new
-        # conversation slot is allowed to bind the thread anchor.
+        # 5) Subsequent turn in a NEW agy OS process (real run-hook.cmd PPID == os.getpid())
+        # with a new conversation slot is allowed to bind the thread anchor, and
+        # concurrent callbacks under the same owner PID allow only one slot to bind.
+        import os
+        from concurrent.futures import ThreadPoolExecutor
+
         LazyOnboardHandler.calls = []
-        next_env = {
-            **orch_env,
-            "UNITARES_ORCHESTRATED_OWNER_PID": "42425",
-            "UNITARES_HOOK_HOST_PID": "42425",
+        real_owner_env = {
+            **base_env,
+            "UNITARES_AUTO_ONBOARD_TIMEOUT": " .5 ",
+            "UNITARES_CLIENT_SESSION_ID": "agent:/thread-98765",
+            "UNITARES_ORCHESTRATED": "1",
+            "UNITARES_ORCHESTRATED_OWNER_PID": str(os.getpid()),
         }
-        res_next = subprocess.run(
-            [str(PLUGIN_ROOT / "hooks" / "post-stop"), "--host", "agy", "--session-start"],
-            env=next_env,
-            cwd=str(ws),
-            input=json.dumps({"conversationId": next_turn_cid, "workspacePaths": [str(ws)]}),
-            capture_output=True,
-            text=True,
-            timeout=15,
-            check=False,
-        )
-        assert res_next.returncode == 0
-        assert res_next.stdout == "{}\n"
-        assert [c.get("name") for c in LazyOnboardHandler.calls] == ["onboard"]
+
+        def _invoke_run_hook(cid: str):
+            return subprocess.run(
+                [
+                    "/bin/sh",
+                    "-c",
+                    f'exec "{PLUGIN_ROOT / "hooks" / "run-hook.cmd"}" post-stop --host agy --session-start',
+                ],
+                env=real_owner_env,
+                cwd=str(ws),
+                input=json.dumps({"conversationId": cid, "workspacePaths": [str(ws)]}),
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+
+        race_a = next_turn_cid
+        race_b = "eeeeeeee-1111-4222-8333-444444444444"
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            f1 = pool.submit(_invoke_run_hook, race_a)
+            f2 = pool.submit(_invoke_run_hook, race_b)
+            r1, r2 = f1.result(), f2.result()
+
+        assert r1.returncode == 0 and r1.stdout == "{}\n"
+        assert r2.returncode == 0 and r2.stdout == "{}\n"
+        onboards = [c for c in LazyOnboardHandler.calls if c.get("name") == "onboard"]
+        assert len(onboards) == 1
     finally:
         srv.shutdown()
         thread.join(timeout=2)
 
+
+def test_post_stop_timeout_at_most_preserves_float_spellings():
+    script = """
+    eval "$(sed -n '/^_timeout_at_most()/,/^}/p' hooks/post-stop)"
+    for v in '.5' '+0.5' '1.' ' 0.5 ' '2.5' '0' '-1' 'nan' 'inf' '1e999' 'garbage'; do
+      printf '%s=%s\\n' "$v" "$(_timeout_at_most "$v" 15)"
+    done
+    """
+    res = subprocess.run(
+        ["/bin/bash", "-c", script],
+        cwd=str(PLUGIN_ROOT),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    got = dict(line.split("=", 1) for line in res.stdout.strip().splitlines())
+    assert got[".5"] == "0.5"
+    assert got["+0.5"] == "0.5"
+    assert got["1."] == "1"
+    assert got[" 0.5 "] == "0.5"
+    assert got["2.5"] == "2.5"
+    for invalid in ("0", "-1", "nan", "inf", "1e999", "garbage"):
+        assert got[invalid] == "15"
 

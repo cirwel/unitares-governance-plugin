@@ -1178,14 +1178,14 @@ def test_git_state_breadcrumb_strips_overrides_handles_unborn_behind_conflict_an
 def test_stop_hook_event_shell_format_and_parent_conversation_subagent(tmp_path, capsys):
     ws = tmp_path / "ws"
     ws.mkdir()
-    tricky = "Done $(touch /tmp/pwn) `id` 'quote'\x00end"
-    payload = json.dumps(
-        {
-            "conversationId": "conv-shell-123",
-            "workspacePaths": [str(ws)],
-            "last_assistant_message": tricky,
-            "modelName": "gemini-4-carbon-high",
-        }
+    marker = tmp_path / "never-created"
+    tricky = f"Done $(touch {marker}) `id` 'quote'\ud800\x00end"
+    payload = (
+        '{"conversationId":"conv-shell-123","workspacePaths":['
+        + json.dumps(str(ws))
+        + '],"last_assistant_message":'
+        + json.dumps(tricky)
+        + ',"modelName":"gemini-4-carbon-high"}'
     )
     rc_json = stop_hook_event.main(["--host", "agy"], stdin_text=payload)
     assert rc_json == 0
@@ -1217,6 +1217,7 @@ def test_stop_hook_event_shell_format_and_parent_conversation_subagent(tmp_path,
         check=True,
     )
     assert probe.stdout == "1|conv-shell-123|false|gemini-4-carbon-high"
+    assert not marker.exists()
 
     # Transcript-free SessionStart payload with parentConversationId -> is_subagent=True.
     sub_ev = stop_hook_event.normalize_stop_hook(
@@ -1239,6 +1240,5 @@ def test_stop_hook_event_shell_format_and_parent_conversation_subagent(tmp_path,
         host="agy",
     )
     assert top_ev.is_subagent is False
-
 
 
