@@ -383,7 +383,7 @@ def test_release_session_releases_and_removes_state(tmp_path, monkeypatch, lease
     assert not state_path.exists()
 
 
-def test_release_edit_releases_only_edited_file_and_keeps_others(tmp_path, monkeypatch, lease_server):
+def test_release_edit_releases_every_lease_the_event_holds(tmp_path, monkeypatch, lease_server):
     _lease_env(monkeypatch, lease_server)
     tool_use_id = "toolu_release"
     state_path = _seed_state(
@@ -408,16 +408,18 @@ def test_release_edit_releases_only_edited_file_and_keeps_others(tmp_path, monke
     )
 
     assert rc == 0
-    # Only the edited file's lease is released.
-    assert [call["path"] for call in LeaseHandler.calls] == ["/v1/lease/release"]
-    assert LeaseHandler.calls[0]["body"]["lease_id"] == "11111111-1111-4111-8111-111111111111"
-    # State keeps the still-held b.py lease, drops a.py.
-    state = json.loads(state_path.read_text())
-    assert "file:///tmp/a.py" not in state["leases"]
-    assert "file:///tmp/b.py" in state["leases"]
+    # The state belongs to this one completed edit, so every row it holds goes.
+    assert [call["path"] for call in LeaseHandler.calls] == ["/v1/lease/release"] * 2
+    assert sorted(call["body"]["lease_id"] for call in LeaseHandler.calls) == [
+        "11111111-1111-4111-8111-111111111111",
+        "22222222-2222-4222-8222-222222222222",
+    ]
+    assert not state_path.exists()
 
 
-def test_release_edit_noop_when_file_not_leased(tmp_path, monkeypatch, lease_server):
+def test_release_edit_releases_event_lease_recorded_under_another_path(
+    tmp_path, monkeypatch, lease_server
+):
     _lease_env(monkeypatch, lease_server)
     tool_use_id = "toolu_unleased"
     _seed_state(
@@ -438,7 +440,9 @@ def test_release_edit_noop_when_file_not_leased(tmp_path, monkeypatch, lease_ser
     )
 
     assert rc == 0
-    assert LeaseHandler.calls == []  # nothing released for an unleased file
+    assert [call["body"]["lease_id"] for call in LeaseHandler.calls] == [
+        "22222222-2222-4222-8222-222222222222"
+    ]
 
 
 def test_release_edit_does_not_adopt_workspace_legacy_state(
@@ -1151,7 +1155,7 @@ def test_codex_post_edit_releases_every_patch_path(tmp_path, monkeypatch):
     )
 
     assert rc == 0
-    assert released == ["lease-b", "lease-a"]
+    assert sorted(released) == ["lease-a", "lease-b"]
     assert not state_path.exists()
 
 
@@ -1302,7 +1306,7 @@ def test_pre_edit_path_setup_obeys_shared_batch_deadline(tmp_path, monkeypatch):
     assert len(root_calls) < 10
 
 
-def test_release_edit_path_setup_obeys_codex_deadline(tmp_path, monkeypatch):
+def test_release_edit_obeys_codex_deadline_without_probing(tmp_path, monkeypatch):
     monkeypatch.setenv("LEASE_PLANE_BEARER_TOKEN", "lease-token")
     monkeypatch.setenv("UNITARES_SECRETS_ENV", "/dev/null")
     tool_use_id = "call_release_deadline"
@@ -1330,12 +1334,16 @@ def test_release_edit_path_setup_obeys_codex_deadline(tmp_path, monkeypatch):
         clock[0] += timeout_s
         return None
 
-    def unexpected_http(*args, **kwargs):
-        raise AssertionError("release HTTP must not start after path setup exhausts its budget")
+    released = []
+
+    def slow_release(method, path, *, token, body=None, timeout_s=None):
+        released.append(body["lease_id"])
+        clock[0] += 0.1
+        return {"ok": True}
 
     monkeypatch.setattr(file_lease_hook.time, "monotonic", monotonic)
     monkeypatch.setattr(file_lease_hook, "_worktree_roots", slow_roots)
-    monkeypatch.setattr(file_lease_hook, "_http_json", unexpected_http)
+    monkeypatch.setattr(file_lease_hook, "_http_json", slow_release)
 
     rc = file_lease_hook.main(
         ["release-edit", "--workspace", str(tmp_path), "--host", "codex"],
@@ -1343,8 +1351,9 @@ def test_release_edit_path_setup_obeys_codex_deadline(tmp_path, monkeypatch):
     )
 
     assert rc == 0
-    assert clock[0] <= 1.5
-    assert len(root_calls) <= 2
+    assert root_calls == []
+    assert clock[0] <= 1.5 + 0.1
+    assert 0 < len(released) < len(paths)
 
 
 def test_release_session_discovery_obeys_codex_deadline(tmp_path, monkeypatch):
@@ -1864,53 +1873,177 @@ def test_worktree_roots_ignore_inherited_discovery_limits(
     assert variable not in file_lease_hook._git_probe_env()
 
 
-@pytest.mark.skipif(shutil.which("git") is None, reason="git not available")
-def test_release_edit_releases_every_event_lease_for_the_path(tmp_path, monkeypatch):
+def test_release_edit_releases_rows_recorded_under_other_spellings(tmp_path, monkeypatch):
     monkeypatch.setenv("LEASE_PLANE_BEARER_TOKEN", "lease-token")
     monkeypatch.setenv("UNITARES_SECRETS_ENV", "/dev/null")
-    monkeypatch.delenv("UNITARES_FILE_LEASES_REQUIRED", raising=False)
-    main = _committed_repo(tmp_path / "main")
-    sibling = tmp_path / "wt"
-    _git("worktree", "add", "-q", str(sibling), "HEAD", cwd=main)
-    calls = []
-    recording = _recording_http(calls)
-    failing_lease_ids = set()
+    tool_use_id = "call_two_spellings"
+    state_path = _seed_state(
+        tmp_path,
+        "codex-slot",
+        tool_use_id,
+        {
+            "file:///raw/wt/src/a.py": {"lease_id": "lease-raw", "path": "./src/a.py"},
+            f"file://{tmp_path / 'src' / 'a.py'}": {
+                "lease_id": "lease-verified",
+                "path": "src/a.py",
+            },
+        },
+    )
+    released = []
 
     def fake_http(method, path, *, token, body=None, timeout_s=None):
-        if path.endswith("/release") and body["lease_id"] in failing_lease_ids:
-            calls.append((path, body))
-            return {"ok": False, "error": "service_unavailable"}
-        return recording(method, path, token=token, body=body, timeout_s=timeout_s)
+        released.append(body["lease_id"])
+        return {"ok": True}
 
     monkeypatch.setattr(file_lease_hook, "_http_json", fake_http)
-    real_roots = file_lease_hook._worktree_roots
-    tool_use_id = "call_stale_then_post"
-    target = str(sibling / "a.py")
-    stdin_text = _codex_payload(paths=(target,), tool_use_id=tool_use_id)
-
-    monkeypatch.setattr(
-        file_lease_hook, "_worktree_roots", _target_probe_fails(main, real_roots)
-    )
-    pre = ["pre-edit", "--workspace", str(main), "--host", "codex"]
-    assert file_lease_hook.main(pre, stdin_text=stdin_text) == 0
-    raw_lease_id = f"lease-{len(calls)}"
-    failing_lease_ids.add(raw_lease_id)
-
-    # The retry cannot release the raw-path lease but acquires the verified one.
-    monkeypatch.setattr(file_lease_hook, "_worktree_roots", real_roots)
-    assert file_lease_hook.main(pre, stdin_text=stdin_text) == 0
-    verified_lease_id = f"lease-{len(calls)}"
-    assert calls[-1][1]["surface_id"] == f"file://{(main / 'a.py').resolve()}"
-    calls.clear()
 
     assert file_lease_hook.main(
-        ["release-edit", "--workspace", str(main), "--host", "codex"],
-        stdin_text=stdin_text,
+        ["release-edit", "--workspace", str(tmp_path), "--host", "codex"],
+        stdin_text=_codex_payload(paths=("src/a.py",), tool_use_id=tool_use_id),
     ) == 0
 
-    released = [body["lease_id"] for path, body in calls if path.endswith("/release")]
-    assert verified_lease_id in released
-    assert raw_lease_id in released
+    assert sorted(released) == ["lease-raw", "lease-verified"]
+    assert not state_path.exists()
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git not available")
+@pytest.mark.parametrize("required", [True, False])
+def test_retry_with_unreleasable_mismatched_lease_does_not_acquire(
+    tmp_path, monkeypatch, capsys, required
+):
+    monkeypatch.setenv("LEASE_PLANE_BEARER_TOKEN", "lease-token")
+    monkeypatch.setenv("UNITARES_SECRETS_ENV", "/dev/null")
+    if required:
+        monkeypatch.setenv("UNITARES_FILE_LEASES_REQUIRED", "1")
+    else:
+        monkeypatch.delenv("UNITARES_FILE_LEASES_REQUIRED", raising=False)
+    main = _committed_repo(tmp_path / "main")
+    tool_use_id = "call_unreleasable"
+    state_path = _seed_state(
+        main,
+        "codex-slot",
+        tool_use_id,
+        {"file:///raw/elsewhere/a.py": {"lease_id": "lease-raw", "path": "a.py"}},
+        holder_uuid=file_lease_hook._holder_uuid(
+            main,
+            file_lease_hook.normalize_edit_hook(
+                _codex_payload(paths=("a.py",), tool_use_id=tool_use_id), host="codex"
+            ),
+            {},
+        ),
+    )
+    calls = []
+
+    def fake_http(method, path, *, token, body=None, timeout_s=None):
+        calls.append((path, body))
+        return {"ok": False, "error": "service_unavailable"}
+
+    monkeypatch.setattr(file_lease_hook, "_http_json", fake_http)
+
+    rc = file_lease_hook.main(
+        ["pre-edit", "--workspace", str(main), "--host", "codex"],
+        stdin_text=_codex_payload(paths=("a.py",), tool_use_id=tool_use_id),
+    )
+
+    assert rc == (2 if required else 0)
+    assert [path for path, _ in calls] == ["/v1/lease/release"]
+    assert json.loads(state_path.read_text())["leases"][
+        "file:///raw/elsewhere/a.py"
+    ]["lease_id"] == "lease-raw"
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git not available")
+def test_retry_keeps_renewed_lease_when_a_symlink_now_resolves_elsewhere(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("LEASE_PLANE_BEARER_TOKEN", "lease-token")
+    monkeypatch.setenv("UNITARES_SECRETS_ENV", "/dev/null")
+    monkeypatch.setenv("UNITARES_FILE_LEASES_REQUIRED", "1")
+    main = _committed_repo(tmp_path / "main")
+    (main / "x.py").write_text("x\n")
+    (main / "y.py").write_text("y\n")
+    (main / "l.py").symlink_to("x.py")
+    calls = []
+    monkeypatch.setattr(file_lease_hook, "_http_json", _recording_http(calls))
+    args = ["pre-edit", "--workspace", str(main), "--host", "codex"]
+    tool_use_id = "call_symlink_moved"
+
+    assert file_lease_hook.main(
+        args, stdin_text=_codex_payload(paths=("l.py",), tool_use_id=tool_use_id)
+    ) == 0
+    calls.clear()
+    (main / "l.py").unlink()
+    (main / "l.py").symlink_to("y.py")
+
+    assert file_lease_hook.main(
+        args, stdin_text=_codex_payload(paths=("x.py", "l.py"), tool_use_id=tool_use_id)
+    ) == 0
+
+    assert [path for path, _ in calls] == ["/v1/lease/heartbeat", "/v1/lease/acquire"]
+    state = json.loads(
+        file_lease_hook._state_path(main, "codex-slot", tool_use_id).read_text()
+    )
+    assert sorted(state["leases"]) == [
+        f"file://{(main / 'x.py').resolve()}",
+        f"file://{(main / 'y.py').resolve()}",
+    ]
+
+
+def _case_insensitive(directory: Path) -> bool:
+    alias = directory.parent / directory.name.swapcase()
+    try:
+        return alias != directory and os.path.samefile(alias, directory)
+    except OSError:
+        return False
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git not available")
+def test_case_alias_of_worktree_root_maps_to_the_stored_casing(tmp_path):
+    main = _committed_repo(tmp_path / "Repo")
+    if not _case_insensitive(main):
+        pytest.skip("volume is case-sensitive")
+    alias = tmp_path / "rEPO"
+    expected = f"file://{(main / 'src' / 'a.py').resolve()}"
+
+    for workspace in (main, alias):
+        roots = file_lease_hook._worktree_roots(workspace)
+        for strict in (True, False):
+            assert file_lease_hook._surface_id(
+                str(alias / "src" / "a.py"), workspace, roots, [], strict=strict
+            ) == expected
+    # A probe-only path (no cached roots) is accepted the same way.
+    assert file_lease_hook._surface_id(
+        str(alias / "src" / "a.py"), tmp_path, None, [], strict=True
+    ) == expected
+
+
+def test_relative_to_root_rejects_a_case_alias_that_is_another_directory(tmp_path):
+    (tmp_path / "Repo").mkdir()
+    other = tmp_path / "REPO"
+    if _case_insensitive(tmp_path / "Repo"):
+        pytest.skip("volume is case-insensitive")
+    other.mkdir()
+    with pytest.raises(ValueError):
+        file_lease_hook._relative_to_root(other / "a.py", tmp_path / "Repo")
+
+
+def test_http_json_never_raises_when_an_error_body_cannot_be_read(monkeypatch):
+    import urllib.error
+
+    def refusing_urlopen(request, timeout):
+        raise urllib.error.HTTPError(request.full_url, 503, "unavailable", {}, None)
+
+    def unreadable(response):
+        raise TimeoutError("error body read timed out")
+
+    monkeypatch.setattr(file_lease_hook, "authorization_safe_urlopen", refusing_urlopen)
+    monkeypatch.setattr(file_lease_hook, "read_limited_response", unreadable)
+
+    result = file_lease_hook._http_json(
+        "POST", "/v1/lease/release", token="t", body={"lease_id": "x"}
+    )
+
+    assert result["ok"] is False
 
 
 def test_required_mode_unexpandable_target_rolls_back_event_leases(
