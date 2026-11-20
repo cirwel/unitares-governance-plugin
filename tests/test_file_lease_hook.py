@@ -2082,7 +2082,10 @@ def test_worktree_roots_honor_safe_directory_granted_through_the_environment(
     (main / "src").mkdir()
     # Git's own switch for treating the repository as owned by someone else.
     monkeypatch.setenv("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1")
-    assert file_lease_hook._worktree_roots(main / "src") is None
+    if file_lease_hook._worktree_roots(main / "src") is not None:
+        # This git (or its system config) trusts the checkout regardless, so
+        # the refusal the grant is meant to lift cannot be produced here.
+        pytest.skip("git does not refuse this checkout as differently owned")
 
     if channel == "GIT_CONFIG_COUNT":
         monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
@@ -2095,6 +2098,35 @@ def test_worktree_roots_honor_safe_directory_granted_through_the_environment(
         main.resolve(),
         main.resolve(),
     )
+
+
+def test_git_probe_env_keeps_config_grants_and_drops_repository_selection(monkeypatch):
+    # Independent of how the local git treats ownership: the probe must pass
+    # config variables through (operators grant safe.directory with them) and
+    # must not inherit anything that selects or bounds the repository.
+    kept = {
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "safe.directory",
+        "GIT_CONFIG_VALUE_0": "/srv/shared",
+        "GIT_CONFIG_PARAMETERS": "'safe.directory'='/srv/shared'",
+    }
+    dropped = {
+        "GIT_DIR": "/elsewhere/.git",
+        "GIT_WORK_TREE": "/elsewhere",
+        "GIT_COMMON_DIR": "/elsewhere/.git",
+        "GIT_CEILING_DIRECTORIES": "/srv",
+        "GIT_DISCOVERY_ACROSS_FILESYSTEM": "1",
+    }
+    for name, value in {**kept, **dropped}.items():
+        monkeypatch.setenv(name, value)
+
+    env = file_lease_hook._git_probe_env()
+
+    for name, value in kept.items():
+        assert env.get(name) == value
+    for name in dropped:
+        assert name not in env
+    assert env["LC_ALL"] == "C"
 
 
 def test_http_json_never_raises_when_an_error_body_cannot_be_read(monkeypatch):
