@@ -37,12 +37,26 @@ graders:
     weight: 1
     pattern: "(onboard|start_session)\\([^)]*spawn_reason\\s*=\\s*[\"']?new_session"
     match: not_contains
+  - name: no-cached-session-reuse
+    type: regex
+    weight: 2
+    # A slot cache is lineage context, never proof: a call must not carry
+    # the cached client_session_id or resume the cached uuid.
+    pattern: "((onboard|start_session|identity|sync_state|process_agent_update)\\([^)]*client_session_id\\s*=\\s*[\"']?01a0b640|identity\\([^)]*agent_uuid\\s*=\\s*[\"']?37391aae)"
+    match: not_contains
   - name: fresh-identity
     type: llm
     weight: 2
+    # allowed_tools has no Bash, so the model cannot run the inventory
+    # helper; the command then says to start fresh without a candidate.
+    # Either path is correct as long as the call is a fresh mint.
     criteria: >
       The response makes (writes out) a `start_session(force_new=true)` or
-      `onboard(force_new=true)` call and explains that the cached uuid is
-      co-location rather than a predecessor, because nothing says that process
-      exited or handed this work over. Fail if the response declares the cached
-      uuid as parent_agent_id, or found no cache at all without looking for one.
+      `onboard(force_new=true)` call with no parent_agent_id naming the cached
+      uuid, and gives a reason consistent with the command: either the cached
+      uuid is co-location rather than a predecessor, because nothing says that
+      process exited or handed this work over, or the inventory helper could
+      not be run, so no lineage candidate is used. Fail if the response
+      declares the cached uuid as parent_agent_id, reuses a client_session_id
+      read from a workspace cache, resumes with identity(agent_uuid=...), or
+      picks a cache as its own session because it is the most recent.
