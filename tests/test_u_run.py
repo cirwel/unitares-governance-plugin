@@ -75,6 +75,12 @@ def _sidecar_handler(
         def log_message(self, _fmt, *_args):  # pragma: no cover
             return
 
+        def _before_proof_response(self) -> None:
+            return
+
+        def _keeps_proven_connection(self) -> bool:
+            return self.headers.get("Connection", "").lower() == "keep-alive"
+
         def do_GET(self):  # noqa: N802
             parsed = urllib.parse.urlsplit(self.path)
             if parsed.path == "/startup-proof":
@@ -85,7 +91,20 @@ def _sidecar_handler(
                     challenge.encode(),
                     hashlib.sha256,
                 ).hexdigest()
-                _respond(self, {"success": True, "proof": proof})
+                self._before_proof_response()
+                # Like the real sidecar: keep the proven connection open for
+                # the capability-bearing request that follows it.
+                keep_alive = self._keeps_proven_connection()
+                body = json.dumps({"success": True, "proof": proof}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                if keep_alive:
+                    self.send_header("Connection", "keep-alive")
+                self.end_headers()
+                self.wfile.write(body)
+                if keep_alive:
+                    self.close_connection = False
                 return
             assert parsed.path == "/health"
             assert self.headers.get("Authorization") == f"Bearer {CAPABILITY}"
@@ -437,4 +456,235 @@ def test_exit_checkin_skipped_when_listener_is_replaced_during_child_run(
     assert lookalike_requests
     assert all(authorization is None for _m, _p, authorization in lookalike_requests)
     assert all(method == "GET" for method, _p, _a in lookalike_requests)
+    assert "u-run: warning:" in capsys.readouterr().err
+
+
+def _sidecar_main_args(sidecar_url: str, workspace: Path) -> list[str]:
+    return [
+        "--server-url",
+        SERVER_URL,
+        "--sidecar-url",
+        sidecar_url,
+        "--workspace",
+        str(workspace),
+        "--slot",
+        "plain-cli",
+        "--",
+        "agent-cli",
+    ]
+
+
+@pytest.mark.parametrize("listener_keeps_connection", [True, False])
+def test_exit_capability_travels_on_the_connection_that_proved_the_listener(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    listener_keeps_connection: bool,
+) -> None:
+    """The listener changes hands between the exit proof and the check-in.
+
+    A listener that closes the proven connection (an older sidecar) must not
+    make u-run reconnect and hand the capability to the new port holder.
+    """
+    monkeypatch.setenv("UNITARES_SIDECAR_CAPABILITY", CAPABILITY)
+    monkeypatch.setenv("UNITARES_SIDECAR_STARTUP_SECRET", STARTUP_SECRET)
+    calls: list[tuple[str, dict[str, Any]]] = []
+    squatter_requests: list[tuple[str, str, str | None]] = []
+    child_exited = threading.Event()
+    running: list[tuple[ThreadingHTTPServer, threading.Thread]] = []
+
+    class Squatter(BaseHTTPRequestHandler):
+        def log_message(self, _fmt, *_args):  # pragma: no cover
+            return
+
+        def _record(self) -> None:
+            squatter_requests.append(
+                (self.command, self.path, self.headers.get("Authorization"))
+            )
+            length = int(self.headers.get("Content-Length", "0") or "0")
+            if length:
+                self.rfile.read(length)
+            _respond(self, {"success": True, "status": "sent"})
+
+        do_GET = _record
+        do_POST = _record
+
+    genuine_handler = _sidecar_handler(tmp_path, calls)
+
+    class HandsOverAfterExitProof(genuine_handler):  # type: ignore[misc, valid-type]
+        def _keeps_proven_connection(self) -> bool:
+            if child_exited.is_set() and not listener_keeps_connection:
+                return False
+            return super()._keeps_proven_connection()
+
+        def _before_proof_response(self) -> None:
+            if not child_exited.is_set() or squatter_requests or len(running) > 1:
+                return
+            genuine, _genuine_thread = running[0]
+            port = genuine.server_address[1]
+            # Stop accepting on the genuine listener (this handler keeps its
+            # own connection) and let another process take the port before
+            # the proof response is released.
+            threading.Thread(target=genuine.shutdown, daemon=True).start()
+            genuine.socket.close()
+            squatter = _ReusableServer(("127.0.0.1", port), Squatter)
+            squatter_thread = threading.Thread(target=squatter.serve_forever, daemon=True)
+            squatter_thread.start()
+            running.append((squatter, squatter_thread))
+
+    server, thread, sidecar_url = _serve(HandsOverAfterExitProof)
+    running.append((server, thread))
+
+    def child(_command: list[str], _environment: dict[str, str]) -> tuple[int, int, float]:
+        child_exited.set()
+        return 4, 4, 1.0
+
+    monkeypatch.setattr(u_run, "_run_child", child)
+    try:
+        result = u_run.main(_sidecar_main_args(sidecar_url, tmp_path))
+    finally:
+        for index, (running_server, running_thread) in enumerate(running):
+            running_server.shutdown()
+            running_thread.join(timeout=2)
+            if index:
+                running_server.server_close()
+
+    assert result == 4
+    assert len(running) == 2, "the listener hand-over never happened"
+    assert all(authorization is None for _m, _p, authorization in squatter_requests)
+    stderr = capsys.readouterr().err
+    if listener_keeps_connection:
+        assert [path for path, _body in calls] == ["/session/start", "/turn/stop"]
+        assert "warning" not in stderr
+    else:
+        assert [path for path, _body in calls] == ["/session/start"]
+        assert squatter_requests == []
+        assert "closed the connection" in stderr
+
+
+def _replace_listener_with(
+    monkeypatch: pytest.MonkeyPatch,
+    servers: list[tuple[Any, threading.Thread]],
+    handler: type[BaseHTTPRequestHandler],
+    *,
+    child_code: int = 3,
+) -> None:
+    def replace_listener_during_child(
+        _command: list[str], _environment: dict[str, str]
+    ) -> tuple[int, int, float]:
+        genuine, genuine_thread = servers.pop()
+        port = genuine.server_address[1]
+        _stop_server(genuine, genuine_thread)
+        squatter = _ReusableServer(("127.0.0.1", port), handler)
+        squatter_thread = threading.Thread(target=squatter.serve_forever, daemon=True)
+        squatter_thread.start()
+        servers.append((squatter, squatter_thread))
+        return child_code, child_code, 1.0
+
+    monkeypatch.setattr(u_run, "_run_child", replace_listener_during_child)
+
+
+class _NonAsciiProof(BaseHTTPRequestHandler):
+    def log_message(self, _fmt, *_args):  # pragma: no cover
+        return
+
+    def do_GET(self):  # noqa: N802
+        _respond(self, {"success": True, "proof": "é" * 64})
+
+
+class _BadStatusLine(BaseHTTPRequestHandler):
+    def log_message(self, _fmt, *_args):  # pragma: no cover
+        return
+
+    def do_GET(self):  # noqa: N802
+        self.wfile.write(b"NOT-HTTP garbage\r\n\r\n")
+        self.close_connection = True
+
+
+class _SurrogateProof(BaseHTTPRequestHandler):
+    def log_message(self, _fmt, *_args):  # pragma: no cover
+        return
+
+    def do_GET(self):  # noqa: N802
+        body = b'{"success": true, "proof": "\\ud800"}'
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+@pytest.mark.parametrize(
+    "handler", [_NonAsciiProof, _BadStatusLine, _SurrogateProof], ids=lambda h: h.__name__
+)
+def test_malformed_exit_proof_warns_and_keeps_child_exit_status(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    handler: type[BaseHTTPRequestHandler],
+) -> None:
+    monkeypatch.setenv("UNITARES_SIDECAR_CAPABILITY", CAPABILITY)
+    monkeypatch.setenv("UNITARES_SIDECAR_STARTUP_SECRET", STARTUP_SECRET)
+    calls: list[tuple[str, dict[str, Any]]] = []
+    server, thread, sidecar_url = _serve(_sidecar_handler(tmp_path, calls))
+    servers: list[tuple[Any, threading.Thread]] = [(server, thread)]
+    _replace_listener_with(monkeypatch, servers, handler)
+    try:
+        result = u_run.main(_sidecar_main_args(sidecar_url, tmp_path))
+    finally:
+        for running, running_thread in servers:
+            _stop_server(running, running_thread)
+
+    assert result == 3
+    assert [path for path, _body in calls] == ["/session/start"]
+    assert "u-run: warning:" in capsys.readouterr().err
+
+
+class _TrickledProof(BaseHTTPRequestHandler):
+    def log_message(self, _fmt, *_args):  # pragma: no cover
+        return
+
+    def do_GET(self):  # noqa: N802
+        self.wfile.write(b"HTTP/1.0 200 OK\r\nX-Pad: ")
+        stop = time.monotonic() + 6.0
+        try:
+            while time.monotonic() < stop:
+                self.wfile.write(b"a")
+                time.sleep(0.1)
+        except OSError:
+            pass
+        self.close_connection = True
+
+
+def test_trickled_exit_proof_cannot_hold_u_run_past_its_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("UNITARES_SIDECAR_CAPABILITY", CAPABILITY)
+    monkeypatch.setenv("UNITARES_SIDECAR_STARTUP_SECRET", STARTUP_SECRET)
+    calls: list[tuple[str, dict[str, Any]]] = []
+    server, thread, sidecar_url = _serve(_sidecar_handler(tmp_path, calls))
+    servers: list[tuple[Any, threading.Thread]] = [(server, thread)]
+    child_returned: list[float] = []
+
+    def note_child_return(*_args: Any) -> None:
+        child_returned.append(time.monotonic())
+
+    _replace_listener_with(monkeypatch, servers, _TrickledProof)
+    replaced = u_run._run_child
+
+    def timed_child(command: list[str], environment: dict[str, str]) -> tuple[int, int, float]:
+        outcome = replaced(command, environment)
+        note_child_return()
+        return outcome
+
+    monkeypatch.setattr(u_run, "_run_child", timed_child)
+    try:
+        result = u_run.main(_sidecar_main_args(sidecar_url, tmp_path))
+        finished = time.monotonic()
+    finally:
+        for running, running_thread in servers:
+            _stop_server(running, running_thread)
+
+    assert result == 3
+    assert finished - child_returned[0] < 2.0
+    assert [path for path, _body in calls] == ["/session/start"]
     assert "u-run: warning:" in capsys.readouterr().err

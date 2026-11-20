@@ -1245,3 +1245,76 @@ def test_read_deadline_on_partial_request_line_is_not_reported_as_server_error(
     finally:
         _stop_server(server, serving)
     assert handler_errors == []
+
+
+def test_post_headers_and_body_share_one_read_deadline(
+    tmp_path: Path, fake_server: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(identity_sidecar, "REQUEST_READ_DEADLINE", 1.0)
+    sidecar = _sidecar(tmp_path, fake_server)
+    server = BoundedThreadingHTTPServer(
+        ("127.0.0.1", 0), make_handler(sidecar), max_workers=1
+    )
+    serving = threading.Thread(target=server.serve_forever, daemon=True)
+    serving.start()
+    port = server.server_address[1]
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as client:
+            started = time.monotonic()
+            client.sendall(
+                (
+                    "POST /v1/tools/call HTTP/1.1\r\n"
+                    f"Authorization: Bearer {sidecar.capability_token}\r\n"
+                    "Content-Length: 4096\r\nX-Slow: "
+                ).encode("ascii")
+            )
+            # Spend most of the deadline on the headers, then trickle the body.
+            while time.monotonic() - started < 0.8:
+                client.sendall(b"a")
+                time.sleep(0.05)
+            client.sendall(b"\r\n\r\n")
+            assert _trickle_until_closed(client, budget=4.0)
+            closed_after = time.monotonic() - started
+    finally:
+        _stop_server(server, serving)
+    assert closed_after < 1.4
+    assert FakeGovernanceHandler.calls == []
+
+
+def test_startup_proof_keeps_its_connection_for_exactly_one_follow_up(
+    tmp_path: Path, fake_server: str
+) -> None:
+    import http.client
+
+    sidecar = _sidecar(tmp_path, fake_server)
+    sidecar.startup_secret = "startup-secret"
+    server = BoundedThreadingHTTPServer(("127.0.0.1", 0), make_handler(sidecar))
+    serving = threading.Thread(target=server.serve_forever, daemon=True)
+    serving.start()
+    port = server.server_address[1]
+    try:
+        plain = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        plain.request("GET", "/startup-proof?challenge=c1")
+        response = plain.getresponse()
+        response.read()
+        assert response.status == 200
+        assert response.will_close, "keep-alive is opt-in"
+        plain.close()
+
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        conn.request("GET", "/startup-proof?challenge=c2", headers={"Connection": "keep-alive"})
+        first = conn.getresponse()
+        payload = json.loads(first.read())
+        assert payload["proof"] == hmac.new(b"startup-secret", b"c2", hashlib.sha256).hexdigest()
+        assert not first.will_close
+        socket_before = conn.sock
+        # A second proof on the same connection does not extend it again.
+        conn.request("GET", "/startup-proof?challenge=c3", headers={"Connection": "keep-alive"})
+        assert conn.sock is socket_before
+        second = conn.getresponse()
+        second.read()
+        assert second.status == 200
+        assert second.will_close
+        conn.close()
+    finally:
+        _stop_server(server, serving)

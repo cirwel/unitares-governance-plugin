@@ -155,12 +155,15 @@ def _json_response(
     payload: Any,
     *,
     sanitize: bool = True,
+    keep_alive: bool = False,
 ) -> None:
     visible = sanitize_model_visible_payload(payload) if sanitize else payload
     body = (json.dumps(visible, indent=2, sort_keys=True) + "\n").encode("utf-8")
     handler.send_response(status)
     handler.send_header("Content-Type", "application/json")
     handler.send_header("Content-Length", str(len(body)))
+    if keep_alive:
+        handler.send_header("Connection", "keep-alive")
     handler.end_headers()
     handler.wfile.write(body)
 
@@ -817,8 +820,11 @@ def make_handler(sidecar: IdentitySidecar) -> type[BaseHTTPRequestHandler]:
             self._read_lock = threading.Lock()
             self._read_timer: threading.Timer | None = None
             self._read_deadline_hit = False
+            self._request_read_deadline = 0.0
+            self._proof_kept_connection = False
 
         def _arm_read_deadline(self) -> None:
+            """Arm the current request's read deadline for its remaining time."""
             self._disarm_read_deadline()
 
             def expire() -> None:
@@ -833,7 +839,8 @@ def make_handler(sidecar: IdentitySidecar) -> type[BaseHTTPRequestHandler]:
                 except OSError:
                     pass
 
-            timer = threading.Timer(REQUEST_READ_DEADLINE, expire)
+            remaining = max(0.0, self._request_read_deadline - time.monotonic())
+            timer = threading.Timer(remaining, expire)
             timer.daemon = True
             with self._read_lock:
                 self._read_timer = timer
@@ -848,6 +855,9 @@ def make_handler(sidecar: IdentitySidecar) -> type[BaseHTTPRequestHandler]:
                 return not self._read_deadline_hit
 
         def handle_one_request(self) -> None:
+            # One wall-clock budget per request: the request line, headers and
+            # any POST body all draw on it.
+            self._request_read_deadline = time.monotonic() + REQUEST_READ_DEADLINE
             self._arm_read_deadline()
             try:
                 super().handle_one_request()
@@ -874,8 +884,21 @@ def make_handler(sidecar: IdentitySidecar) -> type[BaseHTTPRequestHandler]:
                 proof = sidecar.startup_proof(challenge)
                 if not challenge or proof is None:
                     _json_response(self, 404, {"success": False, "error": "not found"})
-                else:
-                    _json_response(self, 200, {"success": True, "proof": proof})
+                    return
+                # A wrapper sends its capability on the same connection that
+                # proved the listener, so a process that takes the port later
+                # never receives it. Keep the connection open for one more
+                # request when asked, once per connection.
+                keep_alive = (
+                    not self._proof_kept_connection
+                    and self.headers.get("Connection", "").strip().lower() == "keep-alive"
+                )
+                _json_response(
+                    self, 200, {"success": True, "proof": proof}, keep_alive=keep_alive
+                )
+                if keep_alive:
+                    self._proof_kept_connection = True
+                    self.close_connection = False
                 return
             if not sidecar.authorized(self.headers):
                 _json_response(self, 401, {"success": False, "error": "unauthorized"})
