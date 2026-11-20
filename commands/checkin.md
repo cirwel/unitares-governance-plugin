@@ -98,7 +98,9 @@ controls actuation, not estimation. The server's
 owns the instrument's inputs, interpretations, and evidence limits.
 
 Do not stamp the cache or reset a milestone by hand after the call. Claude and
-Codex both register the `post-checkin` hook, which stamps the current host slot
-and resets its milestone only when the successful check-in carried that slot's
-own protected binding. Without lifecycle hooks there is no milestone
-accumulator to reset.
+Codex both register the `post-checkin` hook. After a successful check-in it
+stamps the current host slot and resets that slot's milestone when the slot
+holds a protected binding for this process and a snapshot taken before the
+same call. It skips both when the call named a different `client_session_id`;
+a call that named none is credited to the slot's binding. Without lifecycle
+hooks there is no milestone accumulator to reset.

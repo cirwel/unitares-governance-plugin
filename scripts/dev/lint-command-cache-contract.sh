@@ -40,6 +40,9 @@ fi
 
 FAIL=0
 
+# Every multi-file grep below also reads /dev/null, so grep prints
+# `file:line:content` even when one file is passed; the parsers rely on it.
+
 # Rule 1: every `session_cache.py set session ...` line must include --slot
 # (allow `--allow-shared` as the substrate-earned escape hatch from S20.1).
 while IFS= read -r match; do
@@ -55,7 +58,7 @@ while IFS= read -r match; do
     echo "       offending: ${content}"
     echo "       fix: add --slot=<harness-session-id> (or --allow-shared for substrate-earned single-tenant case)"
     FAIL=1
-done < <(grep -nE 'session_cache\.py +set +session' "${FILES[@]}" 2>/dev/null || true)
+done < <(grep -nE 'session_cache\.py +set +session' "${FILES[@]}" /dev/null 2>/dev/null || true)
 
 # Rule 2: bullet-list persistence of `continuity_token` (the bare field, not the _supported flag).
 # Pattern: a markdown bullet like `  - \`continuity_token\`` (i.e., the field is named in a list of
@@ -95,25 +98,28 @@ while IFS= read -r match; do
     echo "       offending: ${content}"
     echo "       fix: discover slot via \`session_cache.py list\` then read with --slot=<slot> (S20.2 §3b)."
     FAIL=1
-done < <(grep -nE 'session_cache\.py +get +session' "${FILES[@]}" 2>/dev/null || true)
+done < <(grep -nE 'session_cache\.py +get +session' "${FILES[@]}" /dev/null 2>/dev/null || true)
 
 # Rule 4: a slot read is lineage context, never the current process's proof.
-# Every `get session --slot` line must say so on the same line, so a reader
-# cannot take a `client_session_id` from another slot's cache.
+# Every `get session --slot` line must carry the marker "lineage context only"
+# and must not mention `client_session_id`, so a reader cannot take a session
+# id from another slot's cache. This is a line-local text check: it catches
+# the retired phrasings, not every way prose could mislead.
 while IFS= read -r match; do
     [[ -z "$match" ]] && continue
     file=${match%%:*}
     line=${match#*:}
     line_no=${line%%:*}
     content=${line#*:}
-    if [[ "$content" != *"--slot"* ]] || [[ "$content" == *"lineage"* ]]; then
+    [[ "$content" != *"--slot"* ]] && continue
+    if [[ "$content" == *"lineage context only"* ]] && [[ "$content" != *"client_session_id"* ]]; then
         continue
     fi
     echo "[lint] ${file}:${line_no} — \`session_cache.py get session --slot\` not marked lineage-only"
     echo "       offending: ${content}"
-    echo "       fix: say on the same line that the slot read is lineage context only, not identity proof."
+    echo "       fix: say on the same line that the slot read is \"lineage context only\", and keep \`client_session_id\` off that line."
     FAIL=1
-done < <(grep -nE 'session_cache\.py +get +session' "${FILES[@]}" 2>/dev/null || true)
+done < <(grep -nE 'session_cache\.py +get +session' "${FILES[@]}" /dev/null 2>/dev/null || true)
 
 # Rule 5: retired guidance that steers an agent into adopting a workspace
 # cache as its own session: treating the cache as the place to find a

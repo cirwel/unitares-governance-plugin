@@ -216,13 +216,14 @@ Shared helper:
 
 Treat this as local runtime state, never as a source of truth over the server.
 Workspace slot caches are lineage hints, not identity proof: their `uuid`,
-`agent_id` and `display_name` can name a predecessor for `/governance-start`,
-but any process can write them. Proof of the current session is only the
+`agent_id` and `display_name` can name a candidate predecessor, but any
+process can write them. Proof of the current session is only the
 `client_session_id` returned to this live process by its own
 `start_session`/`onboard` response, or the binding a trusted hook injects for
 this exact host slot. Never copy a `client_session_id` out of a slot cache read,
-another slot, or the inventory. When this process has no known binding, use
-`/governance-start`.
+another slot, or the inventory. When this process has no known binding, call
+`start_session(force_new=true)` as in the raw tool flow above, adding
+`parent_agent_id` only for a verified handoff from an exited process.
 
 Do not persist `continuity_token` in this cache. v2 slot caches are lineage and
 transport-continuity hints only; a token belongs only to the live response that

@@ -55,8 +55,9 @@ old `/governance-start` scored 0.11 and the old `/checkin` 0.08, against 1.00
 for the text current then. `/governance-start` has since dropped its raw
 glob fallback: the case allows no Bash, so the model cannot run the slot
 inventory helper and the command starts it fresh with no candidate. Its
-`fresh-identity` grader accepts that path, and a regex grader fails any call
-that reuses the cached `client_session_id`. The case has not been re-scored
+`fresh-identity` grader accepts that path, and a regex grader fails any
+written-out call, keyword or JSON form, that carries the cached
+`client_session_id` or resumes the cached uuid with `identity`. The case has not been re-scored
 since that change. Both identity prompts give both arms the call
 signatures, so the no-plugin arm is judged on reasoning, not vocabulary.
 
