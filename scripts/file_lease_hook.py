@@ -520,21 +520,19 @@ def _has_dotgit_ancestor(probe: Path) -> bool:
 
 
 # Variables that select a repository or work tree instead of discovering one
-# from the path (git's own ``rev-parse --local-env-vars`` set), plus the two
-# that bound discovery itself. A lease namespace must depend on the target path
-# alone, so the probe never inherits them: otherwise two sessions could map one
-# file to different surfaces, or one could fail to find the repository at all.
-# Global/system config variables stay: they only decide ownership refusals,
-# which already fail closed, and operators rely on them for safe.directory.
+# from the path (git's own ``rev-parse --local-env-vars`` set, less its config
+# variables), plus the two that bound discovery itself. A lease namespace must
+# depend on the target path alone, so the probe never inherits them: otherwise
+# two sessions could map one file to different surfaces, or one could fail to
+# find the repository at all. Config variables (GIT_CONFIG_COUNT/KEY_n/VALUE_n,
+# GIT_CONFIG_PARAMETERS, global/system config) stay: they cannot move
+# discovery, and operators use them to grant safe.directory.
 _GIT_REPOSITORY_ENV = frozenset(
     {
         "GIT_ALTERNATE_OBJECT_DIRECTORIES",
         "GIT_CEILING_DIRECTORIES",
         "GIT_COMMON_DIR",
         "GIT_DISCOVERY_ACROSS_FILESYSTEM",
-        "GIT_CONFIG",
-        "GIT_CONFIG_COUNT",
-        "GIT_CONFIG_PARAMETERS",
         "GIT_DIR",
         "GIT_GRAFT_FILE",
         "GIT_IMPLICIT_WORK_TREE",
@@ -929,13 +927,16 @@ def _persist_or_remove_state(
     tool_use_id: str = "",
     *,
     token: str,
+    keep_lock_sidecar: bool = False,
 ) -> None:
     leases = state.get("leases")
     if isinstance(leases, dict) and leases:
         _save_state(workspace, slot, state, tool_use_id, token=token)
     else:
         _state_path(workspace, slot, tool_use_id).unlink(missing_ok=True)
-        if tool_use_id:
+        # A caller that keeps working under the lock after this must keep the
+        # sidecar: unlinking it would let another process lock a new inode.
+        if tool_use_id and not keep_lock_sidecar:
             _remove_edit_lock_sidecar(_state_path(workspace, slot, tool_use_id))
 
 
@@ -969,6 +970,7 @@ def _rollback_batch_leases(
     rollback_keys: list[str],
     deadline: float,
     tool_use_id: str = "",
+    keep_lock_sidecar: bool = False,
 ) -> None:
     """Release every target lease owned by a batch that will not run."""
     leases = state.get("leases")
@@ -987,7 +989,14 @@ def _rollback_batch_leases(
             leases.pop(key, None)
         else:
             _debug(f"rollback release failed for {key}: {result.get('error')}")
-    _persist_or_remove_state(workspace, slot, state, tool_use_id, token=token)
+    _persist_or_remove_state(
+        workspace,
+        slot,
+        state,
+        tool_use_id,
+        token=token,
+        keep_lock_sidecar=keep_lock_sidecar,
+    )
 
 
 def _cmd_pre_edit_locked(args: argparse.Namespace, stdin_text: str) -> int:
@@ -1045,7 +1054,7 @@ def _cmd_pre_edit_locked(args: argparse.Namespace, stdin_text: str) -> int:
         )
     ]
 
-    def rollback() -> None:
+    def rollback(*, final: bool = True) -> None:
         try:
             _rollback_batch_leases(
                 token=token,
@@ -1055,6 +1064,7 @@ def _cmd_pre_edit_locked(args: argparse.Namespace, stdin_text: str) -> int:
                 rollback_keys=rollback_keys,
                 deadline=deadline,
                 tool_use_id=payload.tool_use_id,
+                keep_lock_sidecar=not final,
             )
         except Exception as exc:
             # A local persistence failure must not replace the original lease
@@ -1123,7 +1133,7 @@ def _cmd_pre_edit_locked(args: argparse.Namespace, stdin_text: str) -> int:
         ]
         if len(matches) != 1 or matches[0] in existing_by_surface:
             existing_by_surface = {}
-            rollback()
+            rollback(final=False)  # acquisition continues under this lock
             if any(held in leases for held in rollback_keys):
                 return _fail_open_or_block(
                     "an earlier attempt of this edit holds leases on other surfaces "

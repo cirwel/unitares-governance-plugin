@@ -2027,6 +2027,76 @@ def test_relative_to_root_rejects_a_case_alias_that_is_another_directory(tmp_pat
         file_lease_hook._relative_to_root(other / "a.py", tmp_path / "Repo")
 
 
+@pytest.mark.skipif(shutil.which("git") is None, reason="git not available")
+def test_retry_rollback_keeps_the_event_lock_inode_while_reacquiring(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("LEASE_PLANE_BEARER_TOKEN", "lease-token")
+    monkeypatch.setenv("UNITARES_SECRETS_ENV", "/dev/null")
+    monkeypatch.setenv("UNITARES_FILE_LEASES_REQUIRED", "1")
+    main = _committed_repo(tmp_path / "main")
+    tool_use_id = "call_lock_inode"
+    stdin_text = _codex_payload(paths=("a.py",), tool_use_id=tool_use_id)
+    state_path = _seed_state(
+        main,
+        "codex-slot",
+        tool_use_id,
+        {"file:///raw/elsewhere/a.py": {"lease_id": "lease-raw", "path": "a.py"}},
+        holder_uuid=file_lease_hook._holder_uuid(
+            main, file_lease_hook.normalize_edit_hook(stdin_text, host="codex"), {}
+        ),
+    )
+    lock_path = state_path.with_suffix(".lock")
+    inodes = {}
+    recording = _recording_http([])
+
+    def fake_http(method, path, *, token, body=None, timeout_s=None):
+        try:
+            inodes.setdefault(path, os.stat(lock_path).st_ino)
+        except FileNotFoundError:
+            inodes.setdefault(path, None)
+        return recording(method, path, token=token, body=body, timeout_s=timeout_s)
+
+    monkeypatch.setattr(file_lease_hook, "_http_json", fake_http)
+
+    rc = file_lease_hook.main(
+        ["pre-edit", "--workspace", str(main), "--host", "codex"], stdin_text=stdin_text
+    )
+
+    assert rc == 0
+    assert list(inodes) == ["/v1/lease/release", "/v1/lease/acquire"]
+    assert inodes["/v1/lease/release"] is not None
+    assert inodes["/v1/lease/acquire"] == inodes["/v1/lease/release"]
+    assert os.stat(lock_path).st_ino == inodes["/v1/lease/release"]
+    assert sorted(json.loads(state_path.read_text())["leases"]) == [
+        f"file://{(main / 'a.py').resolve()}"
+    ]
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git not available")
+@pytest.mark.parametrize("channel", ["GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS"])
+def test_worktree_roots_honor_safe_directory_granted_through_the_environment(
+    tmp_path, monkeypatch, channel
+):
+    main = _committed_repo(tmp_path / "main")
+    (main / "src").mkdir()
+    # Git's own switch for treating the repository as owned by someone else.
+    monkeypatch.setenv("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1")
+    assert file_lease_hook._worktree_roots(main / "src") is None
+
+    if channel == "GIT_CONFIG_COUNT":
+        monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+        monkeypatch.setenv("GIT_CONFIG_KEY_0", "safe.directory")
+        monkeypatch.setenv("GIT_CONFIG_VALUE_0", str(main))
+    else:
+        monkeypatch.setenv("GIT_CONFIG_PARAMETERS", f"'safe.directory'='{main}'")
+
+    assert file_lease_hook._worktree_roots(main / "src") == (
+        main.resolve(),
+        main.resolve(),
+    )
+
+
 def test_http_json_never_raises_when_an_error_body_cannot_be_read(monkeypatch):
     import urllib.error
 
