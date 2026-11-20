@@ -129,7 +129,10 @@ def touch(slot: str, uuid: str, binding: str, *, at: float | None = None) -> Non
 def mark(workspace: str, stdin_payload: str, *, now: float | None = None) -> str:
     """Refresh a fresh binding's stamp, or mark an idle one inherited.
 
-    Returns what it did: ``touched``, ``marked_prior_process`` or ``none``.
+    Returns what it did: ``touched``, ``marked_prior_process`` or ``none``,
+    or ``idle_unmarked`` when the binding is idle but the cache write failed
+    (a lock timeout, say): it is still the earlier process's binding, and the
+    caller must not use it for this turn.
     """
     from _session_cache_io import (
         home_session_mirror_is_valid,
@@ -191,7 +194,7 @@ def mark(workspace: str, stdin_payload: str, *, now: float | None = None) -> str
             home_path=home_cache,
         )
     except Exception:
-        return "none"
+        return "idle_unmarked"
     return "marked_prior_process" if committed else "none"
 
 
@@ -201,10 +204,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--workspace", default=os.getcwd())
     args = parser.parse_args(argv)
     try:
-        mark(args.workspace, sys.stdin.read())
+        result = mark(args.workspace, sys.stdin.read())
     except Exception:
-        pass
-    return 0
+        # A failed mark checked nothing; hooks/post-stop keeps the binding
+        # only after a 0.
+        return 1
+    # 3 tells hooks/post-stop that the binding is idle but still unmarked.
+    return 3 if result == "idle_unmarked" else 0
 
 
 if __name__ == "__main__":
