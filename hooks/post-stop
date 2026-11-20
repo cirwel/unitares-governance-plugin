@@ -329,11 +329,17 @@ fi
 # session without SessionStart (Codex often does), so this process has not
 # minted its own identity yet (scripts/binding_activity.py).
 if [[ -n "${CSID:-}" && -f "${PLUGIN_ROOT}/scripts/binding_activity.py" ]]; then
+  MARK_STATUS=0
   printf '%s' "${PAYLOAD}" | python3 "${PLUGIN_ROOT}/scripts/binding_activity.py" mark \
-    --workspace "${LOOKUP_WORKSPACE}" >/dev/null 2>&1 || true
+    --workspace "${LOOKUP_WORKSPACE}" >/dev/null 2>&1 || MARK_STATUS=$?
   # Re-read: a binding just marked prior_process belongs to the earlier
   # process, so this turn's evidence must not be sent under it.
   eval "$(printf '%s' "${PAYLOAD}" | python3 "${SESSION_LOOKUP}" --workspace "${LOOKUP_WORKSPACE}")"
+  if [[ "${MARK_STATUS}" == "3" ]]; then
+    # Idle, but the mark could not be written: still the earlier process's.
+    CSID=""
+    UUID=""
+  fi
 fi
 
 if [[ "${HOOK_MODE}" == "session_start" ]]; then

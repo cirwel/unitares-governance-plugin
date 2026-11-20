@@ -6,6 +6,7 @@ import json
 import subprocess
 import sys
 import threading
+from contextlib import ExitStack
 import pytest
 from pathlib import Path
 
@@ -927,12 +928,14 @@ def test_post_stop_timeout_at_most_preserves_float_spellings():
         assert got[invalid] == "15"
 
 
-@pytest.mark.parametrize("host", ["claude", "codex"])
-def test_a_binding_marked_inherited_at_this_stop_is_not_used_for_its_evidence(tmp_path, host):
-    """The Stop that marks an idle binding prior_process must not then send
-    its turn_stop or tool-outcome evidence under that binding."""
+def _idle_stop(tmp_path, host, *, hold_cache_lock=False):
+    """Run one Stop over a binding idle for two days, with a transcript that
+    has tool calls in it, so both the turn_stop check-in and the
+    tool-outcome rollup would be sent if the binding were used."""
     import os
     import time
+
+    from _session_cache_io import session_cache_lock
 
     RecordingHandler.calls = []
     RecordingHandler.paths = []
@@ -955,36 +958,88 @@ def test_a_binding_marked_inherited_at_this_stop_is_not_used_for_its_evidence(tm
     two_days_ago = time.time() - 2 * 24 * 3600
     os.utime(cache, (two_days_ago, two_days_ago))
 
+    transcript = tmp_path / "session.jsonl"
+    if host == "codex":
+        entries = [
+            {"type": "session_meta", "payload": {"id": slot}},
+            {"type": "event_msg", "payload": {"type": "task_started"}},
+            {"type": "event_msg", "payload": {
+                "type": "item_completed", "thread_id": slot,
+                "item": {"type": "CommandExecution", "id": "a", "command": "true",
+                         "cwd": "/", "status": "failed", "exit_code": 2}}},
+        ]
+    else:
+        entries = [
+            {"type": "user", "message": {"role": "user", "content": "go"}},
+            {"type": "assistant", "message": {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "a", "name": "Bash", "input": {"command": "true"}}]}},
+            {"type": "user", "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "a", "content": "x", "is_error": True}]}},
+        ]
+    transcript.write_text("".join(json.dumps(entry) + "\n" for entry in entries))
+
     try:
-        subprocess.run(
-            [str(PLUGIN_ROOT / "hooks" / "post-stop"), "--host", host],
-            env={
-                "PATH": "/usr/bin:/bin:/usr/local/bin",
-                "HOME": str(tmp_path),
-                "UNITARES_SERVER_URL": f"http://127.0.0.1:{port}",
-                "UNITARES_CHECKIN_LOG": str(tmp_path / "checkins.log"),
-                "UNITARES_AUTO_ONBOARD": "off",
-                "CLAUDE_PLUGIN_ROOT": str(PLUGIN_ROOT),
-                "PWD": str(tmp_path),
-            },
-            cwd=str(tmp_path),
-            input=json.dumps({
-                "hook_event_name": "Stop",
-                "session_id": slot,
-                "last_assistant_message": "Done.",
-            }),
-            text=True,
-            capture_output=True,
-            timeout=30,
-            check=False,
-        )
+        with ExitStack() as stack:
+            if hold_cache_lock:
+                stack.enter_context(session_cache_lock(cache))
+            subprocess.run(
+                [str(PLUGIN_ROOT / "hooks" / "post-stop"), "--host", host],
+                env={
+                    "PATH": "/usr/bin:/bin:/usr/local/bin",
+                    "HOME": str(tmp_path),
+                    "UNITARES_SERVER_URL": f"http://127.0.0.1:{port}",
+                    "UNITARES_CHECKIN_LOG": str(tmp_path / "checkins.log"),
+                    "UNITARES_AUTO_ONBOARD": "off",
+                    "UNITARES_SESSION_CACHE_LOCK_TIMEOUT_S": "0.2",
+                    "CLAUDE_PLUGIN_ROOT": str(PLUGIN_ROOT),
+                    "PWD": str(tmp_path),
+                },
+                cwd=str(tmp_path),
+                input=json.dumps({
+                    "hook_event_name": "Stop",
+                    "session_id": slot,
+                    "last_assistant_message": "Done.",
+                    "transcript_path": str(transcript),
+                }),
+                text=True,
+                capture_output=True,
+                timeout=30,
+                check=False,
+            )
     finally:
         srv.shutdown()
         thread.join(timeout=2)
+    return cache, old_csid
 
-    assert json.loads(cache.read_text())["prior_process"] is True
+
+def _assert_no_evidence_under(old_csid):
     assert old_csid not in json.dumps(RecordingHandler.calls)
     assert not [
         c for c in RecordingHandler.calls if c.get("name") == "process_agent_update"
     ]
+    assert not [
+        c for c in RecordingHandler.calls
+        if c.get("observation_kind") == "tool_outcome_rollup"
+    ]
+    assert "/v1/runtime/observe" not in RecordingHandler.paths
     assert "/v1/substrate/observe" in RecordingHandler.paths
+
+
+@pytest.mark.parametrize("host", ["claude", "codex"])
+def test_a_binding_marked_inherited_at_this_stop_is_not_used_for_its_evidence(tmp_path, host):
+    """The Stop that marks an idle binding prior_process must not then send
+    its turn_stop or tool-outcome evidence under that binding."""
+    cache, old_csid = _idle_stop(tmp_path, host)
+
+    assert json.loads(cache.read_text())["prior_process"] is True
+    _assert_no_evidence_under(old_csid)
+
+
+@pytest.mark.parametrize("host", ["claude", "codex"])
+def test_an_idle_binding_the_stop_could_not_mark_is_not_used_for_its_evidence(tmp_path, host):
+    """A cache lock timeout leaves the idle binding unmarked; it still
+    belongs to the earlier process, so this turn's evidence is withheld."""
+    cache, old_csid = _idle_stop(tmp_path, host, hold_cache_lock=True)
+
+    assert json.loads(cache.read_text()).get("prior_process") is not True
+    _assert_no_evidence_under(old_csid)
