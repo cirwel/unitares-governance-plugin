@@ -27,6 +27,8 @@ HEADER = (
 # carries it, found by this marker, and is closed when the mirror lands.
 STUCK_LABEL = "ci-finding"
 STUCK_MARKER = "<!-- finding-fingerprint: skill-mirror-stuck -->"
+STUCK_TITLE = "Skill mirror delivery is stuck"
+HOLD_LABELS = ("automerge-hold", "do-not-merge", "governance-sensitive")
 # Scheduled delivery runs hourly, and pending CI or a moved ref clears within
 # one or two runs. A head still held after this long is not clearing by itself.
 STUCK_AFTER_SECONDS = 3 * 3600
@@ -135,8 +137,7 @@ def deliver(number: int, *, apply: bool) -> str:
     pr = api(f"pulls/{number}")
     if not candidate(pr):
         raise Hold("PR is not an open, ready mirror from the owned automation branch")
-    if any(label["name"] in ("automerge-hold", "do-not-merge", "governance-sensitive")
-           for label in pr.get("labels", [])):
+    if any(label["name"] in HOLD_LABELS for label in pr.get("labels", [])):
         raise Vetoed("A maintainer hold label is present")
     head = pr["head"]["sha"]
     # A pull's base.sha can remain at its original snapshot after master moves.
@@ -176,7 +177,9 @@ def deliver(number: int, *, apply: bool) -> str:
         # Updating makes the head contain master, so this fires once per base
         # move; red on the current base stays held.
         if not behind:
-            raise Stuck("CI failed on the current base; the mirror needs a fix on master")
+            stuck = Stuck("CI failed on the current base; the mirror needs a fix on master")
+            stuck.head = head  # Reported only while this is still the PR head.
+            raise stuck
         if not apply:
             return f"#{number} failed CI on an older base; action=update base and re-run CI"
         api(f"pulls/{number}/update-branch", "PUT", {"expected_head_sha": head})
@@ -200,17 +203,22 @@ def deliver(number: int, *, apply: bool) -> str:
     return f"Merged #{number}: canonical {source}, PR head {head}, merge {result['sha']}"
 
 
-def head_age_seconds(number: int) -> tuple[str, float]:
-    head = api(f"pulls/{number}")["head"]["sha"]
+def head_age_seconds(head: str) -> float:
+    # The commit's own date. The sync and update-branch both commit as they
+    # push, so this is when the head arrived to within a few seconds.
     stamp = api(f"commits/{head}")["commit"]["committer"]["date"]
     pushed = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
-    return head, (datetime.now(timezone.utc) - pushed).total_seconds()
+    return (datetime.now(timezone.utc) - pushed).total_seconds()
 
 
 def stuck_issues() -> list[dict]:
     issues = api(f"issues?state=open&labels={STUCK_LABEL}&per_page=100")
     # The issues endpoint also lists pull requests; those are never ours.
-    return [i for i in issues if "pull_request" not in i and STUCK_MARKER in (i.get("body") or "")]
+    # Ours only: opened by an App under this exact title. The label and the
+    # marker alone could match an issue a person wrote about a past incident.
+    return [i for i in issues if "pull_request" not in i
+            and (i.get("user") or {}).get("type") == "Bot" and i.get("title") == STUCK_TITLE
+            and STUCK_MARKER in (i.get("body") or "")]
 
 
 def report_stuck(number: int | None, hold: Hold | None, *, delivered: bool) -> str | None:
@@ -224,8 +232,17 @@ def report_stuck(number: int | None, hold: Hold | None, *, delivered: bool) -> s
         return f"Closed stuck-mirror issue #{closed[0]['number']}" if closed else None
     if isinstance(hold, Vetoed):
         return None
-    head, age = head_age_seconds(number) if number else ("", 0.0)
-    if not isinstance(hold, Stuck) and age < STUCK_AFTER_SECONDS:
+    head = ""
+    if number:
+        # Delivery's reads are stale by now. Report only what is still true:
+        # a head pushed since, or a hold label added since, is the next run's.
+        current = api(f"pulls/{number}")
+        head = current["head"]["sha"]
+        if any(label["name"] in HOLD_LABELS for label in current.get("labels", [])):
+            return None
+        if getattr(hold, "head", head) != head:
+            return None
+    if not isinstance(hold, Stuck) and (not head or head_age_seconds(head) < STUCK_AFTER_SECONDS):
         return None
     subject = f"#{number}" if number else "the mirror pull requests"
     # The key keeps hourly runs quiet: the issue is rewritten only when the
@@ -236,8 +253,8 @@ def report_stuck(number: int | None, hold: Hold | None, *, delivered: bool) -> s
             f"- Reason: {hold}\n"
             f"- Head: `{head or 'not established'}`\n\n"
             "Canonical skill text is ahead of the bundled mirror until this clears. "
-            "If CI failed, read the failing run on the pull request and fix the cause on "
-            "`master`; delivery re-tests the mirror once `master` moves. "
+            "If CI failed or was cancelled, read that run on the pull request: re-run it, "
+            "or fix the cause on `master`; delivery re-tests the mirror once `master` moves. "
             "This issue closes itself when the mirror lands.\n")
     existing = stuck_issues()
     if existing:
@@ -250,7 +267,7 @@ def report_stuck(number: int | None, hold: Hold | None, *, delivered: bool) -> s
                                "description": "Opened by a CI audit/collector"})
     except Hold:
         pass  # The label already exists.
-    issue = api("issues", "POST", {"title": "Skill mirror delivery is stuck",
+    issue = api("issues", "POST", {"title": STUCK_TITLE,
                                    "labels": [STUCK_LABEL], "body": body})
     return f"Opened stuck-mirror issue #{issue['number']}"
 
@@ -261,12 +278,16 @@ def main(argv=None) -> int:
     parser.add_argument("--apply", action="store_true")
     args = parser.parse_args(argv)
     number, hold, delivered = None, None, False
+    numbers: list[int] = []
     try:
         if args.pr:
             numbers = [args.pr]
         else:
             prs = api(f"pulls?state=open&head=cirwel:{BRANCH}&base=master&per_page=100")
             numbers = [p["number"] for p in prs if candidate(p)]
+            # Only an empty branch means nothing is waiting. A mirror PR turned
+            # back into a draft is still open and still undelivered.
+            delivered = not prs
         if len(numbers) > 1:
             raise Stuck("Multiple mirror PRs require reconciliation")
         if numbers:
@@ -274,7 +295,7 @@ def main(argv=None) -> int:
             messages = [deliver(number, apply=args.apply)]
             delivered = messages[0].startswith("Merged ")
         else:
-            messages, delivered = ["No open mirror PR to deliver"], True
+            messages = ["No open mirror PR to deliver"]
         status = 0
     except Hold as exc:
         messages, status, hold = [f"Mirror delivery held: {exc}"], 1, exc
@@ -284,8 +305,9 @@ def main(argv=None) -> int:
     if args.apply:
         try:
             note = report_stuck(number, hold, delivered=delivered)
-        except (Hold, KeyError, ValueError):
-            # Reporting must never change what delivery decided.
+        except Exception:  # noqa: BLE001
+            # Reporting must never change what delivery decided or hide its
+            # result, whatever goes wrong here.
             note = "The stuck-mirror issue could not be read or written"
         if note:
             messages.append(note)

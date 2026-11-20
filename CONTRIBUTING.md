@@ -93,7 +93,7 @@ Actions summary so an agent can investigate. A mirror that cannot land also
 gets one open issue labelled `ci-finding`: at once when CI is red on the
 current base, otherwise when a head has been held for three hours. A
 maintainer hold label is deliberate and opens none. The issue closes when the
-mirror lands. No general merge bypass is added.
+mirror lands or no mirror PR remains open. No general merge bypass is added.
 
 Before opening or merging a PR, check:
 

@@ -256,8 +256,11 @@ def test_current_base_race_never_writes(monkeypatch, trees):
 class Tracker:
     """In-memory issues API: one mirror PR whose head was committed `age` ago."""
 
-    def __init__(self, monkeypatch, *, age=0, issues=(), fail_issues=False):
+    def __init__(self, monkeypatch, *, age=0, issues=(), fail_issues=False,
+                 listed=None, labels=(), head="head"):
         self.calls, self.issues, self.fail_issues = [], list(issues), fail_issues
+        self.listed = [pr("head", "base") | {"number": 12}] if listed is None else listed
+        self.current = pr(head, "base") | {"labels": [{"name": n} for n in labels]}
         stamp = datetime.now(timezone.utc) - timedelta(seconds=age)
         self.date = stamp.strftime("%Y-%m-%dT%H:%M:%SZ")
         monkeypatch.setattr(delivery, "api", self.api)
@@ -265,15 +268,18 @@ class Tracker:
     def api(self, path, method="GET", body=None):
         self.calls.append((path, method, body))
         if path.startswith("pulls?"):
-            return [pr("head", "base") | {"number": 12}]
+            return self.listed
         if path == "pulls/12":
-            return pr("head", "base")
-        if path == "commits/head":
+            return self.current
+        if path.startswith("commits/"):
             return {"commit": {"committer": {"date": self.date}}}
         if self.fail_issues and "issues" in path:
-            raise delivery.Hold("GitHub issues failed")
+            raise self.fail_issues
         if path.startswith("issues?"):
-            return self.issues + [{"number": 99, "body": delivery.STUCK_MARKER, "pull_request": {}}]
+            return self.issues + [
+                open_issue(RED) | {"number": 99, "pull_request": {}},
+                open_issue(RED) | {"number": 98, "user": {"type": "User"}},
+                open_issue(RED) | {"number": 97, "title": "Notes on the stuck mirror"}]
         if path == "issues" and method == "POST":
             return {"number": 7}
         return {}
@@ -305,7 +311,8 @@ def test_red_mirror_on_current_base_opens_one_issue(monkeypatch, capsys):
 
 
 def open_issue(reason, head="head"):
-    return {"number": 7, "body": f"{delivery.STUCK_MARKER}\n<!-- stuck-key: {head}:{reason} -->\n"}
+    return {"number": 7, "title": delivery.STUCK_TITLE, "user": {"type": "Bot"},
+            "body": f"{delivery.STUCK_MARKER}\n<!-- stuck-key: {head}:{reason} -->\n"}
 
 
 def test_unchanged_stuck_mirror_writes_nothing_on_later_runs(monkeypatch):
@@ -364,6 +371,36 @@ def test_issue_closes_when_the_mirror_lands_not_when_it_is_retried(monkeypatch, 
     assert tracker.writes == (expected if closes else [])
 
 
+def stuck_on(head):
+    exc = delivery.Stuck(RED)
+    exc.head = head
+    return exc
+
+
+def test_failure_on_a_replaced_head_is_left_to_the_next_run(monkeypatch):
+    tracker = Tracker(monkeypatch, head="newer")
+    hold_with(monkeypatch, stuck_on("head"))
+    assert delivery.main(["--apply"]) == 1
+    assert not tracker.writes
+
+
+def test_hold_label_added_after_delivery_read_is_respected(monkeypatch):
+    tracker = Tracker(monkeypatch, labels=["do-not-merge"])
+    hold_with(monkeypatch, stuck_on("head"))
+    assert delivery.main(["--apply"]) == 1
+    assert not tracker.writes
+
+
+@pytest.mark.parametrize("listed,closes", [
+    ([], True),
+    ([pr("head", "base") | {"number": 12, "draft": True}], False),
+])
+def test_issue_closes_on_an_empty_branch_not_on_a_drafted_mirror(monkeypatch, listed, closes):
+    tracker = Tracker(monkeypatch, issues=[open_issue(RED)], listed=listed)
+    assert delivery.main(["--apply"]) == 0
+    assert bool(tracker.writes) is closes
+
+
 def test_dry_run_never_reads_or_writes_issues(monkeypatch):
     tracker = Tracker(monkeypatch, age=delivery.STUCK_AFTER_SECONDS * 10)
     hold_with(monkeypatch, delivery.Stuck(RED))
@@ -371,8 +408,9 @@ def test_dry_run_never_reads_or_writes_issues(monkeypatch):
     assert not [c for c in tracker.calls if "issues" in c[0] or "commits" in c[0]]
 
 
-def test_issue_failure_does_not_change_the_delivery_result(monkeypatch, capsys):
-    Tracker(monkeypatch, fail_issues=True)
+@pytest.mark.parametrize("error", [delivery.Hold("GitHub issues failed"), OSError("no gh")])
+def test_issue_failure_does_not_change_the_delivery_result(monkeypatch, capsys, error):
+    Tracker(monkeypatch, fail_issues=error)
     monkeypatch.setattr(delivery, "deliver", lambda number, *, apply: "Merged #12: a")
     assert delivery.main(["--apply"]) == 0
     assert "could not be read or written" in capsys.readouterr().out
