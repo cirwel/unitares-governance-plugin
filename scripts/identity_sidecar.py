@@ -75,6 +75,9 @@ DEFAULT_PORT = 8768
 DEFAULT_TIMEOUT = 20.0
 MAX_REQUEST_BYTES = 1024 * 1024
 CLIENT_SOCKET_TIMEOUT = 5.0
+#: Wall-clock bound on reading one request (line, headers, then body); the
+#: per-recv socket timeout alone lets a client trickle bytes indefinitely.
+REQUEST_READ_DEADLINE = 10.0
 MAX_REQUEST_WORKERS = 32
 
 
@@ -811,12 +814,53 @@ def make_handler(sidecar: IdentitySidecar) -> type[BaseHTTPRequestHandler]:
         def setup(self) -> None:
             super().setup()
             self.connection.settimeout(CLIENT_SOCKET_TIMEOUT)
+            self._read_lock = threading.Lock()
+            self._read_timer: threading.Timer | None = None
+            self._read_deadline_hit = False
+
+        def _arm_read_deadline(self) -> None:
+            self._disarm_read_deadline()
+
+            def expire() -> None:
+                with self._read_lock:
+                    if self._read_timer is not timer:
+                        return
+                    self._read_timer = None
+                    self._read_deadline_hit = True
+                self.close_connection = True
+                try:
+                    self.connection.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+
+            timer = threading.Timer(REQUEST_READ_DEADLINE, expire)
+            timer.daemon = True
+            with self._read_lock:
+                self._read_timer = timer
+            timer.start()
+
+        def _disarm_read_deadline(self) -> bool:
+            """Stop the read deadline; False when it already cut the connection."""
+            with self._read_lock:
+                timer, self._read_timer = self._read_timer, None
+                if timer is not None:
+                    timer.cancel()
+                return not self._read_deadline_hit
+
+        def handle_one_request(self) -> None:
+            self._arm_read_deadline()
+            try:
+                super().handle_one_request()
+            finally:
+                self._disarm_read_deadline()
 
         def log_message(self, fmt: str, *args: Any) -> None:  # keep stdout clean for agents
             if os.environ.get("UNITARES_SIDECAR_ACCESS_LOG", "off").lower() in {"1", "on", "true"}:
                 super().log_message(fmt, *args)
 
         def do_GET(self) -> None:  # noqa: N802
+            if not self._disarm_read_deadline():
+                return
             parsed = urllib.parse.urlparse(self.path)
             query = urllib.parse.parse_qs(parsed.query)
             path = parsed.path
@@ -879,13 +923,19 @@ def make_handler(sidecar: IdentitySidecar) -> type[BaseHTTPRequestHandler]:
             _json_response(self, 404, {"success": False, "error": "not found"})
 
         def do_POST(self) -> None:  # noqa: N802
+            if not self._disarm_read_deadline():
+                return
             if not sidecar.authorized(self.headers):
                 _json_response(self, 401, {"success": False, "error": "unauthorized"})
                 return
+            self._arm_read_deadline()
             try:
                 body = _read_request_json(self)
             except RequestBodyError as exc:
-                _json_response(self, exc.status, {"success": False, "error": str(exc)})
+                if self._disarm_read_deadline():
+                    _json_response(self, exc.status, {"success": False, "error": str(exc)})
+                return
+            if not self._disarm_read_deadline():
                 return
             parsed = urllib.parse.urlparse(self.path)
             path = parsed.path

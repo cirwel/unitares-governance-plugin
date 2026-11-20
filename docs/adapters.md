@@ -263,7 +263,9 @@ The first `--` separates wrapper options from the child command. `u-run` then:
    preserves the child's shell exit status; and
 5. submits one `/turn/stop` check-in from observed wall time and exit status,
    always labeled `epistemic_class="substrate_interpretation"` and with no
-   confidence field.
+   confidence field. The listener must answer the startup challenge again
+   first; if it does not, the check-in is skipped with a warning and the
+   child's exit status is still returned.
 
 The exit complexity proxy is intentionally small and inspectable: `0.30` base,
 up to `0.35` over the first hour of observed runtime, plus `0.20` for a nonzero

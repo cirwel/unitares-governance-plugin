@@ -8,6 +8,7 @@ import hmac
 import json
 import socket
 import threading
+import time
 import urllib.request
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
@@ -1148,3 +1149,64 @@ def test_bounded_server_refuses_connections_above_worker_cap() -> None:
         release.set()
         first.join(timeout=2)
         _stop_server(server, serving)
+
+
+def _trickle_until_closed(client: socket.socket, *, budget: float) -> bool:
+    """Send one byte at a time; report whether the server closed the socket."""
+    client.settimeout(0.2)
+    deadline = time.monotonic() + budget
+    while time.monotonic() < deadline:
+        try:
+            client.sendall(b"X")
+            if client.recv(4096) == b"":
+                return True
+        except socket.timeout:
+            continue
+        except OSError:
+            return True
+    return False
+
+
+@pytest.mark.parametrize("stalled_part", ["headers", "body"])
+def test_slow_request_cannot_hold_a_worker_past_read_deadline(
+    tmp_path: Path, fake_server: str, monkeypatch: pytest.MonkeyPatch, stalled_part: str
+) -> None:
+    monkeypatch.setattr(identity_sidecar, "REQUEST_READ_DEADLINE", 0.5)
+    sidecar = _sidecar(tmp_path, fake_server)
+    server = BoundedThreadingHTTPServer(
+        ("127.0.0.1", 0), make_handler(sidecar), max_workers=1
+    )
+    serving = threading.Thread(target=server.serve_forever, daemon=True)
+    serving.start()
+    port = server.server_address[1]
+    base_url = f"http://127.0.0.1:{port}"
+    if stalled_part == "headers":
+        opening = "GET /health HTTP/1.1\r\nX-Slow: "
+    else:
+        opening = (
+            "POST /v1/tools/call HTTP/1.1\r\n"
+            f"Authorization: Bearer {sidecar.capability_token}\r\n"
+            "Content-Length: 4096\r\n\r\n"
+        )
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as client:
+            client.sendall(opening.encode("ascii"))
+            assert _trickle_until_closed(client, budget=4.0)
+        # The worker frees its slot just after the socket closes.
+        released_by = time.monotonic() + 2.0
+        while True:
+            try:
+                status, payload = _http_get_json(
+                    f"{base_url}/health",
+                    headers={"Authorization": f"Bearer {sidecar.capability_token}"},
+                )
+                break
+            except urllib.error.HTTPError as exc:
+                if exc.code != 503 or time.monotonic() > released_by:
+                    raise
+                time.sleep(0.05)
+    finally:
+        _stop_server(server, serving)
+    assert status == 200
+    assert payload["success"] is True
+    assert FakeGovernanceHandler.calls == []

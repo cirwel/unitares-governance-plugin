@@ -521,6 +521,13 @@ def main(argv: list[str] | None = None) -> int:
         )
         return_code, exit_code, wall_seconds = _run_child(command, environment)
         try:
+            # The child may run for hours and the listener may have changed
+            # hands; re-authenticate it before sending the capability again.
+            if _probe_startup_proof(sidecar_url, startup_secret) is not True:
+                raise URunError(
+                    "sidecar listener did not re-prove the startup secret; "
+                    "exit check-in skipped"
+                )
             _submit_exit_checkin(
                 sidecar_url=sidecar_url,
                 slot=slot,

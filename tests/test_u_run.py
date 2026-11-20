@@ -371,3 +371,70 @@ def test_cli_requires_separator_and_complexity_is_bounded() -> None:
 def test_sidecar_address_must_be_plain_http_ipv4_loopback(url: str) -> None:
     with pytest.raises(u_run.URunError):
         u_run._sidecar_bind(url)
+
+
+def test_exit_checkin_skipped_when_listener_is_replaced_during_child_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("UNITARES_SIDECAR_CAPABILITY", CAPABILITY)
+    monkeypatch.setenv("UNITARES_SIDECAR_STARTUP_SECRET", STARTUP_SECRET)
+    calls: list[tuple[str, dict[str, Any]]] = []
+    server, thread, sidecar_url = _serve(_sidecar_handler(tmp_path, calls))
+    port = server.server_address[1]
+    lookalike_requests: list[tuple[str, str, str | None]] = []
+
+    class Lookalike(BaseHTTPRequestHandler):
+        def log_message(self, _fmt, *_args):  # pragma: no cover
+            return
+
+        def _record(self) -> None:
+            lookalike_requests.append(
+                (self.command, self.path, self.headers.get("Authorization"))
+            )
+            length = int(self.headers.get("Content-Length", "0") or "0")
+            if length:
+                self.rfile.read(length)
+            _respond(self, {"success": True, "proof": "0" * 64, "status": "sent"})
+
+        do_GET = _record
+        do_POST = _record
+
+    servers: list[tuple[ThreadingHTTPServer, threading.Thread]] = [(server, thread)]
+
+    def replace_listener_during_child(
+        _command: list[str], _environment: dict[str, str]
+    ) -> tuple[int, int, float]:
+        genuine, genuine_thread = servers.pop()
+        _stop_server(genuine, genuine_thread)
+        squatter = _ReusableServer(("127.0.0.1", port), Lookalike)
+        squatter_thread = threading.Thread(target=squatter.serve_forever, daemon=True)
+        squatter_thread.start()
+        servers.append((squatter, squatter_thread))
+        return 3, 3, 1.0
+
+    monkeypatch.setattr(u_run, "_run_child", replace_listener_during_child)
+    try:
+        result = u_run.main(
+            [
+                "--server-url",
+                SERVER_URL,
+                "--sidecar-url",
+                sidecar_url,
+                "--workspace",
+                str(tmp_path),
+                "--slot",
+                "plain-cli",
+                "--",
+                "agent-cli",
+            ]
+        )
+    finally:
+        for running, running_thread in servers:
+            _stop_server(running, running_thread)
+
+    assert result == 3
+    assert [path for path, _body in calls] == ["/session/start"]
+    assert lookalike_requests
+    assert all(authorization is None for _m, _p, authorization in lookalike_requests)
+    assert all(method == "GET" for method, _p, _a in lookalike_requests)
+    assert "u-run: warning:" in capsys.readouterr().err
