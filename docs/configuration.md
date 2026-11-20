@@ -23,7 +23,8 @@ Use `https://` or a loopback address. When `UNITARES_SERVER_URL` is cleartext
 HTTP to any other host, the hooks send no governance data to it, and the
 PreToolUse hook denies calls to the bundled Claude server that would carry
 `client_session_id`, `continuity_token`, `agent_uuid` or `agent_id`, whether the
-hook would add the field or the agent supplied it. Calls without those fields
+hook would add the field or the agent supplied it, at the top level or inside a
+`kwargs` wrapper or a `use_tool` call's `arguments`. Calls without those fields
 still pass.
 
 The bundled Codex `.codex-mcp.json` is deliberately fixed to unauthenticated

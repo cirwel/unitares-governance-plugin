@@ -662,6 +662,61 @@ class TestBundledCleartextTransport:
         }), tmp_path, host="claude")
         assert _deny_reason(result) is not None
 
+    @pytest.mark.parametrize(
+        ("suffix", "tool_input"),
+        [
+            ("sync_state", {"kwargs": {"client_session_id": SID}}),
+            ("sync_state", {"kwargs": json.dumps({"client_session_id": SID})}),
+            ("sync_state", {"kwargs": {"kwargs": {"continuity_token": "v1.tok"}}}),
+            ("use_tool", {"tool_name": "sync_state",
+                          "arguments": {"kwargs": {"client_session_id": SID}}}),
+            ("use_tool", {"tool_name": "sync_state",
+                          "arguments": json.dumps({"client_session_id": SID})}),
+            ("use_tool", {"tool_name": "sync_state",
+                          "arguments": [{"client_session_id": SID}]}),
+            ("use_tool", {"kwargs": {"tool_name": "sync_state",
+                                     "arguments": {"client_session_id": SID}}}),
+        ],
+    )
+    def test_wrapped_agent_proof_is_denied(self, tmp_path, monkeypatch, suffix, tool_input):
+        monkeypatch.setenv("UNITARES_SERVER_URL", "http://gov.example.test")
+        result = _run(_hook_input(f"{BUNDLED}{suffix}", tool_input), tmp_path,
+                      host="claude")
+        assert "cleartext HTTP" in (_deny_reason(result) or "")
+
+    @pytest.mark.parametrize(
+        "tool_input",
+        [
+            {"kwargs": {"query": "x"}},
+            {"kwargs": "not json"},
+            {"kwargs": json.dumps({"query": "x"})},
+        ],
+    )
+    def test_wrapped_proofless_call_passes(self, tmp_path, monkeypatch, tool_input):
+        monkeypatch.setenv("UNITARES_SERVER_URL", "http://gov.example.test")
+        result = _run(_hook_input(f"{BUNDLED}search_shared_memory", tool_input),
+                      tmp_path, host="claude")
+        assert result.returncode == 0
+        assert result.stdout.strip() == ""
+
+    def test_deny_survives_an_injection_error(self, monkeypatch, capsys):
+        import io
+
+        import governance_call_inject as inject
+
+        def _boom(*_args, **_kwargs):
+            raise RuntimeError("injection failed")
+
+        monkeypatch.setenv("UNITARES_SERVER_URL", "http://gov.example.test")
+        monkeypatch.setattr(inject, "_decide", _boom)
+        monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(_hook_input(
+            f"{BUNDLED}sync_state", {"client_session_id": SID}))))
+        assert inject.main(["--host", "claude"]) == 0
+        output = json.loads(capsys.readouterr().out)
+        specific = output["hookSpecificOutput"]
+        assert specific["permissionDecision"] == "deny"
+        assert "cleartext HTTP" in specific["permissionDecisionReason"]
+
     def test_agent_supplied_proof_on_unlisted_suffix_is_denied(self, tmp_path, monkeypatch):
         monkeypatch.setenv("UNITARES_SERVER_URL", "http://gov.example.test")
         result = _run(_hook_input(f"{BUNDLED}bind_session", {

@@ -52,8 +52,8 @@ Contract:
   only anchored lifecycle, check-in, and read-only diagnostic calls; admin-
   capable tools keep their normal permission flow and require explicit proof.
 - Denies, for Claude's bundled server alias only, any call that would carry
-  a proof field (injected or agent-supplied, including a gateway call's
-  nested arguments) when UNITARES_SERVER_URL is cleartext HTTP to a
+  a proof field (injected or agent-supplied, including inside a ``kwargs``
+  wrapper or a gateway call's nested arguments) when UNITARES_SERVER_URL is cleartext HTTP to a
   non-loopback host. Proofless calls pass; other aliases are not checked
   because their transport is configured outside this plugin.
 - Fails open: any error or missing cache → no output, tool runs untouched.
@@ -357,14 +357,38 @@ def _gateway_target_injectable(tool_input: dict) -> bool:
     return not _has_proof_field(nested)
 
 
-def _carries_proof(tool_input: object) -> bool:
-    """Whether a call input, or a gateway call's nested arguments, has proof."""
-    if not isinstance(tool_input, dict):
+# Containers the server unwraps or forwards: ``kwargs`` (a dict or a
+# JSON-object string, unwrapped up to four levels deep) and a gateway call's
+# ``arguments``. Deep enough for both chains together.
+_PROOF_CONTAINER_KEYS = ("kwargs", "arguments")
+_PROOF_SCAN_DEPTH = 10
+
+
+def _carries_proof(value: object, _depth: int = 0) -> bool:
+    """Whether a call input carries proof anywhere it would be sent.
+
+    Checks the top level, then every ``kwargs`` and ``arguments`` container
+    below it, whether a dict, a list, or a string holding JSON. A container
+    the server would refuse still crosses the wire, so its proof counts.
+    """
+    if _depth > _PROOF_SCAN_DEPTH:
         return False
-    if _has_proof_field(tool_input):
+    if isinstance(value, list):
+        return any(_carries_proof(item, _depth + 1) for item in value)
+    if not isinstance(value, dict):
+        return False
+    if _has_proof_field(value):
         return True
-    nested = tool_input.get("arguments")
-    return isinstance(nested, dict) and _has_proof_field(nested)
+    for key in _PROOF_CONTAINER_KEYS:
+        nested = value.get(key)
+        if isinstance(nested, str):
+            try:
+                nested = json.loads(nested)
+            except (ValueError, RecursionError):
+                continue
+        if _carries_proof(nested, _depth + 1):
+            return True
+    return False
 
 
 def _insecure_bundled_transport_reason(
@@ -523,7 +547,11 @@ def main(argv: list[str] | None = None) -> int:
     if not isinstance(data, dict):
         return 0
 
-    output = _decide(args.host, data, raw)
+    try:
+        output = _decide(args.host, data, raw)
+    except Exception:
+        # Injection fails open, but the transport check below still applies.
+        output = None
     insecure = _insecure_bundled_transport_reason(args.host, data, output)
     if insecure:
         output = _deny_output(insecure)
