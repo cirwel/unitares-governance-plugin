@@ -71,6 +71,44 @@ def test_secure_governance_url_requires_https_or_loopback(url: str, secure: bool
     assert is_secure_governance_url(url) is secure
 
 
+# Python's urlsplit and the WHATWG URL parser (used by Node, so by Claude's MCP
+# transport) can name different hosts for these: a backslash ends the
+# authority for WHATWG but not for Python, and userinfo, whitespace and
+# control characters are where the two parsers' cleanup rules differ. None of
+# them belongs in a governance URL, so none is treated as loopback.
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://gov.example.test\\@localhost:8767/mcp/",
+        "http://gov.example.test\\@127.0.0.1/mcp/",
+        "http://gov.example.test:80\\@localhost/mcp/",
+        "http://localhost\\@localhost/mcp/",
+        "http://gov.example.test@localhost:8767/mcp/",
+        "http://user:pass@127.0.0.1:8767/mcp/",
+        "http://gov.example.test\t@localhost/mcp/",
+        "http://local host/mcp/",
+        " http://localhost:8767/mcp/",
+        "http://localhost:8767/mcp/\x7f",
+    ],
+)
+def test_ambiguous_governance_url_is_not_secure(url: str) -> None:
+    assert is_secure_governance_url(url) is False
+
+
+def test_ambiguous_url_is_refused_before_the_opener(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = urllib.request.Request("http://gov.example.test\\@localhost:8767/v1")
+
+    def unexpected_open(*_args, **_kwargs):
+        pytest.fail("ambiguous governance request reached the network opener")
+
+    monkeypatch.setattr("_http_auth._AUTHORIZATION_SAFE_OPENER.open", unexpected_open)
+    monkeypatch.setattr("_http_auth._LOOPBACK_DIRECT_OPENER.open", unexpected_open)
+    with pytest.raises(InsecureBearerTransportError):
+        authorization_safe_urlopen(request, timeout=1)
+
+
 @pytest.mark.parametrize("url", ["http://localhost:8767/v1", "http://127.0.0.1:8767/v1"])
 def test_bearer_request_allows_loopback_development_transport(
     monkeypatch: pytest.MonkeyPatch,

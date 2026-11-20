@@ -20,11 +20,21 @@ class InsecureBearerTransportError(ValueError):
 
 
 def _http_origin(url: str) -> tuple[str, str, int] | None:
-    """Return a normalized HTTP origin, or None for malformed/non-HTTP URLs."""
+    """Return a normalized HTTP origin, or None for malformed/non-HTTP URLs.
+
+    URLs whose host Python and the WHATWG URL parser (which Claude's MCP
+    transport uses) can read differently are refused: a backslash ends the
+    authority for WHATWG but not for urlsplit, and userinfo, whitespace and
+    control characters are where their cleanup rules differ.
+    """
+    if any(ch == "\\" or ord(ch) <= 0x20 or ord(ch) == 0x7F for ch in url):
+        return None
     try:
         parsed = urllib.parse.urlsplit(url)
         scheme = parsed.scheme.lower()
         if scheme not in {"http", "https"} or not parsed.hostname:
+            return None
+        if "@" in parsed.netloc:
             return None
         host = parsed.hostname.encode("idna").decode("ascii").lower()
         port = parsed.port
