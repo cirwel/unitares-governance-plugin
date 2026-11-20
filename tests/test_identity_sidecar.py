@@ -2053,6 +2053,28 @@ def test_session_start_over_an_invalid_protected_binding_needs_replace_existing(
     assert sidecar.read_session("slot-a")["uuid"] == "11111111-2222-4333-8444-555555555555"
 
 
+def test_session_start_refuses_when_the_protected_binding_cannot_be_looked_at(
+    tmp_path: Path, fake_server: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sidecar = _sidecar(tmp_path, fake_server)
+    protected = Path.home() / ".unitares" / "session-slot-a.json"
+    real_exists = Path.exists
+
+    def exists(self: Path, *args: object, **kwargs: object) -> bool:
+        if self == protected:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_exists(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "exists", exists)
+
+    assert sidecar.refuse_session_start_over_bound_slot("slot-a") is not None
+    status, payload = _post_session_start(sidecar, {})
+
+    assert status == 409
+    assert "clear it explicitly" in payload["error"]
+    assert FakeGovernanceHandler.calls == []
+
+
 def _reply(monkeypatch: pytest.MonkeyPatch, result: dict) -> None:
     monkeypatch.setattr(
         identity_sidecar, "_post_json", lambda *_a, **_k: ({"result": dict(result)}, 1, None)

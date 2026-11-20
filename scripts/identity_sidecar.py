@@ -749,7 +749,13 @@ class IdentitySidecar:
         binding = self.read_session(slot)
         if not binding:
             protected_path = _cache_path(Path.home(), slot)
-            if protected_path.exists() or protected_path.is_symlink():
+            try:
+                present = protected_path.exists() or protected_path.is_symlink()
+            except OSError:
+                # The binding cannot even be looked at: treat it as present
+                # and unreadable rather than as an empty slot.
+                present = True
+            if present:
                 return (
                     "sidecar slot's protected HOME session binding is invalid; "
                     "clear it explicitly, or send replace_existing: true to "

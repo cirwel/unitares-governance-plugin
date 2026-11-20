@@ -267,9 +267,11 @@ An empty slot is onboarded as before. `u-run` sends the flag on its own start
 call, because it owns the session it starts, including on a reused `--slot`.
 The flag is an accident guard, not an authority boundary: every holder of the
 sidecar capability, including every process under `u-run`, can send it and
-replace the binding. Two concurrent first mints into an empty slot are also
-not serialized: only one reply is persisted, but both identities exist on the
-server.
+replace the binding. The check and the onboard are not one transaction: two
+concurrent `/session/start` calls on an empty slot can both pass the check and
+both mint, and the later one can replace the earlier binding. Two concurrent
+first mints into an empty slot through tool calls are also not serialized:
+only one reply is persisted, but both identities exist on the server.
 
 Useful endpoints:
 
