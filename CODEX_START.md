@@ -149,7 +149,7 @@ debugging the underlying protocol.
 
 ## Recommended Flow
 
-1. Follow the bundled `unitares-governance:governance-lifecycle` skill and call `start_session(force_new=true)`
+1. Follow the bundled `unitares-governance:governance-lifecycle` skill and call `start_session(force_new=true)` (in an anchored conversation, `start_session()` with no arguments: see step 1 of the raw tool flow below)
 2. Keep continuity in slot-scoped `.unitares/session-<slot>.json` caches
 3. Do real work
 4. Call `sync_state(...)` when there is meaningful agent state to report (usually at most once per assistant turn)
@@ -166,7 +166,7 @@ those custom slash commands.
 
 The raw tool flow is:
 
-1. First run of a fresh process: `start_session(force_new=true)` (`onboard(...)` is the canonical equivalent)
+1. First run of a fresh process: `start_session(force_new=true)` (`onboard(...)` is the canonical equivalent). In an anchored conversation (the session-start note says `anchored session`), call `start_session()` with no arguments instead: the hooks attach the conversation's anchor to that call, and `force_new=true` would mint a second identity for the conversation
 2. Fresh process deliberately continuing an exited process's work: `start_session(force_new=true, parent_agent_id=<saved uuid>, spawn_reason="explicit")`. A saved uuid alone is co-location, not lineage
 3. Same still-running process: do **not** call `start_session` again; use `sync_state(..., client_session_id=<current session id>)`
 4. `sync_state()` when meaningful, usually at most once per assistant turn (`process_agent_update(...)` is the canonical equivalent)
@@ -220,10 +220,12 @@ Workspace slot caches are lineage hints, not identity proof: their `uuid`,
 process can write them. Proof of the current session is only the
 `client_session_id` returned to this live process by its own
 `start_session`/`onboard` response, or the binding a trusted hook injects for
-this exact host slot. Never copy a `client_session_id` out of a slot cache read,
-another slot, or the inventory. When this process has no known binding, call
-`start_session(force_new=true)` as in the raw tool flow above, adding
-`parent_agent_id` only for a verified handoff from an exited process.
+this process: its exact host slot's binding, or the conversation anchor of an
+anchored conversation. Never copy a `client_session_id` out of a slot cache
+read, another slot, or the inventory. When this process has no known binding,
+bind as step 1 of the raw tool flow above says: `start_session()` with no
+arguments in an anchored conversation, otherwise `start_session(force_new=true)`,
+adding `parent_agent_id` only for a verified handoff from an exited process.
 
 Do not persist `continuity_token` in this cache. v2 slot caches are lineage and
 transport-continuity hints only; a token belongs only to the live response that
