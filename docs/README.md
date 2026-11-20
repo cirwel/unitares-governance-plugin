@@ -15,6 +15,7 @@ configuration, and the day-to-day workflow, start with the
 | ChatGPT package | [`chatgpt.md`](./chatgpt.md) | Build the hook-free portable package for a registered app or hosted OAuth MCP server |
 | Adapter reference | [`adapters.md`](./adapters.md) | Claude hooks, Codex/ChatGPT, and the local sidecar — full detail and endpoints |
 | Check-in reference | [`check-ins.md`](./check-ins.md) | Claude check-in triggers, kill switch, diagnostic log, protective audit, upgrade steps |
+| Chat bridges and orchestrators | [`orchestrators.md`](./orchestrators.md) | Give a conversation one identity when every turn is a new CLI process |
 | Contributing | [`CONTRIBUTING.md`](../CONTRIBUTING.md) | Branch/PR convention and review standard |
 | Design notes | this directory | Why the plugin is shaped the way it is, and what it deliberately does not build |
 | Skills | [`../skills/`](../skills/) | Agent-facing capability docs (governance fundamentals, lifecycle, dialectic, knowledge graph, Discord bridge) |

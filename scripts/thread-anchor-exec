@@ -1,0 +1,105 @@
+#!/bin/sh
+# thread-anchor-exec: launch one agent CLI turn bound to a conversation's
+# governance identity.
+#
+#   scripts/thread-anchor-exec <thread-id> -- <cli> [args...]
+#
+# A chat bridge or orchestrator that starts a new CLI process for every turn
+# gets a new UNITARES identity for every turn. This launcher declares the three
+# variables the plugin's hooks require before they resume one identity for the
+# whole conversation instead:
+#
+#   UNITARES_CLIENT_SESSION_ID       agent:/thread-<thread-id>
+#   UNITARES_ORCHESTRATED            1
+#   UNITARES_ORCHESTRATED_OWNER_PID  the PID of the CLI itself
+#
+# The third is why this is a script and not two lines of configuration. The
+# hooks honor an anchor only in the process it was provisioned for, and they
+# identify that process by PID. This shell is replaced by the CLI (`exec`), so
+# its own PID is the CLI's. A CLI started any other way, including one this CLI
+# starts later, has a different PID and is refused the anchor.
+#
+# Guide: docs/orchestrators.md
+set -eu
+
+usage() {
+    printf '%s\n' \
+        'usage: thread-anchor-exec <thread-id> -- <cli> [args...]' \
+        '  <thread-id>  stable id of the conversation: ASCII letters, digits,' \
+        '               . _ and -, no two dots in a row, at most 128 characters' >&2
+    exit 64
+}
+
+[ "$#" -ge 3 ] || usage
+thread_id=$1
+[ "$2" = "--" ] || usage
+shift 2
+
+# Every accepted id must reach the server unchanged, or two different ids
+# could land on one identity. The server keeps a wider alphabet and a longer
+# id than this; what it rewrites is any other character and a run of dots,
+# both to `_`. The characters are listed one by one because a range such as
+# a-z follows the locale and admits accented letters under a UTF-8 one.
+case "$thread_id" in
+    ''|*..*|*[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-]*) usage ;;
+esac
+[ "${#thread_id}" -le 128 ] || usage
+
+# Find the CLI here instead of leaving it to `exec`. What a shell does when
+# `exec` cannot find or run its target differs from one shell to the next, and
+# so does `command -v`. A missing CLI exits 127; one that exists but cannot be
+# run exits 126. The CLI is then started by path, so a name beginning with `-`
+# is never read as an option to `exec`.
+name=$1
+[ -n "$name" ] || usage
+shift
+cli=
+blocked=
+case "$name" in
+    */*)
+        if [ -f "$name" ] && [ -x "$name" ]; then
+            cli=$name
+        elif [ -e "$name" ]; then
+            blocked=1
+        fi
+        ;;
+    *)
+        # Walk PATH by hand: field splitting on `:` drops empty entries
+        # differently from shell to shell, and an empty entry means the
+        # current directory.
+        rest=${PATH-}
+        while :; do
+            case "$rest" in
+                *:*) dir=${rest%%:*}; rest=${rest#*:}; more=1 ;;
+                *) dir=$rest; more= ;;
+            esac
+            [ -n "$dir" ] || dir=.
+            if [ -f "$dir/$name" ] && [ -x "$dir/$name" ]; then
+                cli=$dir/$name
+                break
+            fi
+            [ -e "$dir/$name" ] && blocked=1
+            [ -n "$more" ] || break
+        done
+        ;;
+esac
+if [ -z "$cli" ]; then
+    if [ -n "$blocked" ]; then
+        printf 'thread-anchor-exec: cannot execute: %s\n' "$name" >&2
+        exit 126
+    fi
+    printf 'thread-anchor-exec: command not found: %s\n' "$name" >&2
+    exit 127
+fi
+case "$cli" in /*|./*|../*) ;; *) cli=./$cli ;; esac
+
+UNITARES_CLIENT_SESSION_ID="agent:/thread-$thread_id"
+UNITARES_ORCHESTRATED=1
+UNITARES_ORCHESTRATED_OWNER_PID=$$
+export UNITARES_CLIENT_SESSION_ID UNITARES_ORCHESTRATED UNITARES_ORCHESTRATED_OWNER_PID
+
+# An anchored turn resumes its conversation's identity. Lineage inherited from
+# the bridge's own environment would describe some other process.
+unset UNITARES_PARENT_AGENT_ID UNITARES_SPAWN_REASON
+
+exec "$cli" "$@"
