@@ -181,7 +181,9 @@ identity:
 scripts/thread-anchor-exec <thread-id> -- claude -p "$PROMPT"
 ```
 
-See [chat bridges and orchestrators](docs/orchestrators.md).
+The launcher names the conversation. The identity is bound when the agent
+calls `start_session()`, or by the hooks when `UNITARES_AUTO_ONBOARD=on`. See
+[chat bridges and orchestrators](docs/orchestrators.md).
 
 Hermes-native lifecycle bindings live in
 [`unitares-host-adapter`](https://github.com/cirwel/unitares-host-adapter).

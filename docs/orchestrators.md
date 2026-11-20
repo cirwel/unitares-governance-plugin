@@ -25,6 +25,11 @@ For example, a bridge that runs Claude Code headless for a Discord thread:
 scripts/thread-anchor-exec 1573223283237847113 -- claude -p --resume "$SESSION" "$PROMPT"
 ```
 
+Resume only a CLI session that belongs to this conversation. A CLI session
+that was already bound to another identity, for example one first used
+interactively, keeps that binding in its local cache, and later governance
+calls and check-ins in it go on using the old identity.
+
 The thread id may hold ASCII letters, digits, `.`, `_` and `-`, with no two
 dots in a row, up to 128 characters. That is deliberately narrower than what
 the server accepts: every id the launcher takes reaches the server unchanged,
@@ -38,7 +43,7 @@ happen, for example `slack-T024BE7LD-1732062000.004200`.
 
 The launcher replaces itself with the CLI, so standard input, output and the
 exit status are the CLI's own. A CLI that is not found exits 127, and one that
-exists but cannot be run exits 126.
+exists but is not an executable file exits 126.
 
 ### What binds the identity
 

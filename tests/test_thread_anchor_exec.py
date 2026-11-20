@@ -163,6 +163,7 @@ def test_arguments_input_and_exit_status_pass_through(shell):
         ["t1"],
         ["t1", "--"],
         ["t1", "touch", "ran"],
+        ["t1", "--", ""],
         ["", "--", "touch", "ran"],
         ["a/b", "--", "touch", "ran"],
         ["a b", "--", "touch", "ran"],

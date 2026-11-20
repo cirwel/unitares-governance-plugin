@@ -51,6 +51,7 @@ esac
 # run exits 126. The CLI is then started by path, so a name beginning with `-`
 # is never read as an option to `exec`.
 name=$1
+[ -n "$name" ] || usage
 shift
 cli=
 blocked=
