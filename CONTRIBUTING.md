@@ -95,7 +95,11 @@ reviewers. Its `UNITARES_AGENT_APP_PRIVATE_KEY` secret and
 `UNITARES_AGENT_APP_CLIENT_ID` variable mint a short-lived token for this repo
 only. The App authenticates delivery; the canonical commit, PR head and CI
 establish what was checked. A blocked run explains the failed condition in its
-Actions summary so an agent can investigate. No general merge bypass is added.
+Actions summary so an agent can investigate. A mirror that cannot land also
+gets one open issue labelled `ci-finding`: at once when CI is red on the
+current base, otherwise when a head has been held for three hours. A
+maintainer hold label is deliberate and opens none. The issue closes when the
+mirror lands or no mirror PR remains open. No general merge bypass is added.
 
 Before opening or merging a PR, check:
 
