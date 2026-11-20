@@ -763,3 +763,133 @@ def test_response_cut_short_of_its_declared_length_is_refused(
         assert type(raised.value) is u_run.URunError
         expected_reason = "no response within" if ending == "trickle" else "IncompleteRead"
         assert expected_reason in str(raised.value)
+
+
+class _AdvanceableClock:
+    """A monotonic clock that only moves when a test moves it."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+@pytest.mark.parametrize("late_part", ["proof", "request"])
+def test_complete_response_after_the_deadline_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, late_part: str
+) -> None:
+    """A late last byte expires the exchange even if the watchdog never ran.
+
+    The injected clock jumps past the budget while the listener answers; real
+    time stays short, so the watchdog thread cannot fire.
+    """
+    clock = _AdvanceableClock()
+    monkeypatch.setattr(u_run, "_monotonic", clock)
+    calls: list[tuple[str, dict[str, Any]]] = []
+    base = _sidecar_handler(tmp_path, calls)
+
+    class LateHandler(base):  # type: ignore[misc, valid-type]
+        def _before_proof_response(self) -> None:
+            if late_part == "proof":
+                clock.now += 60.0
+
+        def do_GET(self):  # noqa: N802
+            if late_part == "request" and self.path == "/health":
+                clock.now += 60.0
+            super().do_GET()
+
+    server, thread, sidecar_url = _serve(LateHandler)
+    try:
+        with pytest.raises(u_run.URunError) as raised:
+            u_run._proven_exchange(
+                sidecar_url,
+                STARTUP_SECRET,
+                path="/health",
+                capability=CAPABILITY,
+                timeout=5.0,
+            )
+    finally:
+        _stop_server(server, thread)
+    if late_part == "proof":
+        assert type(raised.value) is u_run.SidecarUnavailable
+    else:
+        assert type(raised.value) is u_run.URunError
+        assert "no response within" in str(raised.value)
+
+
+def _chunked(body: bytes) -> bytes:
+    return f"{len(body):x}\r\n".encode() + body + b"\r\n0\r\n\r\n"
+
+
+_UNDELIMITED_RESPONSES = {
+    # Bodyless statuses that http.client reads as length zero, carrying a
+    # chunked JSON body anyway.
+    "204-chunked": (b"HTTP/1.1 204 No Content\r\nTransfer-Encoding: chunked\r\n", "chunked"),
+    "304-chunked": (b"HTTP/1.1 304 Not Modified\r\nTransfer-Encoding: chunked\r\n", "chunked"),
+    "101-chunked": (
+        b"HTTP/1.1 101 Switching Protocols\r\nTransfer-Encoding: chunked\r\n",
+        "chunked",
+    ),
+    "204-chunked-with-length": (
+        b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nTransfer-Encoding: chunked\r\n",
+        "chunked",
+    ),
+    "200-chunked": (b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n", "chunked"),
+    "200-no-length": (b"HTTP/1.1 200 OK\r\nConnection: close\r\n", "raw"),
+}
+
+
+def _undelimited_handler(*, bad_part: str, variant: str) -> type[BaseHTTPRequestHandler]:
+    """A listener whose ``bad_part`` answer is valid JSON without a declared length."""
+    head, framing = _UNDELIMITED_RESPONSES[variant]
+
+    class Undelimited(BaseHTTPRequestHandler):
+        def log_message(self, _fmt, *_args):  # pragma: no cover
+            return
+
+        def do_GET(self):  # noqa: N802
+            is_proof = self.path.startswith("/startup-proof")
+            payload: dict[str, Any] = {
+                "success": True,
+                "capability_id": hashlib.sha256(CAPABILITY.encode()).hexdigest(),
+            }
+            if is_proof:
+                payload["proof"] = _proof_for(self.path)
+            body = json.dumps(payload).encode()
+            if (bad_part == "proof") != is_proof:
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Connection", "keep-alive" if is_proof else "close")
+                self.end_headers()
+                self.wfile.write(body)
+                self.close_connection = not is_proof
+                return
+            self.wfile.write(head + b"\r\n" + (_chunked(body) if framing == "chunked" else body))
+            self.wfile.flush()
+            self.close_connection = True
+
+    return Undelimited
+
+
+@pytest.mark.parametrize("variant", sorted(_UNDELIMITED_RESPONSES))
+@pytest.mark.parametrize("bad_part", ["proof", "request"])
+def test_response_without_an_explicit_content_length_is_refused(
+    bad_part: str, variant: str
+) -> None:
+    server, thread, sidecar_url = _serve(_undelimited_handler(bad_part=bad_part, variant=variant))
+    try:
+        with pytest.raises(u_run.URunError) as raised:
+            u_run._proven_exchange(
+                sidecar_url,
+                STARTUP_SECRET,
+                path="/health",
+                capability=CAPABILITY,
+                timeout=2.0,
+            )
+    finally:
+        _stop_server(server, thread)
+    if bad_part == "proof":
+        assert type(raised.value) is u_run.ListenerNotProven
+    else:
+        assert type(raised.value) is u_run.URunError

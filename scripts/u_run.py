@@ -36,6 +36,12 @@ PROOF_TIMEOUT = 0.5
 PROOF_MAX_BYTES = 4096
 #: Wall-clock budget for the local /health read on a proven connection.
 HEALTH_TIMEOUT = 2.0
+#: Statuses that carry no body under HTTP; never a valid answer from these
+#: JSON endpoints, and ``http.client`` treats their length as zero.
+_BODYLESS_STATUSES = frozenset({204, 304})
+
+#: The clock every exchange deadline is measured on (replaceable in tests).
+_monotonic = time.monotonic
 
 
 class URunError(RuntimeError):
@@ -140,6 +146,18 @@ def _sidecar_bind(sidecar_url: str) -> tuple[str, int, str]:
     return bind_host, port, base
 
 
+def _require_declared_length(response: http.client.HTTPResponse) -> None:
+    """Refuse a response whose body is not delimited by an explicit length."""
+    if 100 <= response.status < 200 or response.status in _BODYLESS_STATUSES:
+        raise http.client.HTTPException(
+            f"HTTP {response.status} is not a JSON response"
+        )
+    if response.getheader("Transfer-Encoding") is not None:
+        raise http.client.HTTPException("Transfer-Encoding is not accepted")
+    if response.getheader("Content-Length") is None:
+        raise http.client.HTTPException("Content-Length is required")
+
+
 def _exchange(
     connection: http.client.HTTPConnection,
     method: str,
@@ -156,11 +174,14 @@ def _exchange(
     sending a byte at a time would otherwise hold u-run indefinitely, so a
     watchdog shuts the socket down when the wall clock runs out. That shutdown
     can end a read early with whatever bytes had arrived, so the response is
-    accepted only if the watchdog had not fired and the body is exactly the
-    declared ``Content-Length``. Raises ``TimeoutError`` when the time ran out
-    and ``OSError``, ``http.client.HTTPException`` or ``ValueError`` when the
-    exchange failed or the response was malformed or incomplete.
+    accepted only if it completed before the deadline (checked on the clock
+    itself, not only by whether the watchdog ran) and the body is exactly an
+    explicit ``Content-Length``: no chunked encoding and no bodyless status.
+    Raises ``TimeoutError`` when the time ran out and ``OSError``,
+    ``http.client.HTTPException`` or ``ValueError`` when the exchange failed
+    or the response was malformed or incomplete.
     """
+    deadline = _monotonic() + max(0.0, seconds)
     expired = threading.Event()
     sock = connection.sock
 
@@ -177,6 +198,7 @@ def _exchange(
     try:
         connection.request(method, path, body=body, headers=headers)
         response = connection.getresponse()
+        _require_declared_length(response)
         raw = read_limited_response(response, max_bytes=max_bytes)
     except (OSError, http.client.HTTPException, ValueError) as exc:
         if expired.is_set():
@@ -184,7 +206,9 @@ def _exchange(
         raise
     finally:
         timer.cancel()
-    if expired.is_set():
+    # A delayed watchdog can lose the race with a late last byte, so the
+    # deadline is also checked here, after the exchange finished.
+    if expired.is_set() or _monotonic() >= deadline:
         raise TimeoutError(f"no response within {seconds}s")
     # http.client counts down the declared length as it reads; anything but
     # zero is a body cut short, or one with no declared length at all.
