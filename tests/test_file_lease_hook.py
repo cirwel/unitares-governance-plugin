@@ -1677,9 +1677,168 @@ def test_worktree_roots_classifies_only_verified_non_repositories(tmp_path, monk
     (broken / ".git").write_text("gitdir: /nonexistent/unitares-test\n")
     assert file_lease_hook._worktree_roots(broken / "src") is None
 
-    # An explicit GIT_DIR redirects discovery, so a refusal is not proof.
+    # Inherited repository-selection variables do not take part in the probe,
+    # so they cannot turn a plain directory into a repository either.
     monkeypatch.setenv("GIT_DIR", str(tmp_path / "missing.git"))
-    assert file_lease_hook._worktree_roots(plain) is None
+    assert file_lease_hook._worktree_roots(plain) is file_lease_hook._NOT_A_REPO
+
+
+def _committed_repo(path: Path) -> Path:
+    _git_repo(path)
+    _git("config", "user.email", "t@t", cwd=path)
+    _git("config", "user.name", "t", cwd=path)
+    _git("commit", "-q", "--allow-empty", "-m", "init", cwd=path)
+    return path
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git not available")
+@pytest.mark.parametrize("variable", ["GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE"])
+def test_worktree_roots_ignore_inherited_repository_selection(
+    tmp_path, monkeypatch, variable
+):
+    main = _committed_repo(tmp_path / "main")
+    (main / "src").mkdir()
+    other = _committed_repo(tmp_path / "other")
+    expected = file_lease_hook._worktree_roots(main / "src")
+    assert expected == (main.resolve(), main.resolve())
+
+    values = {
+        "GIT_DIR": str(other / ".git"),
+        "GIT_COMMON_DIR": str(other / ".git"),
+        "GIT_WORK_TREE": str(other),
+    }
+    monkeypatch.setenv(variable, values[variable])
+
+    assert file_lease_hook._worktree_roots(main / "src") == expected
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git not available")
+def test_nested_checkout_inside_workspace_uses_its_own_namespace(tmp_path):
+    outer = _committed_repo(tmp_path / "outer")
+    other = _committed_repo(tmp_path / "other")
+    nested = outer / "nested-wt"
+    _git("worktree", "add", "-q", str(nested), "HEAD", cwd=other)
+    target = nested / "src" / "f.py"
+    expected = f"file://{(other / 'src' / 'f.py').resolve()}"
+
+    # A session opened in the nested checkout and one opened in its main
+    # checkout agree on the surface ...
+    assert file_lease_hook._surface_id(
+        str(target), nested, file_lease_hook._worktree_roots(nested), [], strict=True
+    ) == expected
+    # ... and so must a session whose workspace merely contains the checkout.
+    outer_roots = file_lease_hook._worktree_roots(outer)
+    for strict in (True, False):
+        assert file_lease_hook._surface_id(
+            str(target), outer, outer_roots, [], strict=strict
+        ) == expected
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git not available")
+def test_workspace_targets_reuse_cached_roots_without_probing(tmp_path, monkeypatch):
+    main = _committed_repo(tmp_path / "main")
+    (main / "src" / "deep").mkdir(parents=True)
+    roots = file_lease_hook._worktree_roots(main)
+    probes = []
+
+    def no_probe(start, *, timeout_s=0.75):
+        probes.append(start)
+        return None
+
+    monkeypatch.setattr(file_lease_hook, "_worktree_roots", no_probe)
+    for rel in ("a.py", "src/b.py", "src/deep/c.py", "src/new/d.py"):
+        assert file_lease_hook._surface_id(
+            rel, main, roots, [], strict=True
+        ) == f"file://{(main / rel).resolve()}"
+    assert probes == []
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git not available")
+def test_same_event_retry_moves_raw_surface_lease_to_verified_surface(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("LEASE_PLANE_BEARER_TOKEN", "lease-token")
+    monkeypatch.setenv("UNITARES_SECRETS_ENV", "/dev/null")
+    monkeypatch.delenv("UNITARES_FILE_LEASES_REQUIRED", raising=False)
+    main = _committed_repo(tmp_path / "main")
+    sibling = tmp_path / "wt"
+    _git("worktree", "add", "-q", str(sibling), "HEAD", cwd=main)
+    calls = []
+    monkeypatch.setattr(file_lease_hook, "_http_json", _recording_http(calls))
+    real_roots = file_lease_hook._worktree_roots
+    args = ["pre-edit", "--workspace", str(main), "--host", "codex"]
+    tool_use_id = "call_raw_then_verified"
+    target = str(sibling / "a.py")
+
+    # First attempt: the target probe fails, so default mode leases the raw path.
+    monkeypatch.setattr(
+        file_lease_hook, "_worktree_roots", _target_probe_fails(main, real_roots)
+    )
+    assert file_lease_hook.main(
+        args, stdin_text=_codex_payload(paths=(target,), tool_use_id=tool_use_id)
+    ) == 0
+    raw_surface = f"file://{(sibling / 'a.py').resolve()}"
+    assert calls[-1][1]["surface_id"] == raw_surface
+    raw_lease_id = f"lease-{len(calls)}"
+    calls.clear()
+
+    # Retry of the same event, now with a verified namespace, in required mode.
+    monkeypatch.setattr(file_lease_hook, "_worktree_roots", real_roots)
+    monkeypatch.setenv("UNITARES_FILE_LEASES_REQUIRED", "1")
+    assert file_lease_hook.main(
+        args, stdin_text=_codex_payload(paths=(target,), tool_use_id=tool_use_id)
+    ) == 0
+
+    verified_surface = f"file://{(main / 'a.py').resolve()}"
+    assert [path for path, _ in calls] == ["/v1/lease/release", "/v1/lease/acquire"]
+    assert calls[0][1]["lease_id"] == raw_lease_id
+    assert calls[1][1]["surface_id"] == verified_surface
+    state = json.loads(
+        file_lease_hook._state_path(main, "codex-slot", tool_use_id).read_text()
+    )
+    assert sorted(state["leases"]) == [verified_surface]
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git not available")
+def test_namespace_failure_releases_event_lease_named_by_another_spelling(
+    tmp_path, monkeypatch, capsys
+):
+    monkeypatch.setenv("LEASE_PLANE_BEARER_TOKEN", "lease-token")
+    monkeypatch.setenv("UNITARES_SECRETS_ENV", "/dev/null")
+    monkeypatch.setenv("UNITARES_FILE_LEASES_REQUIRED", "1")
+    main = _git_repo(tmp_path / "main")
+    sibling = tmp_path / "wt"
+    sibling.mkdir()
+    calls = []
+    monkeypatch.setattr(file_lease_hook, "_http_json", _recording_http(calls))
+    args = ["pre-edit", "--workspace", str(main), "--host", "codex"]
+    tool_use_id = "call_respelled"
+
+    assert file_lease_hook.main(
+        args, stdin_text=_codex_payload(paths=("a.py",), tool_use_id=tool_use_id)
+    ) == 0
+    first_lease_id = f"lease-{len(calls)}"
+    calls.clear()
+    monkeypatch.setattr(
+        file_lease_hook,
+        "_worktree_roots",
+        _target_probe_fails(main, file_lease_hook._worktree_roots),
+    )
+
+    rc = file_lease_hook.main(
+        args,
+        stdin_text=_codex_payload(
+            paths=(str(main / "a.py"), str(sibling / "b.py")), tool_use_id=tool_use_id
+        ),
+    )
+
+    assert rc == 2
+    assert "could not verify the repository/worktree namespace" in capsys.readouterr().err
+    assert [(path, body["lease_id"]) for path, body in calls] == [
+        ("/v1/lease/release", first_lease_id)
+    ]
+    assert not file_lease_hook._state_path(main, "codex-slot", tool_use_id).exists()
+
 
 def _no_configured_bearer(monkeypatch, tmp_path):
     for name in ("LEASE_PLANE_BEARER_TOKEN", "UNITARES_LEASE_PLANE_BEARER_TOKEN", "GOVERNANCE_TOKEN",
