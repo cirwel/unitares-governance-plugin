@@ -78,6 +78,8 @@ CLIENT_SOCKET_TIMEOUT = 5.0
 #: Wall-clock bound on reading one request (line, headers, then body); the
 #: per-recv socket timeout alone lets a client trickle bytes indefinitely.
 REQUEST_READ_DEADLINE = 10.0
+#: The clock the request read deadline is measured on (replaceable in tests).
+_read_clock = time.monotonic
 MAX_REQUEST_WORKERS = 32
 
 
@@ -843,7 +845,7 @@ def make_handler(sidecar: IdentitySidecar) -> type[BaseHTTPRequestHandler]:
                 except OSError:
                     pass
 
-            remaining = max(0.0, self._request_read_deadline - time.monotonic())
+            remaining = max(0.0, self._request_read_deadline - _read_clock())
             timer = threading.Timer(remaining, expire)
             timer.daemon = True
             with self._read_lock:
@@ -851,17 +853,27 @@ def make_handler(sidecar: IdentitySidecar) -> type[BaseHTTPRequestHandler]:
             timer.start()
 
         def _disarm_read_deadline(self) -> bool:
-            """Stop the read deadline; False when it already cut the connection."""
+            """Stop the read deadline; False when it has passed.
+
+            The watchdog can run late, so an armed deadline is also checked on
+            the clock: a read that finished after it is refused and the
+            connection closed, as if the watchdog had cut it.
+            """
             with self._read_lock:
                 timer, self._read_timer = self._read_timer, None
                 if timer is not None:
                     timer.cancel()
-                return not self._read_deadline_hit
+                    if _read_clock() >= self._request_read_deadline:
+                        self._read_deadline_hit = True
+                hit = self._read_deadline_hit
+            if hit:
+                self.close_connection = True
+            return not hit
 
         def handle_one_request(self) -> None:
             # One wall-clock budget per request: the request line, headers and
             # any POST body all draw on it.
-            self._request_read_deadline = time.monotonic() + REQUEST_READ_DEADLINE
+            self._request_read_deadline = _read_clock() + REQUEST_READ_DEADLINE
             self._arm_read_deadline()
             try:
                 super().handle_one_request()

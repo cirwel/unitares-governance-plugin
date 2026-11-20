@@ -1376,3 +1376,86 @@ def test_request_handling_after_the_last_body_byte_is_outside_the_read_deadline(
     assert status == 200
     assert payload["result"]["success"] is True
     assert [call["name"] for call in FakeGovernanceHandler.calls] == ["onboard", "knowledge"]
+
+
+class _CountingClock:
+    """A monotonic clock that moves only when a test moves it, counting reads."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+        self.reads = 0
+        self._changed = threading.Condition()
+
+    def __call__(self) -> float:
+        with self._changed:
+            self.reads += 1
+            self._changed.notify_all()
+            return self.now
+
+    def wait_for_reads(self, count: int, *, timeout: float = 5.0) -> bool:
+        with self._changed:
+            return self._changed.wait_for(lambda: self.reads >= count, timeout)
+
+
+def _read_reply(client: socket.socket, *, within: float = 3.0) -> bytes:
+    """Everything the server sends before it closes the connection."""
+    client.settimeout(within)
+    received = b""
+    try:
+        while chunk := client.recv(4096):
+            received += chunk
+    except socket.timeout:
+        pass
+    return received
+
+
+@pytest.mark.parametrize("late_part", ["headers", "body"])
+def test_request_read_that_finishes_after_its_deadline_is_refused(
+    tmp_path: Path, fake_server: str, monkeypatch: pytest.MonkeyPatch, late_part: str
+) -> None:
+    """A late last byte is refused even when the watchdog never ran.
+
+    The injected clock passes the deadline while the request is still being
+    read; real time stays far inside it, so the watchdog thread cannot fire.
+    """
+    clock = _CountingClock()
+    monkeypatch.setattr(identity_sidecar, "_read_clock", clock)
+    sidecar = _sidecar(tmp_path, fake_server)
+    server = BoundedThreadingHTTPServer(
+        ("127.0.0.1", 0), make_handler(sidecar), max_workers=1
+    )
+    serving = threading.Thread(target=server.serve_forever, daemon=True)
+    serving.start()
+    port = server.server_address[1]
+    body = json.dumps(
+        {"name": "knowledge", "arguments": {"action": "search", "query": "late"}}
+    ).encode()
+    auth = f"Authorization: Bearer {sidecar.capability_token}\r\n"
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as client:
+            if late_part == "headers":
+                # A GET has no body read, so the headers are the whole read.
+                client.sendall(f"GET /health HTTP/1.1\r\n{auth}".encode("ascii"))
+                # Deadline set and watchdog armed; the headers are still open.
+                assert clock.wait_for_reads(2)
+                clock.now += identity_sidecar.REQUEST_READ_DEADLINE + 1.0
+                client.sendall(b"\r\n")
+            else:
+                client.sendall(
+                    (
+                        f"POST /v1/tools/call HTTP/1.1\r\n{auth}"
+                        "Content-Type: application/json\r\n"
+                        f"Content-Length: {len(body)}\r\n\r\n"
+                    ).encode("ascii")
+                )
+                # Let the handler accept the headers and re-arm the watchdog
+                # for the body before the clock passes the deadline.
+                assert clock.wait_for_reads(3)
+                time.sleep(0.3)
+                clock.now += identity_sidecar.REQUEST_READ_DEADLINE + 1.0
+                client.sendall(body)
+            reply = _read_reply(client)
+    finally:
+        _stop_server(server, serving)
+    assert reply == b""
+    assert FakeGovernanceHandler.calls == []
