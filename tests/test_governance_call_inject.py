@@ -610,6 +610,9 @@ class TestProofFieldsRespectSlotAuthority:
 
 
 BUNDLED = "mcp__plugin_unitares-governance_unitares-governance__"
+# Deep enough that json.loads fails on every supported Python (3.14 decodes
+# 100k levels; it still overflows its stack at a few million).
+_TOO_DEEP = 3_000_000
 
 
 def _deny_reason(result) -> str | None:
@@ -724,6 +727,101 @@ class TestBundledCleartextTransport:
         }), tmp_path, host="claude")
         assert _deny_reason(result) is not None
 
+    @pytest.mark.parametrize(
+        "suffix", ["mark_response_complete", "get_dialectic_session", "some_future_tool"]
+    )
+    def test_bundled_tool_outside_the_named_list_is_routed_and_denied(
+        self, tmp_path, monkeypatch, suffix
+    ):
+        # Full tool advertisement exposes tools the governance matcher does
+        # not name. The transport check has to run for every tool on the
+        # bundled server, so the manifest must route all of them to the hook.
+        tool_name = f"{BUNDLED}{suffix}"
+        matchers = _pre_governance_matchers("hooks/claude-hooks.json", "claude")
+        assert any(re.fullmatch(m, tool_name) for m in matchers), matchers
+        assert any(re.search(m, tool_name) for m in matchers), matchers
+        monkeypatch.setenv("UNITARES_SERVER_URL", "http://gov.example.test")
+        result = _run(_hook_input(tool_name, {"agent_id": "agent-x"}), tmp_path,
+                      host="claude")
+        assert "cleartext HTTP" in (_deny_reason(result) or "")
+
+    def test_bundled_tool_outside_the_named_list_passes_on_secure_transport(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("UNITARES_SERVER_URL", "http://localhost:8767")
+        _write_cache(tmp_path)
+        result = _run(_hook_input(f"{BUNDLED}mark_response_complete",
+                                  {"agent_id": "agent-x"}), tmp_path, host="claude")
+        assert result.returncode == 0
+        assert result.stdout.strip() == ""
+
+    @pytest.mark.parametrize("depth", [11, 12, 40])
+    @pytest.mark.parametrize("key", ["kwargs", "arguments"])
+    def test_proof_below_the_scan_depth_is_denied(self, tmp_path, monkeypatch, depth, key):
+        # Nesting past the scan limit is not evidence of no proof: the body
+        # still crosses the wire before the server rejects it.
+        monkeypatch.setenv("UNITARES_SERVER_URL", "http://gov.example.test")
+        nested: object = {"continuity_token": "v1.tok"}
+        for _ in range(depth):
+            nested = {key: nested}
+        result = _run(_hook_input(f"{BUNDLED}use_tool", {
+            "tool_name": "sync_state", "arguments": nested,
+        }), tmp_path, host="claude")
+        assert "cleartext HTTP" in (_deny_reason(result) or "")
+
+    def test_proof_in_a_list_chain_below_the_scan_depth_is_denied(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("UNITARES_SERVER_URL", "http://gov.example.test")
+        nested: object = {"client_session_id": SID}
+        for _ in range(20):
+            nested = [nested]
+        result = _run(_hook_input(f"{BUNDLED}sync_state", {"kwargs": nested}),
+                      tmp_path, host="claude")
+        assert "cleartext HTTP" in (_deny_reason(result) or "")
+
+    @pytest.mark.parametrize(
+        "wrapped",
+        [
+            '{"continuity_token": "v1.tok"',  # truncated JSON
+            "[" * 5000 + "]" * 5000,  # too deep for the JSON parser
+            json.dumps(json.dumps({"client_session_id": SID})),  # double-encoded
+        ],
+        ids=["truncated-json", "too-deep-json", "double-encoded"],
+    )
+    def test_unparseable_string_container_with_proof_is_denied(
+        self, tmp_path, monkeypatch, wrapped
+    ):
+        monkeypatch.setenv("UNITARES_SERVER_URL", "http://gov.example.test")
+        if wrapped.startswith("["):
+            wrapped = wrapped[:2500] + '{"agent_id": "a"}' + wrapped[2500:]
+        result = _run(_hook_input(f"{BUNDLED}sync_state", {"kwargs": wrapped}),
+                      tmp_path, host="claude")
+        assert "cleartext HTTP" in (_deny_reason(result) or "")
+
+    def test_payload_too_deep_for_the_hook_parser_is_denied(self, tmp_path, monkeypatch):
+        # Proof sits at the top level, but unrelated nesting makes the whole
+        # hook payload unparseable. That must not turn into a silent pass.
+        monkeypatch.setenv("UNITARES_SERVER_URL", "http://gov.example.test")
+        payload = json.dumps(_hook_input(f"{BUNDLED}sync_state", {
+            "client_session_id": SID, "junk": "PLACEHOLDER",
+        })).replace('"PLACEHOLDER"', "[" * _TOO_DEEP + "]" * _TOO_DEEP)
+        result = subprocess.run(
+            [str(HOOK), "--host", "claude"], input=payload, text=True,
+            capture_output=True, timeout=10, cwd=str(tmp_path),
+        )
+        assert "cleartext HTTP" in (_deny_reason(result) or "")
+
+    def test_unparseable_payload_on_secure_transport_still_passes(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("UNITARES_SERVER_URL", "http://localhost:8767")
+        payload = json.dumps(_hook_input(f"{BUNDLED}sync_state", {
+            "junk": "PLACEHOLDER",
+        })).replace('"PLACEHOLDER"', "[" * _TOO_DEEP + "]" * _TOO_DEEP)
+        result = subprocess.run(
+            [str(HOOK), "--host", "claude"], input=payload, text=True,
+            capture_output=True, timeout=10, cwd=str(tmp_path),
+        )
+        assert result.returncode == 0
+        assert result.stdout.strip() == ""
+
     def test_proofless_call_passes(self, tmp_path, monkeypatch):
         monkeypatch.setenv("UNITARES_SERVER_URL", "http://gov.example.test")
         result = _run(_hook_input(f"{BUNDLED}search_shared_memory", {
@@ -731,6 +829,23 @@ class TestBundledCleartextTransport:
         }), tmp_path, host="claude")
         assert result.returncode == 0
         assert result.stdout.strip() == ""
+
+    @pytest.mark.parametrize(
+        "server_url",
+        [
+            "http://gov.example.test\\@localhost:8767",
+            "http://gov.example.test@localhost:8767",
+        ],
+    )
+    def test_url_whose_host_parsers_disagree_on_is_insecure(
+        self, tmp_path, monkeypatch, server_url
+    ):
+        # Claude's WHATWG parser connects to gov.example.test for the first
+        # form; Python's urlsplit would name localhost.
+        monkeypatch.setenv("UNITARES_SERVER_URL", server_url)
+        result = _run(_hook_input(f"{BUNDLED}sync_state", {"client_session_id": SID}),
+                      tmp_path, host="claude")
+        assert "cleartext HTTP" in (_deny_reason(result) or "")
 
     @pytest.mark.parametrize(
         "server_url",

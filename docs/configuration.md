@@ -24,8 +24,14 @@ HTTP to any other host, the hooks send no governance data to it, and the
 PreToolUse hook denies calls to the bundled Claude server that would carry
 `client_session_id`, `continuity_token`, `agent_uuid` or `agent_id`, whether the
 hook would add the field or the agent supplied it, at the top level or inside a
-`kwargs` wrapper or a `use_tool` call's `arguments`. Calls without those fields
-still pass.
+`kwargs` wrapper or a `use_tool` call's `arguments`. The Claude hook manifest
+routes every tool on the bundled server to that check, not only the named
+governance tools. Wrappers nested past the hook's scan limit, and calls too
+deep for the hook to parse, are denied as if they carried proof. A URL with a
+backslash, userinfo, whitespace or control characters counts as insecure,
+because parsers can disagree about its host. Calls without those fields still
+pass. The check covers those named fields, not proof pasted into free text, and
+like the other hooks it fails open if the hook itself cannot run.
 
 The bundled Codex `.codex-mcp.json` is deliberately fixed to unauthenticated
 `http://localhost:8767/mcp/` and does not declare a bearer-token environment

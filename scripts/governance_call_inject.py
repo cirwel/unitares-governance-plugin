@@ -53,9 +53,11 @@ Contract:
   capable tools keep their normal permission flow and require explicit proof.
 - Denies, for Claude's bundled server alias only, any call that would carry
   a proof field (injected or agent-supplied, including inside a ``kwargs``
-  wrapper or a gateway call's nested arguments) when UNITARES_SERVER_URL is cleartext HTTP to a
-  non-loopback host. Proofless calls pass; other aliases are not checked
-  because their transport is configured outside this plugin.
+  wrapper or a gateway call's nested arguments) when UNITARES_SERVER_URL is
+  not HTTPS or plain loopback HTTP. The Claude manifest routes every tool on
+  that alias here. Nesting past the scan limit, and a payload too deep to
+  parse, count as carrying proof. Proofless calls pass; other aliases are not
+  checked because their transport is configured outside this plugin.
 - Fails open: any error or missing cache → no output, tool runs untouched.
 
 Known residual (KNOWINGLY ACCEPTED, council-reviewed 2026-06-12): both this
@@ -370,9 +372,12 @@ def _carries_proof(value: object, _depth: int = 0) -> bool:
     Checks the top level, then every ``kwargs`` and ``arguments`` container
     below it, whether a dict, a list, or a string holding JSON. A container
     the server would refuse still crosses the wire, so its proof counts.
+    For the same reason the scan fails closed: nesting deeper than the scan
+    limit counts as carrying proof, and so does a string container that does
+    not parse but names a proof field.
     """
     if _depth > _PROOF_SCAN_DEPTH:
-        return False
+        return True
     if isinstance(value, list):
         return any(_carries_proof(item, _depth + 1) for item in value)
     if not isinstance(value, dict):
@@ -382,9 +387,14 @@ def _carries_proof(value: object, _depth: int = 0) -> bool:
     for key in _PROOF_CONTAINER_KEYS:
         nested = value.get(key)
         if isinstance(nested, str):
+            text = nested
             try:
-                nested = json.loads(nested)
+                nested = json.loads(text)
             except (ValueError, RecursionError):
+                nested = text
+            if isinstance(nested, str):
+                if any(field in nested for field in PROOF_FIELDS):
+                    return True
                 continue
         if _carries_proof(nested, _depth + 1):
             return True
@@ -413,16 +423,37 @@ def _insecure_bundled_transport_reason(
     effective = specific.get("updatedInput", data.get("tool_input"))
     if not _carries_proof(effective):
         return ""
-    url = os.environ.get("UNITARES_SERVER_URL") or BUNDLED_CLAUDE_DEFAULT_SERVER_URL
-    if is_secure_governance_url(f"{url}/mcp/"):
+    if _bundled_transport_is_secure():
         return ""
-    return (
-        "Refusing to send governance identity proof to the bundled UNITARES "
-        "MCP server: UNITARES_SERVER_URL is cleartext HTTP to a non-loopback "
-        "host, where the proof could be read and replayed. Set "
-        "UNITARES_SERVER_URL to an https:// URL or a loopback address and "
-        "restart the session."
-    )
+    return _INSECURE_TRANSPORT_REASON
+
+
+_INSECURE_TRANSPORT_REASON = (
+    "Refusing to send governance identity proof to the bundled UNITARES MCP "
+    "server: UNITARES_SERVER_URL is not an https:// URL or a plain loopback "
+    "address, so the proof could cross cleartext HTTP to another host and be "
+    "read and replayed there. Set UNITARES_SERVER_URL to an https:// URL or a "
+    "loopback address and restart the session."
+)
+
+
+def _bundled_transport_is_secure() -> bool:
+    """Whether Claude's bundled server URL, as .mcp.json expands it, is safe."""
+    url = os.environ.get("UNITARES_SERVER_URL") or BUNDLED_CLAUDE_DEFAULT_SERVER_URL
+    return is_secure_governance_url(f"{url}/mcp/")
+
+
+def _unparseable_call_reason(host: str, raw: str) -> str:
+    """Deny reason for a hook payload too deep or malformed to inspect, or "".
+
+    The proof scan cannot run, so a payload that names the bundled server is
+    denied while its transport is insecure. Anything else keeps failing open.
+    """
+    if host != "claude" or f"mcp__{BUNDLED_CLAUDE_SERVER_ALIAS}__" not in raw:
+        return ""
+    if _bundled_transport_is_secure():
+        return ""
+    return _INSECURE_TRANSPORT_REASON
 
 
 def _decide(host: str, data: dict, raw: str) -> dict | None:
@@ -541,8 +572,14 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         raw = sys.stdin.read()
+    except Exception:
+        return 0
+    try:
         data = json.loads(raw or "{}")
     except Exception:
+        unparseable = _unparseable_call_reason(args.host, raw)
+        if unparseable:
+            print(json.dumps(_deny_output(unparseable)))
         return 0
     if not isinstance(data, dict):
         return 0
