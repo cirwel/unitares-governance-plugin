@@ -527,7 +527,17 @@ def test_exit_capability_travels_on_the_connection_that_proved_the_listener(
             # the proof response is released.
             threading.Thread(target=genuine.shutdown, daemon=True).start()
             genuine.socket.close()
-            squatter = _ReusableServer(("127.0.0.1", port), Squatter)
+            # The old listening socket can take a moment to leave the port
+            # (its accept loop is still unwinding), so retry the bind briefly.
+            squatter = None
+            for _attempt in range(100):
+                try:
+                    squatter = _ReusableServer(("127.0.0.1", port), Squatter)
+                    break
+                except OSError:
+                    time.sleep(0.02)
+            if squatter is None:
+                return
             squatter_thread = threading.Thread(target=squatter.serve_forever, daemon=True)
             squatter_thread.start()
             running.append((squatter, squatter_thread))
