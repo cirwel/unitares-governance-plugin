@@ -1207,10 +1207,8 @@ def test_unmarked_mint_into_a_bound_slot_is_refused_before_the_upstream_call(
 @pytest.mark.parametrize(
     "name, arguments",
     [
-        ("onboard", {"spawn_reason": "subagent"}),
-        ("start_session", {"spawn_reason": "explicit"}),
-        ("onboard", {"parent_agent_id": BOUND_UUID}),
         ("onboard", {"force_new": False}),
+        ("start_session", {"force_new": False}),
     ],
 )
 def test_a_different_identity_never_replaces_the_bound_slot(
@@ -1221,10 +1219,7 @@ def test_a_different_identity_never_replaces_the_bound_slot(
 
     if transport == "rest":
         status, payload = sidecar.tool_call({"name": name, "arguments": arguments}, headers={})
-        assert payload["sidecar"]["identity_cache_update"] in {
-            "refused_owner_mismatch",
-            "refused_subagent",
-        }
+        assert payload["sidecar"]["identity_cache_update"] == "refused_owner_mismatch"
     else:
         status, _payload = _mcp_call(sidecar, name, arguments)
 
@@ -1233,19 +1228,117 @@ def test_a_different_identity_never_replaces_the_bound_slot(
     assert sidecar.read_session("slot-a") == before
 
 
-def test_a_declared_subagent_onboard_never_claims_an_empty_slot(
+@pytest.mark.parametrize("transport", ["rest", "mcp"])
+@pytest.mark.parametrize(
+    "name, arguments",
+    [
+        ("start_session", {"force_new": True, "spawn_reason": "explicit"}),
+        ("onboard", {"spawn_reason": "dispatch"}),
+        ("onboard", {"parent_agent_id": BOUND_UUID}),
+        ("start_session", {"parent_agent_id": BOUND_UUID, "spawn_reason": "compaction"}),
+        ("identity", {"force_new": True}),
+        ("identity", {"force_new": True, "spawn_reason": "explicit"}),
+    ],
+)
+def test_a_declared_lineage_mint_into_a_bound_slot_never_reaches_the_server(
+    tmp_path: Path, fake_server: str, transport: str, name: str, arguments: dict,
+) -> None:
+    # The sidecar cannot hold a second identity, so forwarding the mint would
+    # only leave an identity on the server that no caller can use.
+    sidecar = _sidecar(tmp_path, fake_server)
+    before = _bind_slot_a(sidecar)
+
+    if transport == "rest":
+        status, payload = sidecar.tool_call({"name": name, "arguments": arguments}, headers={})
+        message = payload["error"]
+    else:
+        status, payload = _mcp_call(sidecar, name, arguments)
+        message = payload["error"]["message"]
+
+    assert status == 409
+    assert "already bound" in message
+    assert "clear the slot" in message
+    assert "parent_agent_id" not in message
+    assert FakeGovernanceHandler.calls == []
+    assert sidecar.read_session("slot-a") == before
+
+
+@pytest.mark.parametrize("transport", ["rest", "mcp"])
+@pytest.mark.parametrize("bound", [False, True])
+def test_a_declared_subagent_mint_is_refused_before_the_upstream_call(
+    tmp_path: Path, fake_server: str, transport: str, bound: bool,
+) -> None:
+    sidecar = _sidecar(tmp_path, fake_server)
+    before = _bind_slot_a(sidecar) if bound else {}
+    arguments = {"spawn_reason": "subagent", "parent_agent_id": BOUND_UUID}
+
+    if transport == "rest":
+        status, payload = sidecar.tool_call({"name": "onboard", "arguments": arguments}, headers={})
+        message = payload["error"]
+    else:
+        status, payload = _mcp_call(sidecar, "onboard", arguments)
+        message = payload["error"]["message"]
+
+    assert status == 409
+    assert "subagent" in message
+    assert FakeGovernanceHandler.calls == []
+    assert sidecar.read_session("slot-a") == before
+
+
+def test_owner_rule_never_persists_a_declared_subagent_response(
     tmp_path: Path, fake_server: str,
 ) -> None:
     sidecar = _sidecar(tmp_path, fake_server)
 
-    status, payload = sidecar.tool_call(
-        {"name": "onboard", "arguments": {"spawn_reason": "subagent"}},
-        headers={},
+    decision = sidecar.update_cache_from_identity_response(
+        "slot-a",
+        {"success": True, "uuid": BOUND_UUID, "client_session_id": BOUND_CSID},
+        arguments={"spawn_reason": "subagent"},
     )
 
-    assert status == 200
-    assert payload["sidecar"]["identity_cache_update"] == "refused_subagent"
+    assert decision == "refused_subagent"
     assert sidecar.read_session("slot-a") == {}
+
+
+@pytest.mark.parametrize("transport", ["rest", "mcp"])
+@pytest.mark.parametrize(
+    "name, arguments",
+    [
+        ("identity", {"agent_id": "Other_Agent"}),
+        ("bind_session", {"client_session_id": BOUND_CSID, "agent_id": "Other_Agent"}),
+    ],
+)
+def test_a_foreign_agent_id_is_refused_before_the_upstream_call(
+    tmp_path: Path, fake_server: str, transport: str, name: str, arguments: dict,
+) -> None:
+    sidecar = _sidecar(tmp_path, fake_server)
+    before = _bind_slot_a(sidecar)
+
+    if transport == "rest":
+        status, payload = sidecar.tool_call({"name": name, "arguments": arguments}, headers={})
+        message = payload["error"]
+    else:
+        status, payload = _mcp_call(sidecar, name, arguments)
+        message = payload["error"]["message"]
+
+    assert status == 409
+    assert "agent_id" in message
+    assert FakeGovernanceHandler.calls == []
+    assert sidecar.read_session("slot-a") == before
+
+
+@pytest.mark.parametrize("agent_id", ["Bound_Owner", BOUND_UUID])
+def test_the_bound_agent_id_still_resumes(tmp_path: Path, fake_server: str, agent_id: str) -> None:
+    sidecar = _sidecar(tmp_path, fake_server)
+    _bind_slot_a(sidecar)
+
+    arguments, _lifecycle = sidecar.prepare_tool_arguments(
+        name="identity",
+        arguments={"agent_id": agent_id, "resume": True},
+        slot="slot-a",
+    )
+
+    assert arguments["agent_id"] == agent_id
 
 
 @pytest.mark.parametrize("transport", ["rest", "mcp"])

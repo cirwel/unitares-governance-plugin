@@ -226,7 +226,18 @@ implementation. It wraps REST `/v1/tools/call` and minimal JSON-RPC MCP
 `/mcp/` requests, lazily onboards a slot when needed, injects
 `client_session_id` into attribution-relevant governance calls, forces
 `force_new=true` for bare `onboard` / `start_session`, stamps the slot cache
-after check-ins, and exposes `GET /audit`. Useful endpoints:
+after check-ins, and exposes `GET /audit`.
+
+A slot that already names an identity keeps it. On a bound slot the sidecar
+refuses with 409, before any upstream call, a `force_new` mint and identity
+proof for another identity; it never mints a `spawn_reason=subagent`
+identity, and a binding marked `prior_process` is not used as proof. A
+long-lived slot such as `--slot codex-local` therefore stays on its first
+identity across client sessions. To switch, clear the slot with
+`python3 scripts/session_cache.py clear session --workspace "$PWD" --slot codex-local`
+or start a sidecar on a new `--slot`.
+
+Useful endpoints:
 
 - `GET http://127.0.0.1:8768/client-config` for an authenticated MCP/client snippet
 - `POST http://127.0.0.1:8768/v1/tools/call` with `{"name": "...", "arguments": {...}}`

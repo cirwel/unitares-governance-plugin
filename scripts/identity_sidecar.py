@@ -8,7 +8,7 @@ It wraps the server's `/v1/tools/call` surface with local lifecycle help:
 * lazy onboard when a slot has no cached `client_session_id`
 * inject `client_session_id` into attribution-relevant governance calls
 * force fresh posture for bare `onboard` / `start_session` calls
-* keep a bound slot's identity: refuse foreign proof and unmarked mints
+* keep a bound slot's identity: refuse foreign proof and force_new mints
   before the upstream call, and persist only successful responses for the
   bound uuid (a binding marked `prior_process` is never used as proof)
 * stamp the slot cache after successful check-ins
@@ -47,7 +47,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from audit_identity_contract import audit_checkin_log, audit_session_caches, parse_since  # noqa: E402
 from checkin import _plugin_version, submit_checkin  # noqa: E402
 from governance_call_inject import (  # noqa: E402
-    DELIBERATE_SPAWN_REASONS,
     GATEWAY_SUFFIXES,
     INJECT_SUFFIXES,
     PROOF_FIELDS,
@@ -518,11 +517,21 @@ class IdentitySidecar:
         """Refuse, before any upstream call, an identity call that would
         bind or mint another identity into a slot that already names one.
 
-        Mirrors the pre-governance-call guard: foreign slot proof, an
-        unmarked force_new mint and a proofless identity() are refused. The
-        response owner rule stays the authority; this only keeps the call
-        from reaching the server under the sidecar's credential.
+        Foreign slot proof, any force_new mint and a proofless identity()
+        are refused. Unlike the pre-governance-call hook, declared lineage
+        does not exempt a mint: the sidecar has no lineage support, so the
+        owner rule would never cache the new identity and the caller never
+        sees its session id. A declared subagent mint is refused even into
+        an empty slot for the same reason. The response owner rule stays
+        the authority; this keeps the call from reaching the server under
+        the sidecar's credential and minting an identity nobody can use.
         """
+        if str(arguments.get("spawn_reason") or "").strip().lower() == "subagent":
+            raise ForeignSlotProofError(
+                "sidecar refuses spawn_reason=subagent: its slot never holds a "
+                "subagent identity, so the new session would be unusable. Run the "
+                "subagent through its own sidecar slot."
+            )
         binding = self.read_session(slot)
         bound_uuid = str(binding.get("uuid") or "").strip()
         if not bound_uuid:
@@ -539,21 +548,25 @@ class IdentitySidecar:
                 or value.strip() != expected.strip()
             ):
                 mismatched.append(field)
+        agent_id = arguments.get("agent_id")
+        if agent_id is not None and not (isinstance(agent_id, str) and not agent_id.strip()):
+            # The server treats an explicit agent_id as identity proof; it
+            # may name the bound identity by its label or by its uuid.
+            accepted = {bound_uuid, str(binding.get("agent_id") or "").strip()} - {""}
+            if not isinstance(agent_id, str) or agent_id.strip() not in accepted:
+                mismatched.append("agent_id")
         if mismatched:
             raise ForeignSlotProofError(
                 "sidecar identity proof does not match its configured slot binding: "
                 + ", ".join(sorted(mismatched))
             )
-        if key in START_TOOL_NAMES and _truthy(arguments.get("force_new")):
-            parent = arguments.get("parent_agent_id")
-            declared_parent = isinstance(parent, str) and bool(parent.strip())
-            reason = str(arguments.get("spawn_reason") or "").strip().lower()
-            if not declared_parent and reason not in DELIBERATE_SPAWN_REASONS:
-                raise ForeignSlotProofError(
-                    f"sidecar slot is already bound to agent_uuid {bound_uuid}; "
-                    "force_new would mint a second identity for it. Declare "
-                    "parent_agent_id or a deliberate spawn_reason, or clear the slot."
-                )
+        if (key in START_TOOL_NAMES or key == "identity") and _truthy(arguments.get("force_new")):
+            raise ForeignSlotProofError(
+                f"sidecar slot is already bound to agent_uuid {bound_uuid}; "
+                "force_new would mint a second identity the sidecar cannot hold. "
+                "To switch identity, clear the slot (session_cache.py clear) or "
+                "run a separate sidecar on another slot."
+            )
         if key == "identity" and not _truthy(arguments.get("force_new")):
             has_proof = any(
                 arguments.get(field) is not None
