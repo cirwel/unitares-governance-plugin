@@ -65,15 +65,17 @@ Contract:
 - Fails open: any error or missing cache → no output, tool runs untouched.
 
 Known residual (KNOWINGLY ACCEPTED, council-reviewed 2026-06-12): both this
-guard and server #604 key on spawn_reason=="subagent" being DECLARED. A
-non-declaring subagent is invisible to both: its onboard still overwrites
-the slot cache (post-identity can't see it), and this injector would then
-propagate that poisoned identity into the driver's later argless calls at
-tier=strong — overriding the otherwise-protective server pin. For DECLARED
-subagents the no-widening claim holds: their argless calls already resolve
-to the driver via the standing SET-NX pin, so injection makes the same
-attribution explicit and lintable. The deferred close-path for the
-non-declaring residual is subagent discrimination from hook context
+guard and server #604 key on spawn_reason=="subagent" being DECLARED, and a
+subagent's tool calls fire this hook under the DRIVER's session_id. A
+non-declaring subagent's onboard no longer replaces the driver's slot cache:
+post-identity keeps the protected slot owner and caches a mint for another
+uuid only as the declared successor of a prior-process binding. What remains
+is attribution: this injector gives a subagent's argless calls, declared or
+not, the driver's client_session_id, so they are recorded as the driver at
+tier=strong. For DECLARED subagents that adds nothing: their argless calls
+already resolve to the driver via the standing SET-NX pin, so injection
+makes the same attribution explicit and lintable. The deferred close-path for
+the non-declaring residual is subagent discrimination from hook context
 (e.g. transcript_path), rejected for now because misclassifying a
 succession onboard would dark-session the driver — the inverse failure.
 
