@@ -840,10 +840,10 @@ case "$(printf '%s' "${UNITARES_AUTO_ONBOARD:-off}" | tr '[:upper:]' '[:lower:]'
 esac
 # The same for an anchored conversation. These are the Stop hook's own
 # conditions for binding an anchor nobody bound during the turn
-# (hooks/post-stop): check-ins on, auto-onboarding on and not overridden.
-ANCHOR_STOP_NOTE="The Stop hook will not bind this conversation's anchor (auto-onboarding or check-ins are off).
-If this conversation has no identity yet, call \`start_session()\` with no
-arguments to bind it; otherwise it stays identity-free."
+# (hooks/post-stop): a session slot, check-ins on, auto-onboarding on and not
+# overridden.
+ANCHOR_STOP_WHY="auto-onboarding or check-ins are off"
+ANCHOR_STOP_BINDS=0
 case "$(printf '%s' "${UNITARES_AUTO_ONBOARD:-off}" | tr '[:upper:]' '[:lower:]')" in
   0|off|false|no) ;;
   *)
@@ -851,11 +851,22 @@ case "$(printf '%s' "${UNITARES_AUTO_ONBOARD:-off}" | tr '[:upper:]' '[:lower:]'
       1|true|on) ;;
       *)
         if [[ "$(printf '%s' "${UNITARES_CHECKINS:-on}" | tr '[:upper:]' '[:lower:]')" != "off" ]]; then
-          ANCHOR_STOP_NOTE="If no tool needs identity yet, the Stop hook binds this conversation's anchor
-after the turn."
+          if [[ -n "${HOST_SESSION_ID}" ]]; then
+            ANCHOR_STOP_BINDS=1
+          else
+            ANCHOR_STOP_WHY="the host gave no session id"
+          fi
         fi ;;
     esac ;;
 esac
+if [[ "${ANCHOR_STOP_BINDS}" == "1" ]]; then
+  ANCHOR_STOP_NOTE="If no tool needs identity yet, the Stop hook binds this conversation's anchor
+after the turn."
+else
+  ANCHOR_STOP_NOTE="The Stop hook will not bind this conversation's anchor (${ANCHOR_STOP_WHY}).
+If this conversation has no identity yet, call \`start_session()\` with no
+arguments to bind it; otherwise it stays identity-free."
+fi
 RECOVERY_GUIDANCE="Recovery: call identity(client_session_id=...) to inspect continuity, check_working_state() for governance state, and health_check() for server health."
 if [[ "${HOOK_HOST}" == "claude" ]]; then
   RECOVERY_GUIDANCE="Recovery: run /diagnose."

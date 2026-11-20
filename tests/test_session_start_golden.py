@@ -335,6 +335,9 @@ STOP_DOES_NOT_BIND = "The Stop hook will not bind this conversation's anchor"
     {"UNITARES_AUTO_ONBOARD": "true"},
     {"UNITARES_AUTO_ONBOARD": "anything-not-an-off-word"},
     {"UNITARES_DISABLE_AUTO_ONBOARD": "0"},
+    # Spellings the Stop hook does not read as "off".
+    {"UNITARES_DISABLE_AUTO_ONBOARD": "yes"},
+    {"UNITARES_CHECKINS": "0"},
 ])
 def test_anchored_variant_promises_a_stop_bind_only_when_stop_will_bind(tmp_path, env):
     rendered = _render(tmp_path, extra_env={**ANCHOR_ENV, **env})
@@ -362,6 +365,15 @@ def test_anchored_variant_says_so_when_stop_will_not_bind(tmp_path, env):
     assert STOP_BINDS not in rendered
     assert "`start_session()` with no" in rendered
     assert "Do NOT call `start_session(force_new=true)`" in rendered
+
+
+def test_anchored_variant_does_not_promise_a_stop_bind_without_a_session_slot(tmp_path):
+    """The Stop hook needs a slot to bind into; a host payload with no session
+    id gives it none."""
+    rendered = _render(tmp_path, extra_env=ANCHOR_ENV, session_id="")
+    assert STOP_DOES_NOT_BIND in rendered
+    assert "the host gave no session id" in rendered
+    assert STOP_BINDS not in rendered
 
 
 def test_golden_anchored_auto_onboard_off(tmp_path):
