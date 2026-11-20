@@ -19,6 +19,13 @@ deployment, disable the bundled transport and register the HTTPS endpoint with
 Claude using `UNITARES_HTTP_API_TOKEN`. Governance REST helpers reject a bearer
 on non-loopback HTTP before opening a socket.
 
+Use `https://` or a loopback address. When `UNITARES_SERVER_URL` is cleartext
+HTTP to any other host, the hooks send no governance data to it, and the
+PreToolUse hook denies calls to the bundled Claude server that would carry
+`client_session_id`, `continuity_token`, `agent_uuid` or `agent_id`, whether the
+hook would add the field or the agent supplied it. Calls without those fields
+still pass.
+
 The bundled Codex `.codex-mcp.json` is deliberately fixed to unauthenticated
 `http://localhost:8767/mcp/` and does not declare a bearer-token environment
 variable. For a hosted or authenticated Codex server, disable that bundled

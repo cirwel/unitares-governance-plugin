@@ -607,9 +607,19 @@ fi
 # ---------------------------------------------------------------------------
 # Ping governance server
 # ---------------------------------------------------------------------------
+# The body is capped at 64 KiB. A real /health answer is a small JSON object;
+# a larger one fails the probe (pipefail carries curl's or head's failure into
+# HEALTH_EXIT) and counts as unreachable instead of being buffered for the
+# whole timeout. Keep the `|| HEALTH_EXIT=$?` form: under `set -e` a bare
+# failing assignment would abort the hook.
+HEALTH_MAX_BYTES=65536
 HEALTH_EXIT=0
-HEALTH_STATUS=$(curl -sS --max-time 3 "${SERVER_URL}/health" \
-  2> >(append_health_log)) || HEALTH_EXIT=$?
+HEALTH_STATUS=$(curl -sS --max-time 3 --max-filesize "${HEALTH_MAX_BYTES}" \
+  "${SERVER_URL}/health" 2> >(append_health_log) \
+  | head -c "${HEALTH_MAX_BYTES}") || HEALTH_EXIT=$?
+if [[ "${HEALTH_EXIT}" -ne 0 ]]; then
+  HEALTH_STATUS=""
+fi
 printf '[%s] curl exit=%d len=%d url=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${HEALTH_EXIT}" "${#HEALTH_STATUS}" "${SERVER_URL}/health" | append_health_log
 
 ORCHESTRATED_MODE="$(printf '%s' "${UNITARES_ORCHESTRATED:-0}" | tr '[:upper:]' '[:lower:]')"
@@ -1186,6 +1196,33 @@ if [ -f "${FILE_LEASE_HELPER}" ]; then
 
 ${FILE_LEASE_STATUS}"
   fi
+fi
+
+# ---------------------------------------------------------------------------
+# Cleartext transport warning
+#
+# Hooks refuse to send governance data to a non-loopback http:// server, and
+# pre-governance-call denies proof-bearing calls to Claude's bundled MCP server
+# there. Say why once, so those refusals are not a mystery.
+# ---------------------------------------------------------------------------
+INSECURE_TRANSPORT=$(python3 - "${SERVER_URL}" "${PLUGIN_ROOT}/scripts" <<'PY' 2>/dev/null || true
+import sys
+
+sys.path.insert(0, sys.argv[2])
+from _http_auth import is_secure_governance_url
+
+if not is_secure_governance_url(sys.argv[1]):
+    print("insecure")
+PY
+)
+if [[ "${INSECURE_TRANSPORT}" == "insecure" ]]; then
+  TRANSPORT_WARNING="UNITARES warning: UNITARES_SERVER_URL is not https:// or a loopback address, so plugin hooks will not send governance data to it."
+  if [[ "${HOOK_HOST}" == "claude" ]]; then
+    TRANSPORT_WARNING="${TRANSPORT_WARNING} Governance calls carrying identity proof to the bundled MCP server are denied for the same reason."
+  fi
+  CONTEXT="${CONTEXT}
+
+${TRANSPORT_WARNING}"
 fi
 
 ESCAPED_CONTEXT="$(escape_for_json "${CONTEXT}")"

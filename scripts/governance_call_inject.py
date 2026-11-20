@@ -51,6 +51,11 @@ Contract:
   permissionDecision="allow" whenever updatedInput is returned. Codex rewrites
   only anchored lifecycle, check-in, and read-only diagnostic calls; admin-
   capable tools keep their normal permission flow and require explicit proof.
+- Denies, for Claude's bundled server alias only, any call that would carry
+  a proof field (injected or agent-supplied, including a gateway call's
+  nested arguments) when UNITARES_SERVER_URL is cleartext HTTP to a
+  non-loopback host. Proofless calls pass; other aliases are not checked
+  because their transport is configured outside this plugin.
 - Fails open: any error or missing cache → no output, tool runs untouched.
 
 Known residual (KNOWINGLY ACCEPTED, council-reviewed 2026-06-12): both this
@@ -82,7 +87,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from governance_tool_name import governance_tool_suffix
+from _http_auth import is_secure_governance_url
+from governance_tool_name import governance_tool_suffix, parse_mcp_tool_name
 
 # Tag normalization (formatting-only, fail-open) is folded into this single
 # hook on purpose: a second PreToolUse hook emitting its own updatedInput for
@@ -144,6 +150,11 @@ ANCHORED_MINT_SUFFIXES = frozenset({"onboard", "start_session"})
 IDENTITY_ASSERT_SUFFIXES = frozenset({"identity"})
 PROOF_FIELDS = ("client_session_id", "continuity_token", "agent_uuid", "agent_id")
 SLOT_BOUND_PROOF_FIELDS = ("client_session_id", "continuity_token")
+# Claude scopes the plugin's own .mcp.json server under this alias. Its URL is
+# ${UNITARES_SERVER_URL:-http://localhost:8767}/mcp/, so the hook can see the
+# transport it uses. Other aliases are registered elsewhere and stay unchecked.
+BUNDLED_CLAUDE_SERVER_ALIAS = "plugin_unitares-governance_unitares-governance"
+BUNDLED_CLAUDE_DEFAULT_SERVER_URL = "http://localhost:8767"
 # spawn_reason values that declare a deliberate new identity inside an already
 # bound slot. "new_session" and an absent reason do not: a process that is
 # already bound is not a new session.
@@ -346,41 +357,74 @@ def _gateway_target_injectable(tool_input: dict) -> bool:
     return not _has_proof_field(nested)
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Normalize a governance PreToolUse call")
-    parser.add_argument("--host", choices=("claude", "codex"), default="claude")
-    args = parser.parse_args(argv)
+def _carries_proof(tool_input: object) -> bool:
+    """Whether a call input, or a gateway call's nested arguments, has proof."""
+    if not isinstance(tool_input, dict):
+        return False
+    if _has_proof_field(tool_input):
+        return True
+    nested = tool_input.get("arguments")
+    return isinstance(nested, dict) and _has_proof_field(nested)
 
-    try:
-        raw = sys.stdin.read()
-        data = json.loads(raw or "{}")
-    except Exception:
-        return 0
-    if not isinstance(data, dict):
-        return 0
 
-    suffix = governance_tool_suffix(data.get("tool_name"), host=args.host)
+def _insecure_bundled_transport_reason(
+    host: str, data: dict, output: dict | None
+) -> str:
+    """Why a proof-bearing call must not reach the bundled server, or "".
+
+    The bundled Claude transport follows UNITARES_SERVER_URL exactly as
+    .mcp.json expands it. Over cleartext HTTP to a non-loopback host, any
+    client_session_id or continuity_token in the call, whether this hook
+    injected it or the agent supplied it, could be read on the path and
+    replayed. Such calls are denied; calls without proof pass unchanged.
+    """
+    if host != "claude":
+        return ""
+    parsed = parse_mcp_tool_name(data.get("tool_name"))
+    if parsed is None or parsed[0] != BUNDLED_CLAUDE_SERVER_ALIAS:
+        return ""
+    specific = (output or {}).get("hookSpecificOutput") or {}
+    if specific.get("permissionDecision") == "deny":
+        return ""
+    effective = specific.get("updatedInput", data.get("tool_input"))
+    if not _carries_proof(effective):
+        return ""
+    url = os.environ.get("UNITARES_SERVER_URL") or BUNDLED_CLAUDE_DEFAULT_SERVER_URL
+    if is_secure_governance_url(f"{url}/mcp/"):
+        return ""
+    return (
+        "Refusing to send governance identity proof to the bundled UNITARES "
+        "MCP server: UNITARES_SERVER_URL is cleartext HTTP to a non-loopback "
+        "host, where the proof could be read and replayed. Set "
+        "UNITARES_SERVER_URL to an https:// URL or a loopback address and "
+        "restart the session."
+    )
+
+
+def _decide(host: str, data: dict, raw: str) -> dict | None:
+    """Return the hook output for one governance call, or None to pass it."""
+    suffix = governance_tool_suffix(data.get("tool_name"), host=host)
     if suffix is None:
-        return 0
+        return None
     if (
         suffix not in INJECT_SUFFIXES
         and suffix not in ANCHORED_MINT_SUFFIXES
         and suffix not in IDENTITY_ASSERT_SUFFIXES
     ):
-        return 0
+        return None
     if (
-        args.host == "codex"
+        host == "codex"
         and suffix not in CODEX_REWRITE_SUFFIXES
         and suffix not in ANCHORED_MINT_SUFFIXES
         and suffix not in IDENTITY_ASSERT_SUFFIXES
     ):
-        return 0
+        return None
 
     tool_input = data.get("tool_input")
     if tool_input is None:
         tool_input = {}
     if not isinstance(tool_input, dict):
-        return 0
+        return None
 
     if suffix in GATEWAY_SUFFIXES and not _gateway_target_injectable(tool_input):
         nested = tool_input.get("arguments")
@@ -390,22 +434,21 @@ def main(argv: list[str] | None = None) -> int:
             else None
         )
         if mismatch:
-            print(json.dumps(_deny_output(mismatch)))
-        return 0
+            return _deny_output(mismatch)
+        return None
 
     if suffix in IDENTITY_ASSERT_SUFFIXES:
         duplicate = _proofless_identity_reason(tool_input, raw)
         if duplicate:
-            print(json.dumps(_deny_output(duplicate)))
-        return 0
+            return _deny_output(duplicate)
+        return None
 
     updated = dict(tool_input)
     changed = False
 
     mismatch = _foreign_slot_proof_reason(tool_input, raw)
     if mismatch:
-        print(json.dumps(_deny_output(mismatch)))
-        return 0
+        return _deny_output(mismatch)
 
     if suffix in ANCHORED_MINT_SUFFIXES:
         # Anchored dispatch/beam conversations provide a stable per-thread
@@ -417,8 +460,7 @@ def main(argv: list[str] | None = None) -> int:
         if not anchor and not _has_proof_field(tool_input):
             duplicate = _duplicate_mint_reason(tool_input, raw)
             if duplicate:
-                print(json.dumps(_deny_output(duplicate)))
-                return 0
+                return _deny_output(duplicate)
         if (
             anchor
             and not _truthy(tool_input.get("force_new"))
@@ -434,9 +476,8 @@ def main(argv: list[str] | None = None) -> int:
             updated["orchestrated"] = True
             changed = True
         if not changed:
-            return 0
-        print(json.dumps(_hook_output(updated, args.host)))
-        return 0
+            return None
+        return _hook_output(updated, host)
 
     # Tag normalization runs independently of identity injection: it applies
     # whenever a tag-bearing knowledge call carries a `tags` list, regardless
@@ -465,8 +506,29 @@ def main(argv: list[str] | None = None) -> int:
             changed = True
 
     if not changed:
+        return None
+    return _hook_output(updated, host)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Normalize a governance PreToolUse call")
+    parser.add_argument("--host", choices=("claude", "codex"), default="claude")
+    args = parser.parse_args(argv)
+
+    try:
+        raw = sys.stdin.read()
+        data = json.loads(raw or "{}")
+    except Exception:
         return 0
-    print(json.dumps(_hook_output(updated, args.host)))
+    if not isinstance(data, dict):
+        return 0
+
+    output = _decide(args.host, data, raw)
+    insecure = _insecure_bundled_transport_reason(args.host, data, output)
+    if insecure:
+        output = _deny_output(insecure)
+    if output is not None:
+        print(json.dumps(output))
     return 0
 
 

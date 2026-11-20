@@ -609,6 +609,117 @@ class TestProofFieldsRespectSlotAuthority:
         assert updated["client_session_id"] == SID
 
 
+BUNDLED = "mcp__plugin_unitares-governance_unitares-governance__"
+
+
+def _deny_reason(result) -> str | None:
+    out = result.stdout.strip()
+    if not out:
+        return None
+    specific = json.loads(out)["hookSpecificOutput"]
+    if specific.get("permissionDecision") != "deny":
+        return None
+    return specific["permissionDecisionReason"]
+
+
+class TestBundledCleartextTransport:
+    """Proof never goes to the bundled server over non-loopback cleartext."""
+
+    @pytest.fixture(autouse=True)
+    def _no_anchor(self, monkeypatch):
+        for name in (
+            "UNITARES_ORCHESTRATED",
+            "UNITARES_CLIENT_SESSION_ID",
+            "UNITARES_ORCHESTRATED_OWNER_PID",
+            "UNITARES_HOOK_HOST_PID",
+        ):
+            monkeypatch.delenv(name, raising=False)
+
+    @pytest.mark.parametrize(
+        ("tool_input", "bound"),
+        [
+            ({}, True),  # the hook would inject the slot's client_session_id
+            ({"client_session_id": SID}, True),
+            ({"continuity_token": "v1.tok"}, False),
+        ],
+    )
+    def test_proof_bearing_call_is_denied(self, tmp_path, monkeypatch, tool_input, bound):
+        monkeypatch.setenv("UNITARES_SERVER_URL", "http://gov.example.test")
+        if bound:
+            _write_cache(tmp_path)
+        result = _run(_hook_input(f"{BUNDLED}sync_state", tool_input), tmp_path,
+                      host="claude")
+        reason = _deny_reason(result)
+        assert reason is not None
+        assert "cleartext HTTP" in reason
+        assert "gov.example.test" not in reason
+
+    def test_gateway_nested_proof_is_denied(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("UNITARES_SERVER_URL", "http://192.0.2.1:8767")
+        result = _run(_hook_input(f"{BUNDLED}use_tool", {
+            "tool_name": "identity",
+            "arguments": {"client_session_id": SID},
+        }), tmp_path, host="claude")
+        assert _deny_reason(result) is not None
+
+    def test_agent_supplied_proof_on_unlisted_suffix_is_denied(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("UNITARES_SERVER_URL", "http://gov.example.test")
+        result = _run(_hook_input(f"{BUNDLED}bind_session", {
+            "client_session_id": SID,
+        }), tmp_path, host="claude")
+        assert _deny_reason(result) is not None
+
+    def test_proofless_call_passes(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("UNITARES_SERVER_URL", "http://gov.example.test")
+        result = _run(_hook_input(f"{BUNDLED}search_shared_memory", {
+            "query": "x",
+        }), tmp_path, host="claude")
+        assert result.returncode == 0
+        assert result.stdout.strip() == ""
+
+    @pytest.mark.parametrize(
+        "server_url",
+        [
+            None,
+            "",
+            "https://gov.example.test",
+            "http://localhost:8767",
+            "http://127.0.0.1:8767",
+            "http://[::1]:8767",
+        ],
+    )
+    def test_secure_transport_keeps_injection(self, tmp_path, monkeypatch, server_url):
+        if server_url is None:
+            monkeypatch.delenv("UNITARES_SERVER_URL", raising=False)
+        else:
+            monkeypatch.setenv("UNITARES_SERVER_URL", server_url)
+        _write_cache(tmp_path)
+        result = _run(_hook_input(f"{BUNDLED}sync_state", {}), tmp_path, host="claude")
+        updated = _updated_input(result)
+        assert updated is not None
+        assert updated["client_session_id"] == SID
+
+    @pytest.mark.parametrize(
+        "tool_name",
+        ["mcp__unitares__sync_state", "mcp__unitares-governance__sync_state"],
+    )
+    def test_other_aliases_are_unchanged(self, tmp_path, monkeypatch, tool_name):
+        monkeypatch.setenv("UNITARES_SERVER_URL", "http://gov.example.test")
+        _write_cache(tmp_path)
+        result = _run(_hook_input(tool_name, {}), tmp_path, host="claude")
+        updated = _updated_input(result)
+        assert updated is not None
+        assert updated["client_session_id"] == SID
+
+    def test_existing_deny_reason_is_kept(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("UNITARES_SERVER_URL", "http://gov.example.test")
+        _write_cache(tmp_path)
+        result = _run(_hook_input(f"{BUNDLED}sync_state", {
+            "client_session_id": "agent-foreign-111",
+        }), tmp_path, host="claude")
+        assert "protected current-slot identity" in (_deny_reason(result) or "")
+
+
 class TestFailOpen:
 
     def test_no_cache_no_output(self, tmp_path):

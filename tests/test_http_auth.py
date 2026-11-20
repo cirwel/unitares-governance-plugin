@@ -21,6 +21,7 @@ from _http_auth import (  # noqa: E402
     ResponseTooLargeError,
     authorization_safe_urlopen,
     governance_json_headers,
+    is_secure_governance_url,
     read_limited_response,
 )
 
@@ -51,6 +52,23 @@ def test_governance_request_rejects_non_loopback_cleartext_without_bearer(
     monkeypatch.setattr("_http_auth._AUTHORIZATION_SAFE_OPENER.open", unexpected_open)
     with pytest.raises(InsecureBearerTransportError):
         authorization_safe_urlopen(request, timeout=1)
+
+
+@pytest.mark.parametrize(
+    ("url", "secure"),
+    [
+        ("https://gov.example.test/mcp/", True),
+        ("http://localhost:8767/mcp/", True),
+        ("http://127.0.0.1:8767/mcp/", True),
+        ("http://[::1]:8767/mcp/", True),
+        ("http://gov.example.test/mcp/", False),
+        ("http://192.0.2.1:8767/mcp/", False),
+        ("ftp://localhost/mcp/", False),
+        ("not a url", False),
+    ],
+)
+def test_secure_governance_url_requires_https_or_loopback(url: str, secure: bool) -> None:
+    assert is_secure_governance_url(url) is secure
 
 
 @pytest.mark.parametrize("url", ["http://localhost:8767/v1", "http://127.0.0.1:8767/v1"])

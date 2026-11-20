@@ -75,6 +75,15 @@ def _is_loopback_host(host: str) -> bool:
         return False
 
 
+def is_secure_governance_url(url: str) -> bool:
+    """True when ``url`` is HTTPS, or cleartext HTTP to a loopback host."""
+    origin = _http_origin(url)
+    if origin is None:
+        return False
+    scheme, host, _port = origin
+    return scheme == "https" or (scheme == "http" and _is_loopback_host(host))
+
+
 def _validate_governance_transport(
     request: urllib.request.Request,
 ) -> tuple[str, str, int]:
