@@ -97,16 +97,11 @@ controls actuation, not estimation. The server's
 [computation reference](https://github.com/cirwel/unitares/blob/master/docs/EISV_COMPUTATION.md)
 owns the instrument's inputs, interpretations, and evidence limits.
 
-For Codex, there is no client hook in this plugin that automatically stamps the
-local cache after `process_agent_update`. When a check-in succeeds and you are
-maintaining slot-scoped continuity, update the current slot explicitly,
-passing the identity fields as the payload (without `--json` the helper has
-nothing to write: it refuses a new slot and only bumps `updated_at` on an
-existing one):
-`scripts/session_cache.py set session --slot=<client_session_id> --merge --stamp --json '{"uuid":"<uuid>","client_session_id":"<client_session_id>","schema_version":2}'`.
-Do not write `continuity_token` to the cache; the helper refuses it. Then reset
-any local milestone accumulator with
-`scripts/session_cache.py reset-milestone`.
-
-Claude adapters may do this through hooks, but Codex should treat it as an
-explicit step unless a Codex-native lifecycle hook is added later.
+Do not stamp the cache or reset a milestone by hand after the call. Claude and
+Codex both register the `pre-governance-call` hook, which snapshots the current
+host slot's cache and milestone before the check-in, and the `post-checkin`
+hook, which acts on that snapshot afterwards. After a check-in the server
+reports as successful, `post-checkin` stamps the slot and resets its milestone
+only when its own pre-call snapshot is still current, so an overlapping check-in
+or edit can leave the milestone unreset until a later check-in. Without
+lifecycle hooks there is no milestone accumulator to reset.

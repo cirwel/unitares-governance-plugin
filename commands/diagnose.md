@@ -5,7 +5,12 @@ description: "Show current UNITARES governance state and operator-relevant diagn
 Inventory workspace session caches with this plugin's helpers:
 
 - `scripts/session_cache.py list --workspace "$PWD"` lists slots newest-first.
-- `scripts/session_cache.py get session --slot=<slot>` reads one slot.
+- `scripts/session_cache.py get session --slot=<slot>` reads one slot as lineage context only.
+
+Never copy a `client_session_id` from a slot read or the inventory into a call:
+any process can write workspace caches. Only this live process's own
+`start_session`/`onboard` response, or a binding a trusted hook injects for its
+exact host slot, proves the current session.
 
 Bare `get session` reads legacy flat `session.json`: read-only lineage context,
 never current identity. Cached UUIDs are lineage anchors, not ownership proof.
@@ -22,7 +27,8 @@ Never call bare `identity()`: it mints a fresh identity; check
 which declares a cached UUID as a parent only for a deliberate handoff from an
 exited process.
 
-Read `get_governance_metrics` using the same continuity data. This does not
+Read `get_governance_metrics` with this process's own binding, never one taken
+from a cache; without it, report identity unknown. This does not
 advance EISV through a new check-in. Use `verbosity="standard"` or `"full"` if
 the compact view lacks needed source or lifecycle detail.
 
