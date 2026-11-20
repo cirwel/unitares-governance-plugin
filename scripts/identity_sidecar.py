@@ -851,6 +851,11 @@ def make_handler(sidecar: IdentitySidecar) -> type[BaseHTTPRequestHandler]:
             self._arm_read_deadline()
             try:
                 super().handle_one_request()
+            except OSError:
+                if not self._read_deadline_hit:
+                    raise
+                # The deadline already closed this socket; a reply cannot be sent.
+                self.close_connection = True
             finally:
                 self._disarm_read_deadline()
 

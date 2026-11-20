@@ -1210,3 +1210,38 @@ def test_slow_request_cannot_hold_a_worker_past_read_deadline(
     assert status == 200
     assert payload["success"] is True
     assert FakeGovernanceHandler.calls == []
+
+
+def test_read_deadline_on_partial_request_line_is_not_reported_as_server_error(
+    tmp_path: Path, fake_server: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(identity_sidecar, "REQUEST_READ_DEADLINE", 0.5)
+    sidecar = _sidecar(tmp_path, fake_server)
+    server = BoundedThreadingHTTPServer(
+        ("127.0.0.1", 0), make_handler(sidecar), max_workers=1
+    )
+    handler_errors: list[BaseException | None] = []
+    handled = threading.Event()
+
+    def record_error(request: object, client_address: object) -> None:
+        handler_errors.append(sys.exc_info()[1])
+
+    original_shutdown = server.shutdown_request
+
+    def note_shutdown(request: object) -> None:
+        original_shutdown(request)
+        handled.set()
+
+    server.handle_error = record_error  # type: ignore[method-assign]
+    server.shutdown_request = note_shutdown  # type: ignore[method-assign]
+    serving = threading.Thread(target=server.serve_forever, daemon=True)
+    serving.start()
+    port = server.server_address[1]
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as client:
+            client.sendall(b"G")
+            assert _trickle_until_closed(client, budget=4.0)
+        assert handled.wait(2.0)
+    finally:
+        _stop_server(server, serving)
+    assert handler_errors == []
