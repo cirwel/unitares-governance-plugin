@@ -459,24 +459,26 @@ def _http_json(
     body: dict[str, Any] | None = None,
     timeout_s: float | None = None,
 ) -> dict[str, Any]:
-    data = None if body is None else json.dumps(body, separators=(",", ":")).encode("utf-8")
-    headers = {"Accept": "application/json", "Authorization": f"Bearer {token}"}
-    if body is not None:
-        headers["Content-Type"] = "application/json"
-    request = urllib.request.Request(
-        _base_url() + path,
-        data=data,
-        headers=headers,
-        method=method,
-    )
+    """Never raises: every transport or decoding failure is a result dict."""
     try:
-        with authorization_safe_urlopen(
-            request,
-            timeout=_timeout_s() if timeout_s is None else max(0.05, timeout_s),
-        ) as response:
-            raw = read_limited_response(response)
-    except urllib.error.HTTPError as exc:
-        raw = read_limited_response(exc)
+        data = None if body is None else json.dumps(body, separators=(",", ":")).encode("utf-8")
+        headers = {"Accept": "application/json", "Authorization": f"Bearer {token}"}
+        if body is not None:
+            headers["Content-Type"] = "application/json"
+        request = urllib.request.Request(
+            _base_url() + path,
+            data=data,
+            headers=headers,
+            method=method,
+        )
+        try:
+            with authorization_safe_urlopen(
+                request,
+                timeout=_timeout_s() if timeout_s is None else max(0.05, timeout_s),
+            ) as response:
+                raw = read_limited_response(response)
+        except urllib.error.HTTPError as exc:
+            raw = read_limited_response(exc)
     except Exception as exc:
         return {"ok": False, "error": "service_unavailable", "reason": type(exc).__name__}
 
@@ -496,12 +498,128 @@ def _deadline_timeout(deadline: float | None, cap: float) -> float | None:
     return min(cap, remaining)
 
 
+class _NamespaceProbeError(RuntimeError):
+    """A path's repository/worktree namespace could not be verified."""
+
+
+# Returned by _worktree_roots only when the path is verifiably outside every
+# git repository. ``None`` still means the probe failed or was cut short.
+_NOT_A_REPO = object()
+
+
+def _has_dotgit_ancestor(probe: Path) -> bool:
+    for directory in (probe, *probe.parents):
+        try:
+            os.lstat(directory / ".git")
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        except OSError:
+            return True  # cannot tell; treat as a possible repository
+        return True
+    return False
+
+
+# Variables that select a repository or work tree instead of discovering one
+# from the path (git's own ``rev-parse --local-env-vars`` set, less its config
+# variables), plus the two that bound discovery itself. A lease namespace must
+# depend on the target path alone, so the probe never inherits them: otherwise
+# two sessions could map one file to different surfaces, or one could fail to
+# find the repository at all. Config variables (GIT_CONFIG_COUNT/KEY_n/VALUE_n,
+# GIT_CONFIG_PARAMETERS, global/system config) stay: they cannot move
+# discovery, and operators use them to grant safe.directory.
+_GIT_REPOSITORY_ENV = frozenset(
+    {
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_CEILING_DIRECTORIES",
+        "GIT_COMMON_DIR",
+        "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+        "GIT_DIR",
+        "GIT_GRAFT_FILE",
+        "GIT_IMPLICIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_NO_REPLACE_OBJECTS",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_PREFIX",
+        "GIT_REPLACE_REF_BASE",
+        "GIT_SHALLOW_FILE",
+        "GIT_WORK_TREE",
+    }
+)
+
+
+def _git_probe_env() -> dict[str, str]:
+    env = {
+        name: value
+        for name, value in os.environ.items()
+        if name not in _GIT_REPOSITORY_ENV
+    }
+    env["LC_ALL"] = "C"
+    return env
+
+
+def _relative_to_root(path: Path, root: Path) -> Path:
+    """``path.relative_to(root)``, also accepting a case alias of ``root``.
+
+    Git reports the worktree root with its stored casing. On a case-insensitive
+    volume a caller may spell those directories differently; the spellings are
+    accepted only when they name the same directory on disk.
+    """
+    try:
+        return path.relative_to(root)
+    except ValueError:
+        pass
+    count = len(root.parts)
+    prefix = path.parts[:count]
+    if len(prefix) < count or any(
+        mine.casefold() != stored.casefold() for mine, stored in zip(prefix, root.parts)
+    ):
+        raise ValueError(f"{path} is not under {root}")
+    try:
+        same = os.path.samefile(Path(*prefix), root)
+    except OSError:
+        same = False
+    if not same:
+        raise ValueError(f"{path} is not under {root}")
+    return Path(*path.parts[count:])
+
+
+def _nested_checkout_between(worktree_root: Path, relative: Path, is_dir: bool) -> bool:
+    """Whether a ``.git`` entry sits between ``worktree_root`` and the path.
+
+    Such an entry marks a nested checkout (submodule, linked worktree or
+    independent repository) whose namespace is not the outer root's, so a
+    cached outer root must not be reused for the path.
+    """
+    directory = worktree_root
+    for part in relative.parts if is_dir else relative.parts[:-1]:
+        directory = directory / part
+        try:
+            os.lstat(directory / ".git")
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        except OSError:
+            return True  # cannot tell; probe the path itself
+        return True
+    return False
+
+
+def _verified_not_a_repo(probe: Path, stderr: str) -> bool:
+    lowered = stderr.lower()
+    if "not a git repository" not in lowered or "dubious ownership" in lowered:
+        return False
+    return not _has_dotgit_ancestor(probe)
+
+
 def _worktree_roots(
     start: Path,
     *,
     timeout_s: float = 0.75,
-) -> tuple[Path, Path] | None:
-    """Return (worktree root, repository-unique file namespace root)."""
+) -> tuple[Path, Path] | object | None:
+    """Return (worktree root, repository-unique file namespace root).
+
+    Returns ``_NOT_A_REPO`` when the path is verifiably outside any git
+    repository and ``None`` when the probe failed, timed out, or git refused.
+    """
     import subprocess
 
     if timeout_s <= 0:
@@ -515,8 +633,11 @@ def _worktree_roots(
             capture_output=True,
             text=True,
             timeout=min(0.75, max(0.01, timeout_s)),
+            env=_git_probe_env(),
         )
         if out.returncode != 0:
+            if _verified_not_a_repo(probe, out.stderr or ""):
+                return _NOT_A_REPO
             return None
         lines = out.stdout.splitlines()
         if len(lines) < 2:
@@ -524,7 +645,14 @@ def _worktree_roots(
         worktree_root = Path(lines[0].strip()).resolve()
         common_dir = Path(lines[1].strip())
         if not common_dir.is_absolute():
-            common_dir = probe / common_dir
+            # Relative to the probe directory. Re-anchor it on git's stored
+            # spelling of the worktree root so a case alias of the probe path
+            # does not leak into the namespace.
+            try:
+                anchor = worktree_root / _relative_to_root(probe.resolve(), worktree_root)
+            except ValueError:
+                anchor = probe
+            common_dir = anchor / common_dir
         common_dir = common_dir.resolve()
 
         # Ordinary and linked worktrees share <main>/.git, so the real main
@@ -548,6 +676,8 @@ def _canonicalize_worktree_path(
     roots: tuple[Path, Path] | None = None,
     root_cache: list[tuple[Path, Path]] | None = None,
     deadline: float | None = None,
+    *,
+    strict: bool = False,
 ) -> Path:
     """Map a path inside a git worktree to the equivalent path in the repo's
     main/shared checkout, so the SAME logical file across different worktrees
@@ -562,34 +692,47 @@ def _canonicalize_worktree_path(
     every worktree path into one repository-unique namespace collapses them to
     one surface, so the second agent's acquire conflicts.
 
-    Fail-open: any git error returns ``p`` unchanged. A coordination nicety must
-    never break an edit, so we degrade to the prior per-worktree behavior rather
-    than raising.
+    Fail-open by default: any git error returns ``p`` unchanged. A coordination
+    nicety must never break an edit, so we degrade to the prior per-worktree
+    behavior rather than raising. With ``strict`` (required lease mode) only a
+    path verifiably outside every repository keeps its raw path; a failed,
+    refused or deadline-cut probe raises ``_NamespaceProbeError``.
     """
     try:
         resolved_path = p.resolve()
         candidates: list[tuple[Path, Path]] = []
-        if roots is not None:
+        if isinstance(roots, tuple):
             candidates.append(roots)
         if root_cache is not None:
             candidates.extend(item for item in root_cache if item not in candidates)
+        is_dir = resolved_path.is_dir()
         for worktree_root, namespace_root in candidates:
             try:
-                return namespace_root / resolved_path.relative_to(worktree_root)
+                relative = _relative_to_root(resolved_path, worktree_root)
             except ValueError:
                 continue
+            if _nested_checkout_between(worktree_root, relative, is_dir):
+                continue
+            return namespace_root / relative
 
         timeout_s = _deadline_timeout(deadline, 0.75)
         if timeout_s is None:
-            return p
+            raise _NamespaceProbeError("deadline reached before the namespace probe")
         resolved_roots = _worktree_roots(resolved_path, timeout_s=timeout_s)
-        if resolved_roots is None:
+        if resolved_roots is _NOT_A_REPO:
             return p
+        if not isinstance(resolved_roots, tuple):
+            raise _NamespaceProbeError("namespace probe failed")
         if root_cache is not None and resolved_roots not in root_cache:
             root_cache.append(resolved_roots)
         worktree_root, namespace_root = resolved_roots
-        return namespace_root / resolved_path.relative_to(worktree_root)
-    except Exception:
+        return namespace_root / _relative_to_root(resolved_path, worktree_root)
+    except Exception as exc:
+        if strict:
+            if isinstance(exc, _NamespaceProbeError):
+                raise
+            raise _NamespaceProbeError(type(exc).__name__) from exc
+        _debug(f"worktree namespace fallback to raw path for {p}: {exc}")
         return p
 
 
@@ -599,14 +742,24 @@ def _surface_id(
     roots: tuple[Path, Path] | None = None,
     root_cache: list[tuple[Path, Path]] | None = None,
     deadline: float | None = None,
+    *,
+    strict: bool = False,
 ) -> str:
-    p = Path(path).expanduser()
+    try:
+        p = Path(path).expanduser()
+    except Exception as exc:  # e.g. ``~unknown-user/...``
+        if strict:
+            raise _NamespaceProbeError(f"cannot expand {path!r}") from exc
+        p = Path(path)
     if not p.is_absolute():
         p = workspace / p
     # Collapse worktrees of the same repo to a single surface so concurrent
     # agents in different worktrees see each other's lease (see
-    # _canonicalize_worktree_path). Fail-open to the raw absolute path.
-    p = _canonicalize_worktree_path(p, roots, root_cache, deadline).resolve()
+    # _canonicalize_worktree_path). Fail-open to the raw absolute path unless
+    # ``strict``.
+    p = _canonicalize_worktree_path(
+        p, roots, root_cache, deadline, strict=strict
+    ).resolve()
     return f"file://{p}"
 
 
@@ -752,22 +905,8 @@ def _remaining_timeout(deadline: float) -> float | None:
     return _deadline_timeout(deadline, _timeout_s())
 
 
-def _find_lease_key(
-    leases: dict[str, Any],
-    *,
-    file_path: str,
-    surface_id: str,
-) -> str | None:
-    return next(
-        (
-            key
-            for key, row in leases.items()
-            if isinstance(row, dict)
-            and row.get("lease_id")
-            and (row.get("path") == file_path or key == surface_id)
-        ),
-        None,
-    )
+def _lease_row_surface_matches(key: str, row: dict[str, Any], surface_id: str) -> bool:
+    return key == surface_id or row.get("requested_surface_id") == surface_id
 
 
 def _lease_owned_by_event(
@@ -788,13 +927,16 @@ def _persist_or_remove_state(
     tool_use_id: str = "",
     *,
     token: str,
+    keep_lock_sidecar: bool = False,
 ) -> None:
     leases = state.get("leases")
     if isinstance(leases, dict) and leases:
         _save_state(workspace, slot, state, tool_use_id, token=token)
     else:
         _state_path(workspace, slot, tool_use_id).unlink(missing_ok=True)
-        if tool_use_id:
+        # A caller that keeps working under the lock after this must keep the
+        # sidecar: unlinking it would let another process lock a new inode.
+        if tool_use_id and not keep_lock_sidecar:
             _remove_edit_lock_sidecar(_state_path(workspace, slot, tool_use_id))
 
 
@@ -828,6 +970,7 @@ def _rollback_batch_leases(
     rollback_keys: list[str],
     deadline: float,
     tool_use_id: str = "",
+    keep_lock_sidecar: bool = False,
 ) -> None:
     """Release every target lease owned by a batch that will not run."""
     leases = state.get("leases")
@@ -846,7 +989,14 @@ def _rollback_batch_leases(
             leases.pop(key, None)
         else:
             _debug(f"rollback release failed for {key}: {result.get('error')}")
-    _persist_or_remove_state(workspace, slot, state, tool_use_id, token=token)
+    _persist_or_remove_state(
+        workspace,
+        slot,
+        state,
+        tool_use_id,
+        token=token,
+        keep_lock_sidecar=keep_lock_sidecar,
+    )
 
 
 def _cmd_pre_edit_locked(args: argparse.Namespace, stdin_text: str) -> int:
@@ -889,25 +1039,22 @@ def _cmd_pre_edit_locked(args: argparse.Namespace, stdin_text: str) -> int:
     deadline = time.monotonic() + batch_budget
     rollback_reserve = min(0.75, batch_budget / 3.0)
     operation_deadline = deadline - rollback_reserve
-    rollback_keys: list[str] = []
-    for file_path in payload.paths:
-        existing_key = _find_lease_key(
-            leases,
-            file_path=file_path,
-            surface_id="",
+    # The state is bound to this event, so every lease it holds belongs to this
+    # edit. If the edit is blocked, all of them go, whatever path spelling an
+    # earlier attempt used and however early this attempt stops.
+    rollback_keys: list[str] = [
+        key
+        for key, row in leases.items()
+        if isinstance(row, dict)
+        and row.get("lease_id")
+        and _lease_owned_by_event(
+            row,
+            holder_uuid=holder_uuid,
+            tool_use_id=payload.tool_use_id,
         )
-        if (
-            existing_key is not None
-            and _lease_owned_by_event(
-                leases[existing_key],
-                holder_uuid=holder_uuid,
-                tool_use_id=payload.tool_use_id,
-            )
-            and existing_key not in rollback_keys
-        ):
-            rollback_keys.append(existing_key)
+    ]
 
-    def rollback() -> None:
+    def rollback(*, final: bool = True) -> None:
         try:
             _rollback_batch_leases(
                 token=token,
@@ -917,6 +1064,7 @@ def _cmd_pre_edit_locked(args: argparse.Namespace, stdin_text: str) -> int:
                 rollback_keys=rollback_keys,
                 deadline=deadline,
                 tool_use_id=payload.tool_use_id,
+                keep_lock_sidecar=not final,
             )
         except Exception as exc:
             # A local persistence failure must not replace the original lease
@@ -929,7 +1077,10 @@ def _cmd_pre_edit_locked(args: argparse.Namespace, stdin_text: str) -> int:
         rollback()
         return _fail_open_or_block("batch lease deadline reached during path setup")
     roots = _worktree_roots(workspace, timeout_s=roots_timeout)
-    if roots is None and _required():
+    # Required mode keeps blocking a workspace that is not a verified git
+    # checkout (including one outside any repository); individual targets
+    # outside every repository are still allowed below.
+    if not isinstance(roots, tuple) and _required():
         rollback()
         return _fail_open_or_block(
             "required lease mode could not verify the repository/worktree namespace"
@@ -940,34 +1091,56 @@ def _cmd_pre_edit_locked(args: argparse.Namespace, stdin_text: str) -> int:
         if _deadline_timeout(operation_deadline, 1.0) is None:
             rollback()
             return _fail_open_or_block("batch lease deadline reached during path setup")
-        surface_id = _surface_id(
-            file_path,
-            workspace,
-            roots,
-            root_cache,
-            operation_deadline,
-        )
+        try:
+            surface_id = _surface_id(
+                file_path,
+                workspace,
+                roots,
+                root_cache,
+                operation_deadline,
+                strict=_required(),
+            )
+        except _NamespaceProbeError:
+            rollback()
+            return _fail_open_or_block(
+                "required lease mode could not verify the repository/worktree "
+                f"namespace for {file_path}"
+            )
+        except Exception as exc:
+            rollback()
+            return _fail_open_or_block(
+                f"could not derive a lease surface for {file_path}: {type(exc).__name__}"
+            )
         targets_by_surface[surface_id] = file_path
     if _deadline_timeout(operation_deadline, 1.0) is None:
         rollback()
         return _fail_open_or_block("batch lease deadline reached during path setup")
     targets = sorted(targets_by_surface.items())
-    for surface_id, file_path in targets:
-        existing_key = _find_lease_key(
-            leases,
-            file_path=file_path,
-            surface_id=surface_id,
-        )
-        if (
-            existing_key is not None
-            and _lease_owned_by_event(
-                leases[existing_key],
-                holder_uuid=holder_uuid,
-                tool_use_id=payload.tool_use_id,
-            )
-            and existing_key not in rollback_keys
-        ):
-            rollback_keys.append(existing_key)
+
+    # Retry rule: leases this event already holds are reused only when each
+    # sits on exactly one surface computed now and no two share a surface.
+    # Otherwise an earlier attempt resolved its targets differently, so all of
+    # the event's leases are released and the current set is acquired fresh;
+    # if that release does not complete, the edit fails closed (or open in
+    # default mode). Rows are matched by surface only, never by path spelling.
+    existing_by_surface: dict[str, str] = {}
+    for key in rollback_keys:
+        row = leases.get(key)
+        matches = [
+            surface
+            for surface in targets_by_surface
+            if isinstance(row, dict) and _lease_row_surface_matches(key, row, surface)
+        ]
+        if len(matches) != 1 or matches[0] in existing_by_surface:
+            existing_by_surface = {}
+            rollback(final=False)  # acquisition continues under this lock
+            if any(held in leases for held in rollback_keys):
+                return _fail_open_or_block(
+                    "an earlier attempt of this edit holds leases on other surfaces "
+                    "that could not be released"
+                )
+            break
+        existing_by_surface[matches[0]] = key
 
     for surface_id, file_path in targets:
         timeout_s = _remaining_timeout(operation_deadline)
@@ -975,29 +1148,25 @@ def _cmd_pre_edit_locked(args: argparse.Namespace, stdin_text: str) -> int:
             rollback()
             return _fail_open_or_block("batch lease deadline reached")
 
-        existing_key = _find_lease_key(
-            leases,
-            file_path=file_path,
-            surface_id=surface_id,
-        )
-        if existing_key is not None and not _lease_owned_by_event(
-            leases[existing_key],
-            holder_uuid=holder_uuid,
-            tool_use_id=payload.tool_use_id,
-        ):
-            existing_key = None
+        existing_key = existing_by_surface.get(surface_id)
         if existing_key is not None:
             existing = leases[existing_key]
             heartbeat = _heartbeat(token, str(existing["lease_id"]), timeout_s=timeout_s)
             if heartbeat.get("ok") is True:
                 existing["last_heartbeat_at"] = time.time()
-                _save_state(
-                    workspace,
-                    payload.session_id,
-                    state,
-                    payload.tool_use_id,
-                    token=token,
-                )
+                try:
+                    _save_state(
+                        workspace,
+                        payload.session_id,
+                        state,
+                        payload.tool_use_id,
+                        token=token,
+                    )
+                except Exception as exc:
+                    rollback()
+                    return _fail_open_or_block(
+                        f"lease state persistence failed after heartbeat: {exc}"
+                    )
                 continue
             if heartbeat.get("error") not in {"not_found", "expired"}:
                 rollback()
@@ -1040,6 +1209,7 @@ def _cmd_pre_edit_locked(args: argparse.Namespace, stdin_text: str) -> int:
                 "lease_id": lease_id,
                 "path": file_path,
                 "surface_id": key,
+                "requested_surface_id": surface_id,
                 "expires_at": lease.get("expires_at"),
                 "acquired_at": time.time(),
                 "idempotent": idempotent,
@@ -1263,37 +1433,12 @@ def _cmd_release_edit_locked(args: argparse.Namespace, stdin_text: str) -> int:
         return 0
     release_budget = min(_batch_timeout_s(), 1.5) if args.host == "codex" else _batch_timeout_s()
     deadline = time.monotonic() + release_budget
-    roots: tuple[Path, Path] | None = None
-    roots_loaded = False
-    root_cache: list[tuple[Path, Path]] = []
-    keys: list[str] = []
-    for file_path in payload.paths:
-        # New state preserves the raw event path, so the common path needs no
-        # Git subprocess at all. Canonicalization is only a compatibility
-        # fallback for older rows that lack or changed that field.
-        key = _find_lease_key(leases, file_path=file_path, surface_id="")
-        if key is None:
-            roots_timeout = _deadline_timeout(deadline, 0.75)
-            if roots_timeout is None:
-                _debug("release-edit path setup deadline reached; session/TTL cleanup remains")
-                break
-            if not roots_loaded:
-                roots = _worktree_roots(workspace, timeout_s=roots_timeout)
-                roots_loaded = True
-            surface_id = _surface_id(
-                file_path,
-                workspace,
-                roots,
-                root_cache,
-                deadline,
-            )
-            key = _find_lease_key(
-                leases,
-                file_path=file_path,
-                surface_id=surface_id,
-            )
-        if key is not None and key not in keys:
-            keys.append(key)
+    # The state is bound to this one edit event, and the edit has completed,
+    # so every lease it holds is released, whatever path spelling or surface
+    # each row was recorded under. No path matching and no git probe.
+    keys = [
+        key for key, row in leases.items() if isinstance(row, dict) and row.get("lease_id")
+    ]
     for key in keys:
         timeout_s = _remaining_timeout(deadline)
         if timeout_s is None:
