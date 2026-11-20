@@ -228,14 +228,28 @@ implementation. It wraps REST `/v1/tools/call` and minimal JSON-RPC MCP
 `force_new=true` for bare `onboard` / `start_session`, stamps the slot cache
 after check-ins, and exposes `GET /audit`.
 
-A slot that already names an identity keeps it. On a bound slot the sidecar
-refuses with 409, before any upstream call, a `force_new` mint and identity
-proof for another identity; it never mints a `spawn_reason=subagent`
-identity, and a binding marked `prior_process` is not used as proof. A
-long-lived slot such as `--slot codex-local` therefore stays on its first
-identity across client sessions. To switch, clear the slot with
+A slot that already names an identity keeps it on tool calls (REST
+`/v1/tools/call` and `/mcp/` `tools/call`). On a bound slot an identity call
+must prove the bound identity: the sidecar refuses with 409, before any
+upstream call, a `force_new` mint, a declared `parent_agent_id`, an
+`onboard`, `start_session` or `identity` without `client_session_id`,
+`continuity_token`, `agent_uuid` or `agent_id` proof (a `name` alone is not
+proof), and proof for another identity. It refuses identity tools sent through
+`use_tool` and never mints a `spawn_reason=subagent` identity. It persists only
+successful replies for the bound identity, and binds an empty slot only from a
+reply that carries a session id. A
+binding marked `prior_process` is not used as proof and refuses identity calls
+until the slot is cleared. A long-lived slot such as `--slot codex-local`
+therefore stays on its first identity across client sessions. To switch, clear
+the slot with
 `python3 scripts/session_cache.py clear session --workspace "$PWD" --slot codex-local`
 or start a sidecar on a new `--slot`.
+
+`POST /session/start` (used by `u-run`) is a separate re-onboard route: it
+mints a fresh identity for the slot and replaces the binding, so it is not
+covered by the rule above. Two concurrent first mints into an empty slot are
+also not serialized: only one reply is persisted, but both identities exist on
+the server.
 
 Useful endpoints:
 

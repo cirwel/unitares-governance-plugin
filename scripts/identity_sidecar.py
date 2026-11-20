@@ -8,9 +8,11 @@ It wraps the server's `/v1/tools/call` surface with local lifecycle help:
 * lazy onboard when a slot has no cached `client_session_id`
 * inject `client_session_id` into attribution-relevant governance calls
 * force fresh posture for bare `onboard` / `start_session` calls
-* keep a bound slot's identity: refuse foreign proof and force_new mints
-  before the upstream call, and persist only successful responses for the
-  bound uuid (a binding marked `prior_process` is never used as proof)
+* keep a bound slot's identity on tool calls: refuse foreign or missing
+  proof, mints and identity tools sent through use_tool before the upstream
+  call, and persist only successful responses for the bound uuid (a binding
+  marked `prior_process` is never used as proof). `POST /session/start` is
+  a separate re-onboard route and is not covered by this rule.
 * stamp the slot cache after successful check-ins
 * expose the local identity-contract audit
 * proxy minimal JSON-RPC MCP `tools/call` requests through `/mcp/`
@@ -448,6 +450,9 @@ class IdentitySidecar:
             canonical = {}
         if parsed.get("success") is False or canonical.get("success") is False:
             return "refused_failed_response"
+        if parsed.get("bound") is False or canonical.get("bound") is False:
+            # bind_session resolved the agent but declined the bind.
+            return "refused_failed_response"
         uuid = (
             parsed.get("uuid")
             or parsed.get("agent_uuid")
@@ -470,6 +475,13 @@ class IdentitySidecar:
             bound_uuid = str(existing.get("uuid") or "").strip()
             if bound_uuid and bound_uuid != uuid:
                 decision = "refused_owner_mismatch"
+                return None
+            if not (isinstance(sid, str) and sid.strip()) and not str(
+                existing.get("client_session_id") or ""
+            ).strip():
+                # A bind_session reply names the agent but not the session;
+                # a binding without one would be unusable and block the slot.
+                decision = "refused_no_session_id"
                 return None
             decision = "updated"
             payload: dict[str, Any] = {
@@ -517,14 +529,22 @@ class IdentitySidecar:
         """Refuse, before any upstream call, an identity call that would
         bind or mint another identity into a slot that already names one.
 
-        Foreign slot proof, any force_new mint and a proofless identity()
-        are refused. Unlike the pre-governance-call hook, declared lineage
-        does not exempt a mint: the sidecar has no lineage support, so the
-        owner rule would never cache the new identity and the caller never
-        sees its session id. A declared subagent mint is refused even into
-        an empty slot for the same reason. The response owner rule stays
-        the authority; this keeps the call from reaching the server under
-        the sidecar's credential and minting an identity nobody can use.
+        On a bound slot an identity call must prove the bound identity, and
+        anything the server would turn into a mint is refused: foreign slot
+        proof, any force_new mint, a declared parent_agent_id (the server
+        promotes it to a fresh mint) and an onboard, start_session or
+        identity without session, token, uuid or agent_id proof (a name
+        alone is not proof; the server mints for it). Unlike the
+        pre-governance-call hook, declared lineage does not exempt a mint:
+        the sidecar has no lineage support, so the owner rule would never
+        cache the new identity and the caller never sees its session id. A
+        declared subagent mint is refused even into an empty slot for the
+        same reason. A binding marked prior_process belongs to an earlier
+        process and a protected binding the sidecar cannot read is not
+        empty; both refuse every identity call until the slot is cleared.
+        The response owner rule stays the authority; this keeps the call
+        from reaching the server under the sidecar's credential and minting
+        an identity nobody can use.
         """
         if str(arguments.get("spawn_reason") or "").strip().lower() == "subagent":
             raise ForeignSlotProofError(
@@ -533,14 +553,35 @@ class IdentitySidecar:
                 "subagent through its own sidecar slot."
             )
         binding = self.read_session(slot)
+        if not binding:
+            protected_path = _cache_path(Path.home(), slot)
+            if protected_path.exists() or protected_path.is_symlink():
+                raise ForeignSlotProofError(
+                    "sidecar slot's protected HOME session binding is invalid; "
+                    "clear it explicitly before binding an identity"
+                )
         bound_uuid = str(binding.get("uuid") or "").strip()
         if not bound_uuid:
             return
+        switch_hint = (
+            "To switch identity, clear the slot (session_cache.py clear) or "
+            "run a separate sidecar on another slot."
+        )
+        if binding.get("prior_process") is True:
+            raise ForeignSlotProofError(
+                f"sidecar slot binding {bound_uuid} belongs to a prior process "
+                "and is no proof for this one. " + switch_hint
+            )
+
+        def provided(field: str) -> bool:
+            value = arguments.get(field)
+            return value is not None and not (isinstance(value, str) and not value.strip())
+
         mismatched = []
         for field in (*SLOT_BOUND_PROOF_FIELDS, "agent_uuid"):
-            value = arguments.get(field)
-            if value is None or (isinstance(value, str) and not value.strip()):
+            if not provided(field):
                 continue
+            value = arguments.get(field)
             expected = bound_uuid if field == "agent_uuid" else binding.get(field)
             if (
                 not isinstance(value, str)
@@ -549,9 +590,12 @@ class IdentitySidecar:
             ):
                 mismatched.append(field)
         agent_id = arguments.get("agent_id")
-        if agent_id is not None and not (isinstance(agent_id, str) and not agent_id.strip()):
-            # The server treats an explicit agent_id as identity proof; it
-            # may name the bound identity by its label or by its uuid.
+        # bind_session resolves the agent from client_session_id, checked
+        # above, and the server compares agent_id against every alias of that
+        # agent. Elsewhere agent_id is identity proof; it may name the bound
+        # identity by its label or by its uuid.
+        pinned_by_session = key == "bind_session" and provided("client_session_id")
+        if provided("agent_id") and not pinned_by_session:
             accepted = {bound_uuid, str(binding.get("agent_id") or "").strip()} - {""}
             if not isinstance(agent_id, str) or agent_id.strip() not in accepted:
                 mismatched.append("agent_id")
@@ -560,25 +604,50 @@ class IdentitySidecar:
                 "sidecar identity proof does not match its configured slot binding: "
                 + ", ".join(sorted(mismatched))
             )
-        if (key in START_TOOL_NAMES or key == "identity") and _truthy(arguments.get("force_new")):
+        if key == "bind_session":
+            # bind_session never mints; without client_session_id the server
+            # refuses it.
+            return
+        if _truthy(arguments.get("force_new")):
             raise ForeignSlotProofError(
                 f"sidecar slot is already bound to agent_uuid {bound_uuid}; "
                 "force_new would mint a second identity the sidecar cannot hold. "
-                "To switch identity, clear the slot (session_cache.py clear) or "
-                "run a separate sidecar on another slot."
+                + switch_hint
             )
-        if key == "identity" and not _truthy(arguments.get("force_new")):
-            has_proof = any(
-                arguments.get(field) is not None
-                and (not isinstance(arguments.get(field), str) or arguments.get(field).strip())
-                for field in PROOF_FIELDS
+        if provided("parent_agent_id"):
+            raise ForeignSlotProofError(
+                f"sidecar slot is already bound to agent_uuid {bound_uuid}; "
+                "a declared parent_agent_id makes the server mint a new identity "
+                "the sidecar cannot hold. " + switch_hint
             )
-            name = arguments.get("name")
-            if not has_proof and not (isinstance(name, str) and name.strip()):
+        if not any(provided(field) for field in PROOF_FIELDS):
+            raise ForeignSlotProofError(
+                f"sidecar slot is already bound to agent_uuid {bound_uuid}; "
+                f"a {key} call without proof of that identity would mint or "
+                "resolve another one. Pass the bound client_session_id."
+            )
+
+    def refuse_identity_tool_through_gateway(self, key: str, arguments: dict[str, Any]) -> None:
+        """Refuse an identity tool dispatched through use_tool.
+
+        The gateway would carry it upstream under the sidecar's credential
+        while its reply is processed as a use_tool result, so neither the
+        owner rule above nor the response owner rule would apply.
+        """
+        layer_name, layer = key, arguments
+        for _ in range(MAX_GATEWAY_DEPTH + 1):
+            if layer_name not in GATEWAY_SUFFIXES:
+                return
+            target = _tool_key(layer.get("tool_name"))
+            if target in IDENTITY_TOOL_NAMES:
                 raise ForeignSlotProofError(
-                    f"sidecar slot is already bound to agent_uuid {bound_uuid}; "
-                    "a proofless identity() would replace it."
+                    f"sidecar refuses {target} through use_tool: call it directly "
+                    "so the slot owner rule applies"
                 )
+            nested = layer.get("arguments")
+            if not isinstance(nested, dict):
+                return
+            layer_name, layer = target, nested
 
     def prepare_tool_arguments(
         self,
@@ -598,6 +667,7 @@ class IdentitySidecar:
                 arguments.setdefault("model_type", self.model_type)
             self.refuse_identity_call_over_bound_slot(key, arguments, slot)
         elif key in INJECT_SUFFIXES:
+            self.refuse_identity_tool_through_gateway(key, arguments)
             ensured = self.ensure_session(slot)
             lifecycle["ensure_session"] = {k: v for k, v in ensured.items() if k != "session"}
             sid = ensured.get("client_session_id")
