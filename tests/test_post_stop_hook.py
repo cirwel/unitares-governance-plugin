@@ -925,3 +925,66 @@ def test_post_stop_timeout_at_most_preserves_float_spellings():
     assert got["2.5"] == "2.5"
     for invalid in ("0", "-1", "nan", "inf", "1e999", "garbage"):
         assert got[invalid] == "15"
+
+
+@pytest.mark.parametrize("host", ["claude", "codex"])
+def test_a_binding_marked_inherited_at_this_stop_is_not_used_for_its_evidence(tmp_path, host):
+    """The Stop that marks an idle binding prior_process must not then send
+    its turn_stop or tool-outcome evidence under that binding."""
+    import os
+    import time
+
+    RecordingHandler.calls = []
+    RecordingHandler.paths = []
+    srv = _ReusableTCPServer(("127.0.0.1", 0), RecordingHandler)
+    port = srv.server_address[1]
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+
+    slot = "idle-inherited-slot"
+    old_csid = "agent-idle-predecessor-csid"
+    cache = tmp_path / ".unitares" / _slot_filename(slot)
+    cache.parent.mkdir()
+    cache.write_text(json.dumps({
+        "uuid": "86ae619f-87e0-4040-8f29-eacece0c7904",
+        "client_session_id": old_csid,
+        "schema_version": 2,
+        "slot": slot,
+    }))
+    cache.chmod(0o600)
+    two_days_ago = time.time() - 2 * 24 * 3600
+    os.utime(cache, (two_days_ago, two_days_ago))
+
+    try:
+        subprocess.run(
+            [str(PLUGIN_ROOT / "hooks" / "post-stop"), "--host", host],
+            env={
+                "PATH": "/usr/bin:/bin:/usr/local/bin",
+                "HOME": str(tmp_path),
+                "UNITARES_SERVER_URL": f"http://127.0.0.1:{port}",
+                "UNITARES_CHECKIN_LOG": str(tmp_path / "checkins.log"),
+                "UNITARES_AUTO_ONBOARD": "off",
+                "CLAUDE_PLUGIN_ROOT": str(PLUGIN_ROOT),
+                "PWD": str(tmp_path),
+            },
+            cwd=str(tmp_path),
+            input=json.dumps({
+                "hook_event_name": "Stop",
+                "session_id": slot,
+                "last_assistant_message": "Done.",
+            }),
+            text=True,
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+    finally:
+        srv.shutdown()
+        thread.join(timeout=2)
+
+    assert json.loads(cache.read_text())["prior_process"] is True
+    assert old_csid not in json.dumps(RecordingHandler.calls)
+    assert not [
+        c for c in RecordingHandler.calls if c.get("name") == "process_agent_update"
+    ]
+    assert "/v1/substrate/observe" in RecordingHandler.paths

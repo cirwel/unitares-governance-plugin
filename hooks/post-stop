@@ -331,6 +331,9 @@ fi
 if [[ -n "${CSID:-}" && -f "${PLUGIN_ROOT}/scripts/binding_activity.py" ]]; then
   printf '%s' "${PAYLOAD}" | python3 "${PLUGIN_ROOT}/scripts/binding_activity.py" mark \
     --workspace "${LOOKUP_WORKSPACE}" >/dev/null 2>&1 || true
+  # Re-read: a binding just marked prior_process belongs to the earlier
+  # process, so this turn's evidence must not be sent under it.
+  eval "$(printf '%s' "${PAYLOAD}" | python3 "${SESSION_LOOKUP}" --workspace "${LOOKUP_WORKSPACE}")"
 fi
 
 if [[ "${HOOK_MODE}" == "session_start" ]]; then
