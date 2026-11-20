@@ -609,6 +609,500 @@ class TestProofFieldsRespectSlotAuthority:
         assert updated["client_session_id"] == SID
 
 
+BUNDLED = "mcp__plugin_unitares-governance_unitares-governance__"
+# Deep enough that json.loads fails on every supported Python (3.14 decodes
+# 100k levels; it still overflows its stack at a few million).
+_TOO_DEEP = 3_000_000
+
+
+def _deny_reason(result) -> str | None:
+    out = result.stdout.strip()
+    if not out:
+        return None
+    specific = json.loads(out)["hookSpecificOutput"]
+    if specific.get("permissionDecision") != "deny":
+        return None
+    return specific["permissionDecisionReason"]
+
+
+class TestBundledCleartextTransport:
+    """Proof never goes to the bundled server over non-loopback cleartext."""
+
+    @pytest.fixture(autouse=True)
+    def _no_anchor(self, monkeypatch):
+        for name in (
+            "UNITARES_ORCHESTRATED",
+            "UNITARES_CLIENT_SESSION_ID",
+            "UNITARES_ORCHESTRATED_OWNER_PID",
+            "UNITARES_HOOK_HOST_PID",
+        ):
+            monkeypatch.delenv(name, raising=False)
+
+    @pytest.mark.parametrize(
+        ("tool_input", "bound"),
+        [
+            ({}, True),  # the hook would inject the slot's client_session_id
+            ({"client_session_id": SID}, True),
+            ({"continuity_token": "v1.tok"}, False),
+        ],
+    )
+    def test_proof_bearing_call_is_denied(self, tmp_path, monkeypatch, tool_input, bound):
+        monkeypatch.setenv("UNITARES_SERVER_URL", "http://gov.example.test")
+        if bound:
+            _write_cache(tmp_path)
+        result = _run(_hook_input(f"{BUNDLED}sync_state", tool_input), tmp_path,
+                      host="claude")
+        reason = _deny_reason(result)
+        assert reason is not None
+        assert "cleartext HTTP" in reason
+        assert "gov.example.test" not in reason
+
+    def test_gateway_nested_proof_is_denied(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("UNITARES_SERVER_URL", "http://192.0.2.1:8767")
+        result = _run(_hook_input(f"{BUNDLED}use_tool", {
+            "tool_name": "identity",
+            "arguments": {"client_session_id": SID},
+        }), tmp_path, host="claude")
+        assert _deny_reason(result) is not None
+
+    @pytest.mark.parametrize(
+        ("suffix", "tool_input"),
+        [
+            ("sync_state", {"kwargs": {"client_session_id": SID}}),
+            ("sync_state", {"kwargs": json.dumps({"client_session_id": SID})}),
+            ("sync_state", {"kwargs": {"kwargs": {"continuity_token": "v1.tok"}}}),
+            ("use_tool", {"tool_name": "sync_state",
+                          "arguments": {"kwargs": {"client_session_id": SID}}}),
+            ("use_tool", {"tool_name": "sync_state",
+                          "arguments": json.dumps({"client_session_id": SID})}),
+            ("use_tool", {"tool_name": "sync_state",
+                          "arguments": [{"client_session_id": SID}]}),
+            ("use_tool", {"kwargs": {"tool_name": "sync_state",
+                                     "arguments": {"client_session_id": SID}}}),
+        ],
+    )
+    def test_wrapped_agent_proof_is_denied(self, tmp_path, monkeypatch, suffix, tool_input):
+        monkeypatch.setenv("UNITARES_SERVER_URL", "http://gov.example.test")
+        result = _run(_hook_input(f"{BUNDLED}{suffix}", tool_input), tmp_path,
+                      host="claude")
+        assert "cleartext HTTP" in (_deny_reason(result) or "")
+
+    @pytest.mark.parametrize(
+        "tool_input",
+        [
+            {"kwargs": {"query": "x"}},
+            {"kwargs": "not json"},
+            {"kwargs": json.dumps({"query": "x"})},
+        ],
+    )
+    def test_wrapped_proofless_call_passes(self, tmp_path, monkeypatch, tool_input):
+        monkeypatch.setenv("UNITARES_SERVER_URL", "http://gov.example.test")
+        result = _run(_hook_input(f"{BUNDLED}search_shared_memory", tool_input),
+                      tmp_path, host="claude")
+        assert result.returncode == 0
+        assert result.stdout.strip() == ""
+
+    def test_deny_survives_an_injection_error(self, monkeypatch, capsys):
+        import io
+
+        import governance_call_inject as inject
+
+        def _boom(*_args, **_kwargs):
+            raise RuntimeError("injection failed")
+
+        monkeypatch.setenv("UNITARES_SERVER_URL", "http://gov.example.test")
+        monkeypatch.setattr(inject, "_decide", _boom)
+        monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(_hook_input(
+            f"{BUNDLED}sync_state", {"client_session_id": SID}))))
+        assert inject.main(["--host", "claude"]) == 0
+        output = json.loads(capsys.readouterr().out)
+        specific = output["hookSpecificOutput"]
+        assert specific["permissionDecision"] == "deny"
+        assert "cleartext HTTP" in specific["permissionDecisionReason"]
+
+    def test_agent_supplied_proof_on_unlisted_suffix_is_denied(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("UNITARES_SERVER_URL", "http://gov.example.test")
+        result = _run(_hook_input(f"{BUNDLED}bind_session", {
+            "client_session_id": SID,
+        }), tmp_path, host="claude")
+        assert _deny_reason(result) is not None
+
+    @pytest.mark.parametrize(
+        "suffix", ["mark_response_complete", "get_dialectic_session", "some_future_tool"]
+    )
+    def test_bundled_tool_outside_the_named_list_is_routed_and_denied(
+        self, tmp_path, monkeypatch, suffix
+    ):
+        # Full tool advertisement exposes tools the governance matcher does
+        # not name. The transport check has to run for every tool on the
+        # bundled server, so the manifest must route all of them to the hook.
+        tool_name = f"{BUNDLED}{suffix}"
+        matchers = _pre_governance_matchers("hooks/claude-hooks.json", "claude")
+        assert any(re.fullmatch(m, tool_name) for m in matchers), matchers
+        assert any(re.search(m, tool_name) for m in matchers), matchers
+        monkeypatch.setenv("UNITARES_SERVER_URL", "http://gov.example.test")
+        result = _run(_hook_input(tool_name, {"agent_id": "agent-x"}), tmp_path,
+                      host="claude")
+        assert "cleartext HTTP" in (_deny_reason(result) or "")
+
+    def test_bundled_tool_outside_the_named_list_passes_on_secure_transport(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("UNITARES_SERVER_URL", "http://localhost:8767")
+        _write_cache(tmp_path)
+        result = _run(_hook_input(f"{BUNDLED}mark_response_complete",
+                                  {"agent_id": "agent-x"}), tmp_path, host="claude")
+        assert result.returncode == 0
+        assert result.stdout.strip() == ""
+
+    @pytest.mark.parametrize("depth", [11, 12, 40])
+    @pytest.mark.parametrize("key", ["kwargs", "arguments"])
+    def test_proof_below_the_scan_depth_is_denied(self, tmp_path, monkeypatch, depth, key):
+        # Nesting past the scan limit is not evidence of no proof: the body
+        # still crosses the wire before the server rejects it.
+        monkeypatch.setenv("UNITARES_SERVER_URL", "http://gov.example.test")
+        nested: object = {"continuity_token": "v1.tok"}
+        for _ in range(depth):
+            nested = {key: nested}
+        result = _run(_hook_input(f"{BUNDLED}use_tool", {
+            "tool_name": "sync_state", "arguments": nested,
+        }), tmp_path, host="claude")
+        assert "cleartext HTTP" in (_deny_reason(result) or "")
+
+    def test_proof_in_a_list_chain_below_the_scan_depth_is_denied(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("UNITARES_SERVER_URL", "http://gov.example.test")
+        nested: object = {"client_session_id": SID}
+        for _ in range(20):
+            nested = [nested]
+        result = _run(_hook_input(f"{BUNDLED}sync_state", {"kwargs": nested}),
+                      tmp_path, host="claude")
+        assert "cleartext HTTP" in (_deny_reason(result) or "")
+
+    @pytest.mark.parametrize(
+        "wrapped",
+        [
+            '{"continuity_token": "v1.tok"',  # truncated JSON
+            json.dumps(json.dumps({"client_session_id": SID})),  # double-encoded
+        ],
+        ids=["truncated-json", "double-encoded"],
+    )
+    def test_unparseable_string_container_with_proof_is_denied(
+        self, tmp_path, monkeypatch, wrapped
+    ):
+        monkeypatch.setenv("UNITARES_SERVER_URL", "http://gov.example.test")
+        result = _run(_hook_input(f"{BUNDLED}sync_state", {"kwargs": wrapped}),
+                      tmp_path, host="claude")
+        assert "cleartext HTTP" in (_deny_reason(result) or "")
+
+    @pytest.mark.parametrize(
+        "wrapped",
+        [
+            # Too deep for the JSON decoder on every supported Python (3.9
+            # stops near 1,000 levels, 3.14 near 500,000), yet inside the
+            # scan budget. No proof field name appears anywhere, so only the
+            # decoder failure itself can deny it.
+            "[" * 600_000 + "]" * 600_000,
+            '{"x": 1',  # truncated JSON
+            '{"n": ' + "1" * 5000 + "}",  # past Python's int-conversion limit
+            '["unterminated',
+        ],
+        ids=["too-deep-json", "truncated-json", "int-limit", "unterminated"],
+    )
+    def test_json_shaped_string_the_decoder_rejects_is_denied(
+        self, tmp_path, monkeypatch, wrapped
+    ):
+        # The decoder cannot show what such a string carries, so a skip would
+        # let a proof field through unseen; the scan has to deny instead.
+        import governance_call_inject as inject
+
+        assert not any(field in wrapped for field in inject.PROOF_FIELDS)
+        if wrapped.startswith('{"n"'):
+            if not hasattr(sys, "get_int_max_str_digits"):
+                pytest.skip("this Python has no int-conversion limit")
+            with pytest.raises(ValueError):
+                json.loads(wrapped)
+        assert inject._carries_proof({"kwargs": wrapped}) is True
+        monkeypatch.setenv("UNITARES_SERVER_URL", "http://gov.example.test")
+        result = _run(_hook_input(f"{BUNDLED}sync_state", {"kwargs": wrapped}),
+                      tmp_path, host="claude")
+        assert "cleartext HTTP" in (_deny_reason(result) or "")
+
+    @pytest.mark.parametrize(
+        "error", [ValueError, RecursionError, MemoryError, OverflowError, TypeError]
+    )
+    def test_any_decoder_exception_counts_as_proof(self, monkeypatch, error):
+        import governance_call_inject as inject
+
+        class _FailingJson:
+            @staticmethod
+            def loads(*_args, **_kwargs):
+                raise error("decoder failed")
+
+        monkeypatch.setattr(inject, "json", _FailingJson)
+        for text in ("[1]", ' {"a": 1}', '"quoted"'):
+            assert inject._carries_proof({"kwargs": text}) is True, text
+        # Strings that cannot be JSON are never handed to the decoder.
+        assert inject._carries_proof({"kwargs": "plain text"}) is False
+
+    @pytest.mark.parametrize(
+        "wrapped",
+        [
+            # a later duplicate key replaces the object that holds the proof
+            '{"a": {"client\\u005fsession_id": "x"}, "a": 1}',
+            # a duplicate of the proof key itself, escaped differently
+            '{"agent\\u005fuuid": "u", "agent\\u005fuuid": "v"}',
+            # proof under an escaped key, next to an unrelated huge integer
+            '{"continuity\\u005ftoken": "t", "n": ' + "1" * 5000 + "}",
+        ],
+        ids=["shadowed-object", "duplicate-key", "int-limit"],
+    )
+    def test_proof_a_lossy_decode_would_drop_is_denied(
+        self, tmp_path, monkeypatch, wrapped
+    ):
+        import governance_call_inject as inject
+
+        assert not any(field in wrapped for field in inject.PROOF_FIELDS)
+        assert inject._carries_proof({"note": wrapped}) is True
+        monkeypatch.setenv("UNITARES_SERVER_URL", "http://gov.example.test")
+        result = _run(_hook_input(f"{BUNDLED}sync_state", {"note": wrapped}),
+                      tmp_path, host="claude")
+        assert "cleartext HTTP" in (_deny_reason(result) or "")
+
+    @pytest.mark.parametrize(
+        "tool_input",
+        [
+            {"force_new": True, "parent_agent_id": "11111111-2222-3333-4444-555555555555"},
+            {"force_new": True, "spawn_reason": "subagent",
+             "parent_agent_id": "11111111-2222-3333-4444-555555555555"},
+        ],
+    )
+    def test_lineage_reference_alone_is_not_proof(self, tmp_path, monkeypatch, tool_input):
+        # parent_agent_id names a lineage parent, not this caller's identity.
+        import governance_call_inject as inject
+
+        assert inject._carries_proof(tool_input) is False
+        monkeypatch.setenv("UNITARES_SERVER_URL", "http://gov.example.test")
+        result = _run(_hook_input(f"{BUNDLED}start_session", tool_input), tmp_path,
+                      host="claude")
+        assert result.returncode == 0
+        assert result.stdout.strip() == ""
+
+    @pytest.mark.parametrize(
+        "tool_input",
+        [
+            {"parent_agent_id": "p", "agent_id": "a"},
+            {"parent_agent_id": json.dumps({"agent_id": "a"})},
+            {"parent_agent_id": "p", "note": "agent_id=a"},
+            {"note": "parent_agent_id=p agent_id=a"},
+            {"note": json.dumps({"parent_agent_id": "p", "agent_uuid": "u"})},
+            {"AGENT_ID": "a"},
+            {json.dumps({"Client_Session_Id": "x"}): 1},
+        ],
+        ids=["sibling-key", "json-value", "text-value", "same-text",
+             "json-sibling", "upper-case-key", "mixed-case-json-key"],
+    )
+    def test_proof_beside_a_lineage_reference_is_denied(
+        self, tmp_path, monkeypatch, tool_input
+    ):
+        monkeypatch.setenv("UNITARES_SERVER_URL", "http://gov.example.test")
+        result = _run(_hook_input(f"{BUNDLED}start_session", tool_input), tmp_path,
+                      host="claude")
+        assert "cleartext HTTP" in (_deny_reason(result) or "")
+
+    @pytest.mark.parametrize(
+        "tool_input",
+        [
+            # JSON strings inside wrapper lists
+            {"kwargs": [json.dumps({"client_session_id": SID})]},
+            {"tool_name": "sync_state",
+             "arguments": [json.dumps({"continuity_token": "v1.tok"})]},
+            # JSON strings under keys that are not wrappers
+            {"query": json.dumps({"client_session_id": SID})},
+            {"payload": {"inner": [json.dumps([{"agent_id": "a"}])]}},
+            # a JSON string inside a JSON string inside a list
+            {"kwargs": [json.dumps(json.dumps({"agent_uuid": "u"}))]},
+            # the field name only appears once the string is decoded
+            {"note": '{"client\\u005fsession_id": "agent-x"}'},
+            # proof under a key that is itself a JSON object
+            {json.dumps({"continuity_token": "v1.tok"}): 1},
+            # proof in a non-JSON string anywhere in the tree
+            {"items": [["continuity_token=v1.tok"]]},
+        ],
+        ids=[
+            "kwargs-list-json", "arguments-list-json", "plain-key-json",
+            "nested-list-json", "double-encoded-in-list", "escaped-name",
+            "json-key", "text-in-list",
+        ],
+    )
+    def test_proof_anywhere_in_the_tree_is_denied(self, tmp_path, monkeypatch, tool_input):
+        monkeypatch.setenv("UNITARES_SERVER_URL", "http://gov.example.test")
+        result = _run(_hook_input(f"{BUNDLED}use_tool", tool_input), tmp_path,
+                      host="claude")
+        assert "cleartext HTTP" in (_deny_reason(result) or "")
+
+    def test_tree_past_the_scan_budget_is_denied(self, tmp_path, monkeypatch):
+        import governance_call_inject as inject
+
+        monkeypatch.setenv("UNITARES_SERVER_URL", "http://gov.example.test")
+        big = {"items": ["x" * 100] * (inject._PROOF_SCAN_BUDGET // 100 + 1)}
+        assert inject._carries_proof(big) is True
+        assert inject._carries_proof({"items": ["x" * 100] * 10}) is False
+
+    def test_scan_error_counts_as_proof(self, monkeypatch, capsys):
+        import io
+
+        import governance_call_inject as inject
+
+        def _boom(*_args, **_kwargs):
+            raise RuntimeError("scan failed")
+
+        monkeypatch.setenv("UNITARES_SERVER_URL", "http://gov.example.test")
+        monkeypatch.setattr(inject, "_carries_proof", _boom)
+        monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(_hook_input(
+            f"{BUNDLED}search_shared_memory", {"query": "x"}))))
+        assert inject.main(["--host", "claude"]) == 0
+        specific = json.loads(capsys.readouterr().out)["hookSpecificOutput"]
+        assert specific["permissionDecision"] == "deny"
+
+    @pytest.mark.parametrize(
+        "tool_name",
+        [
+            f"{BUNDLED}sync_state__x",
+            f"{BUNDLED}a__b__c",
+            f"{BUNDLED}__sync_state",
+            f"{BUNDLED.upper()}sync_state",
+        ],
+    )
+    def test_bundled_prefix_decides_the_server(self, tmp_path, monkeypatch, tool_name):
+        # Claude names tools mcp__<server>__<tool>; the tool part may itself
+        # contain "__", so the server is the known prefix, not a split.
+        matchers = _pre_governance_matchers("hooks/claude-hooks.json", "claude")
+        if tool_name.startswith(BUNDLED):
+            assert any(re.fullmatch(m, tool_name) for m in matchers), matchers
+        monkeypatch.setenv("UNITARES_SERVER_URL", "http://gov.example.test")
+        result = _run(_hook_input(tool_name, {"agent_id": "agent-x"}), tmp_path,
+                      host="claude")
+        assert "cleartext HTTP" in (_deny_reason(result) or "")
+
+    @pytest.mark.parametrize(
+        "server_url",
+        ["http://127.1:8767", "http://0x7f.0.0.1:8767", "http://2130706433:8767"],
+    )
+    def test_loopback_shorthand_keeps_injection(self, tmp_path, monkeypatch, server_url):
+        # Claude's URL parser resolves these to 127.0.0.1.
+        monkeypatch.setenv("UNITARES_SERVER_URL", server_url)
+        _write_cache(tmp_path)
+        result = _run(_hook_input(f"{BUNDLED}sync_state", {}), tmp_path, host="claude")
+        updated = _updated_input(result)
+        assert updated is not None
+        assert updated["client_session_id"] == SID
+
+    def test_unreadable_payload_is_denied_whatever_it_names(self, tmp_path, monkeypatch):
+        # A payload the hook cannot read cannot be attributed to a server, so
+        # it is denied while the bundled transport is insecure.
+        monkeypatch.setenv("UNITARES_SERVER_URL", "http://gov.example.test")
+        payload = json.dumps(_hook_input("mcp__PLUGIN_x__sync_state", {
+            "client_session_id": SID, "junk": "PLACEHOLDER",
+        })).replace('"PLACEHOLDER"', "[" * _TOO_DEEP + "]" * _TOO_DEEP)
+        result = subprocess.run(
+            [str(HOOK), "--host", "claude"], input=payload, text=True,
+            capture_output=True, timeout=10, cwd=str(tmp_path),
+        )
+        assert "cleartext HTTP" in (_deny_reason(result) or "")
+
+    def test_payload_too_deep_for_the_hook_parser_is_denied(self, tmp_path, monkeypatch):
+        # Proof sits at the top level, but unrelated nesting makes the whole
+        # hook payload unparseable. That must not turn into a silent pass.
+        monkeypatch.setenv("UNITARES_SERVER_URL", "http://gov.example.test")
+        payload = json.dumps(_hook_input(f"{BUNDLED}sync_state", {
+            "client_session_id": SID, "junk": "PLACEHOLDER",
+        })).replace('"PLACEHOLDER"', "[" * _TOO_DEEP + "]" * _TOO_DEEP)
+        result = subprocess.run(
+            [str(HOOK), "--host", "claude"], input=payload, text=True,
+            capture_output=True, timeout=10, cwd=str(tmp_path),
+        )
+        assert "cleartext HTTP" in (_deny_reason(result) or "")
+
+    def test_unparseable_payload_on_secure_transport_still_passes(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("UNITARES_SERVER_URL", "http://localhost:8767")
+        payload = json.dumps(_hook_input(f"{BUNDLED}sync_state", {
+            "junk": "PLACEHOLDER",
+        })).replace('"PLACEHOLDER"', "[" * _TOO_DEEP + "]" * _TOO_DEEP)
+        result = subprocess.run(
+            [str(HOOK), "--host", "claude"], input=payload, text=True,
+            capture_output=True, timeout=10, cwd=str(tmp_path),
+        )
+        assert result.returncode == 0
+        assert result.stdout.strip() == ""
+
+    def test_proofless_call_passes(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("UNITARES_SERVER_URL", "http://gov.example.test")
+        result = _run(_hook_input(f"{BUNDLED}search_shared_memory", {
+            "query": "x",
+        }), tmp_path, host="claude")
+        assert result.returncode == 0
+        assert result.stdout.strip() == ""
+
+    @pytest.mark.parametrize(
+        "server_url",
+        [
+            "http://gov.example.test\\@localhost:8767",
+            "http://gov.example.test@localhost:8767",
+        ],
+    )
+    def test_url_whose_host_parsers_disagree_on_is_insecure(
+        self, tmp_path, monkeypatch, server_url
+    ):
+        # Claude's WHATWG parser connects to gov.example.test for the first
+        # form; Python's urlsplit would name localhost.
+        monkeypatch.setenv("UNITARES_SERVER_URL", server_url)
+        result = _run(_hook_input(f"{BUNDLED}sync_state", {"client_session_id": SID}),
+                      tmp_path, host="claude")
+        assert "cleartext HTTP" in (_deny_reason(result) or "")
+
+    @pytest.mark.parametrize(
+        "server_url",
+        [
+            None,
+            "",
+            "https://gov.example.test",
+            "http://localhost:8767",
+            "http://127.0.0.1:8767",
+            "http://[::1]:8767",
+        ],
+    )
+    def test_secure_transport_keeps_injection(self, tmp_path, monkeypatch, server_url):
+        if server_url is None:
+            monkeypatch.delenv("UNITARES_SERVER_URL", raising=False)
+        else:
+            monkeypatch.setenv("UNITARES_SERVER_URL", server_url)
+        _write_cache(tmp_path)
+        result = _run(_hook_input(f"{BUNDLED}sync_state", {}), tmp_path, host="claude")
+        updated = _updated_input(result)
+        assert updated is not None
+        assert updated["client_session_id"] == SID
+
+    @pytest.mark.parametrize(
+        "tool_name",
+        ["mcp__unitares__sync_state", "mcp__unitares-governance__sync_state"],
+    )
+    def test_other_aliases_are_unchanged(self, tmp_path, monkeypatch, tool_name):
+        monkeypatch.setenv("UNITARES_SERVER_URL", "http://gov.example.test")
+        _write_cache(tmp_path)
+        result = _run(_hook_input(tool_name, {}), tmp_path, host="claude")
+        updated = _updated_input(result)
+        assert updated is not None
+        assert updated["client_session_id"] == SID
+
+    def test_existing_deny_reason_is_kept(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("UNITARES_SERVER_URL", "http://gov.example.test")
+        _write_cache(tmp_path)
+        result = _run(_hook_input(f"{BUNDLED}sync_state", {
+            "client_session_id": "agent-foreign-111",
+        }), tmp_path, host="claude")
+        assert "protected current-slot identity" in (_deny_reason(result) or "")
+
+
 class TestFailOpen:
 
     def test_no_cache_no_output(self, tmp_path):

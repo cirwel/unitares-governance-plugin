@@ -19,6 +19,32 @@ deployment, disable the bundled transport and register the HTTPS endpoint with
 Claude using `UNITARES_HTTP_API_TOKEN`. Governance REST helpers reject a bearer
 on non-loopback HTTP before opening a socket.
 
+Use `https://` or a loopback address. When `UNITARES_SERVER_URL` is cleartext
+HTTP to any other host, the hooks send no governance data to it, and the
+PreToolUse hook denies any call to the bundled Claude server whose input names
+`client_session_id`, `continuity_token`, `agent_uuid` or `agent_id`, whether the
+hook would add the field or the agent supplied it. The hook walks the whole
+input: every key, value and list item, and every string that starts with
+`{`, `[` or `"`, decoded with duplicate keys kept and walked again, so an
+escaped key name is compared after decoding. A name in plain text counts too,
+unless a letter, digit or underscore directly precedes it, as in
+`parent_agent_id`: a lineage reference alone is not proof. The Claude hook manifest routes every tool on
+the bundled server to that check, not only the named governance tools, and the
+hook recognizes the server by its tool-name prefix. An input too large for the
+scan budget, a string starting with `{`, `[` or `"` that the JSON decoder
+rejects for any reason, and a payload the hook cannot read are denied as if
+they carried proof.
+
+Loopback means what Claude's URL parser (the WHATWG URL Standard) resolves to
+a loopback address, so IPv4 shorthand such as `http://127.1:8767` counts.
+Hosts with percent-escapes or non-ASCII characters do not count, and a URL
+with a backslash, userinfo, whitespace or control characters counts as
+insecure, because parsers can disagree about its host. The Python REST helpers
+accept only `localhost` and literal loopback addresses. Calls that never name
+those fields still pass. The check covers those field names, not a proof
+value pasted into free text without one, and like the other hooks it fails
+open if the hook itself cannot run.
+
 The bundled Codex `.codex-mcp.json` is deliberately fixed to unauthenticated
 `http://localhost:8767/mcp/` and does not declare a bearer-token environment
 variable. For a hosted or authenticated Codex server, disable that bundled
