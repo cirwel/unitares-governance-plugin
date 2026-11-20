@@ -208,19 +208,21 @@ Preferred cache path:
 
 - `.unitares/session-<slot>.json`
 
-Flat `.unitares/session.json` is a legacy/shared artifact. Use `scripts/session_cache.py list --workspace "$PWD"` to discover recent slots, then read a specific cache with `scripts/session_cache.py get session --slot=<slot>`.
+Flat `.unitares/session.json` is a legacy/shared artifact. `scripts/session_cache.py list --workspace "$PWD"` inventories slots, and `scripts/session_cache.py get session --slot=<slot>` reads one slot as lineage context only.
 
 Shared helper:
 
 - `scripts/session_cache.py`
 
-Treat this as local runtime state. It should not be used as a source of truth over the server, but it is the first place to look for:
-
-- `client_session_id`
-- `uuid`
-- `agent_id`
-- `display_name`
-- `session_resolution_source`
+Treat this as local runtime state, never as a source of truth over the server.
+Workspace slot caches are lineage hints, not identity proof: their `uuid`,
+`agent_id` and `display_name` can name a predecessor for `/governance-start`,
+but any process can write them. Proof of the current session is only the
+`client_session_id` returned to this live process by its own
+`start_session`/`onboard` response, or the binding a trusted hook injects for
+this exact host slot. Never copy a `client_session_id` out of a slot cache read,
+another slot, or the inventory. When this process has no known binding, use
+`/governance-start`.
 
 Do not persist `continuity_token` in this cache. v2 slot caches are lineage and
 transport-continuity hints only; a token belongs only to the live response that
