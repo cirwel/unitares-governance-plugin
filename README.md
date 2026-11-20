@@ -173,6 +173,18 @@ scripts/u-run --class goose -- goose run
 The wrapper manages a sidecar for the child and records an exit observation
 from wall time and exit status. See [the wrapper guide](docs/adapters.md#plain-cli-wrapper-u-run).
 
+For a chat bridge or orchestrator that starts a new CLI process for every
+turn, start each turn through the thread launcher so the conversation keeps one
+identity:
+
+```bash
+scripts/thread-anchor-exec <thread-id> -- claude -p "$PROMPT"
+```
+
+The launcher names the conversation. The identity is bound when the agent
+calls `start_session()`, or by the hooks when `UNITARES_AUTO_ONBOARD=on`. See
+[chat bridges and orchestrators](docs/orchestrators.md).
+
 Hermes-native lifecycle bindings live in
 [`unitares-host-adapter`](https://github.com/cirwel/unitares-host-adapter).
 Adding a direct MCP connection to Hermes exposes tools but does not by itself
