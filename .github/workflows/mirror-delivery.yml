@@ -46,6 +46,8 @@ jobs:
           permission-contents: write
           permission-pull-requests: write
           permission-actions: read
+          # Opens and closes the one stuck-mirror issue; see report_stuck.
+          permission-issues: write
       - name: Verify mirror and finish delivery
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}

@@ -1,5 +1,6 @@
 """Exercise mirror proofs with real Git objects; writes use an in-memory API."""
 import copy
+from datetime import datetime, timedelta, timezone
 import hashlib
 import importlib.util
 from pathlib import Path
@@ -252,6 +253,169 @@ def test_current_base_race_never_writes(monkeypatch, trees):
     assert not [c for c in calls if c[1] != "GET"]
 
 
+class Tracker:
+    """In-memory issues API: one mirror PR whose head was committed `age` ago."""
+
+    def __init__(self, monkeypatch, *, age=0, issues=(), fail_issues=False,
+                 listed=None, labels=(), head="head"):
+        self.calls, self.issues, self.fail_issues = [], list(issues), fail_issues
+        self.listed = [pr("head", "base") | {"number": 12}] if listed is None else listed
+        self.current = pr(head, "base") | {"labels": [{"name": n} for n in labels]}
+        stamp = datetime.now(timezone.utc) - timedelta(seconds=age)
+        self.date = stamp.strftime("%Y-%m-%dT%H:%M:%SZ")
+        monkeypatch.setattr(delivery, "api", self.api)
+
+    def api(self, path, method="GET", body=None):
+        self.calls.append((path, method, body))
+        if path.startswith("pulls?"):
+            return self.listed
+        if path == "pulls/12":
+            return self.current
+        if path.startswith("commits/"):
+            return {"commit": {"committer": {"date": self.date}}}
+        if self.fail_issues and "issues" in path:
+            raise self.fail_issues
+        if path.startswith("issues?"):
+            return self.issues + [
+                open_issue(RED) | {"number": 99, "pull_request": {}},
+                open_issue(RED) | {"number": 98, "user": {"type": "User"}},
+                open_issue(RED) | {"number": 97, "title": "Notes on the stuck mirror"}]
+        if path == "issues" and method == "POST":
+            return {"number": 7}
+        return {}
+
+    @property
+    def writes(self):
+        return [c for c in self.calls if c[1] != "GET"]
+
+
+def hold_with(monkeypatch, exc):
+    def deliver(number, *, apply):
+        raise exc
+    monkeypatch.setattr(delivery, "deliver", deliver)
+
+
+RED = "CI failed on the current base; the mirror needs a fix on master"
+
+
+def test_red_mirror_on_current_base_opens_one_issue(monkeypatch, capsys):
+    tracker = Tracker(monkeypatch)
+    hold_with(monkeypatch, delivery.Stuck(RED))
+    assert delivery.main(["--apply"]) == 1
+    created = [c for c in tracker.writes if c[0] == "issues"]
+    assert len(created) == 1
+    assert created[0][2]["labels"] == [delivery.STUCK_LABEL]
+    assert delivery.STUCK_MARKER in created[0][2]["body"]
+    assert "#12" in created[0][2]["body"] and RED in created[0][2]["body"]
+    assert "Opened stuck-mirror issue #7" in capsys.readouterr().out
+
+
+def open_issue(reason, head="head"):
+    return {"number": 7, "title": delivery.STUCK_TITLE, "user": {"type": "Bot"},
+            "body": f"{delivery.STUCK_MARKER}\n<!-- stuck-key: {head}:{reason} -->\n"}
+
+
+def test_unchanged_stuck_mirror_writes_nothing_on_later_runs(monkeypatch):
+    tracker = Tracker(monkeypatch, issues=[open_issue(RED)])
+    hold_with(monkeypatch, delivery.Stuck(RED))
+    assert delivery.main(["--apply"]) == 1
+    assert not tracker.writes
+
+
+def test_new_reason_or_head_rewrites_the_open_issue(monkeypatch):
+    tracker = Tracker(monkeypatch, issues=[open_issue(RED, head="older")])
+    hold_with(monkeypatch, delivery.Stuck(RED))
+    delivery.main(["--apply"])
+    assert [(c[0], c[1]) for c in tracker.writes] == [("issues/7", "PATCH")]
+    assert "stuck-key: head:" in tracker.writes[0][2]["body"]
+
+
+@pytest.mark.parametrize("age,reported", [
+    (60, False), (delivery.STUCK_AFTER_SECONDS + 60, True)])
+def test_ordinary_hold_is_reported_only_once_the_head_has_sat(monkeypatch, age, reported):
+    tracker = Tracker(monkeypatch, age=age)
+    hold_with(monkeypatch, delivery.Hold("The latest CI run for this exact PR head has not passed"))
+    assert delivery.main(["--apply"]) == 1
+    assert bool(tracker.writes) is reported
+
+
+def test_maintainer_hold_label_is_never_reported(monkeypatch):
+    tracker = Tracker(monkeypatch, age=delivery.STUCK_AFTER_SECONDS * 10)
+    hold_with(monkeypatch, delivery.Vetoed("A maintainer hold label is present"))
+    assert delivery.main(["--apply"]) == 1
+    assert not tracker.writes
+
+
+def test_hold_label_raises_the_unreported_kind(monkeypatch):
+    labelled = pr("head", "base") | {"labels": [{"name": "automerge-hold"}]}
+    monkeypatch.setattr(delivery, "api", lambda *a, **k: labelled)
+    with pytest.raises(delivery.Vetoed):
+        delivery.deliver(12, apply=True)
+
+
+def test_failed_ci_on_current_base_is_the_immediately_reported_kind(monkeypatch, trees):
+    setup_api(monkeypatch, trees, runs=failed(trees[1]))
+    with pytest.raises(delivery.Stuck):
+        delivery.deliver(12, apply=True)
+
+
+@pytest.mark.parametrize("message,closes", [
+    ("Merged #12: canonical a, PR head b, merge c", True),
+    ("Updated #12 to the current base; waiting for new CI before merging", False),
+])
+def test_issue_closes_when_the_mirror_lands_not_when_it_is_retried(monkeypatch, message, closes):
+    tracker = Tracker(monkeypatch, issues=[open_issue(RED)])
+    monkeypatch.setattr(delivery, "deliver", lambda number, *, apply: message)
+    assert delivery.main(["--apply"]) == 0
+    expected = [("issues/7", "PATCH", {"state": "closed", "state_reason": "completed"})]
+    assert tracker.writes == (expected if closes else [])
+
+
+def stuck_on(head):
+    exc = delivery.Stuck(RED)
+    exc.head = head
+    return exc
+
+
+def test_failure_on_a_replaced_head_is_left_to_the_next_run(monkeypatch):
+    tracker = Tracker(monkeypatch, head="newer")
+    hold_with(monkeypatch, stuck_on("head"))
+    assert delivery.main(["--apply"]) == 1
+    assert not tracker.writes
+
+
+def test_hold_label_added_after_delivery_read_is_respected(monkeypatch):
+    tracker = Tracker(monkeypatch, labels=["do-not-merge"])
+    hold_with(monkeypatch, stuck_on("head"))
+    assert delivery.main(["--apply"]) == 1
+    assert not tracker.writes
+
+
+@pytest.mark.parametrize("listed,closes", [
+    ([], True),
+    ([pr("head", "base") | {"number": 12, "draft": True}], False),
+])
+def test_issue_closes_on_an_empty_branch_not_on_a_drafted_mirror(monkeypatch, listed, closes):
+    tracker = Tracker(monkeypatch, issues=[open_issue(RED)], listed=listed)
+    assert delivery.main(["--apply"]) == 0
+    assert bool(tracker.writes) is closes
+
+
+def test_dry_run_never_reads_or_writes_issues(monkeypatch):
+    tracker = Tracker(monkeypatch, age=delivery.STUCK_AFTER_SECONDS * 10)
+    hold_with(monkeypatch, delivery.Stuck(RED))
+    assert delivery.main([]) == 1
+    assert not [c for c in tracker.calls if "issues" in c[0] or "commits" in c[0]]
+
+
+@pytest.mark.parametrize("error", [delivery.Hold("GitHub issues failed"), OSError("no gh")])
+def test_issue_failure_does_not_change_the_delivery_result(monkeypatch, capsys, error):
+    Tracker(monkeypatch, fail_issues=error)
+    monkeypatch.setattr(delivery, "deliver", lambda number, *, apply: "Merged #12: a")
+    assert delivery.main(["--apply"]) == 0
+    assert "could not be read or written" in capsys.readouterr().out
+
+
 def test_privileged_workflow_uses_only_trusted_code_and_scoped_token():
     workflow = yaml.safe_load((ROOT / ".github/workflows/mirror-delivery.yml").read_text())
     triggers = workflow.get("on", workflow.get(True))
@@ -264,4 +428,5 @@ def test_privileged_workflow_uses_only_trusted_code_and_scoped_token():
     assert checkout["with"]["persist-credentials"] is False
     assert app["with"]["repositories"] == "unitares-governance-plugin"
     assert "permission-workflows" not in app["with"]
+    assert app["with"]["permission-issues"] == "write"
     assert execute["run"] == "python3 scripts/dev/merge-skill-mirror.py --apply"
