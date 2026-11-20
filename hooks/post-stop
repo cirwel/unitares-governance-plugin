@@ -337,13 +337,15 @@ if [[ -n "${CSID:-}" && -f "${PLUGIN_ROOT}/scripts/binding_activity.py" ]]; then
   # This turn keeps the binding only if a re-read after the mark returns the
   # very binding read before it, still usable. A binding just marked
   # prior_process reads back empty; a later turn's binding is not this
-  # turn's; an idle binding the mark could not write (status 3) is still the
-  # earlier process's; and an empty or failed re-read proves nothing. Each
-  # of those sends this turn to the identity-free substrate floor.
+  # turn's; a mark that exited non-zero (status 3: an idle binding it could
+  # not write; anything else: it failed before deciding) leaves the binding
+  # unchecked, possibly still the earlier process's; and an empty or failed
+  # re-read proves nothing. Each of those sends this turn to the
+  # identity-free substrate floor.
   CSID=""
   UUID=""
   eval "$(printf '%s' "${PAYLOAD}" | python3 "${SESSION_LOOKUP}" --workspace "${LOOKUP_WORKSPACE}" 2>/dev/null)"
-  if [[ "${MARK_STATUS}" == "3" || "${CSID}" != "${MARKED_CSID}" || "${UUID}" != "${MARKED_UUID}" ]]; then
+  if [[ "${MARK_STATUS}" != "0" || "${CSID}" != "${MARKED_CSID}" || "${UUID}" != "${MARKED_UUID}" ]]; then
     CSID=""
     UUID=""
   fi

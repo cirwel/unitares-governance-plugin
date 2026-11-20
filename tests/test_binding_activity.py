@@ -321,3 +321,13 @@ def test_the_cli_exits_3_only_for_an_idle_unmarked_binding(tmp_path, monkeypatch
         monkeypatch.setattr(binding_activity, "mark", lambda *_a, _r=result, **_k: _r)
         monkeypatch.setattr(sys, "stdin", __import__("io").StringIO(_payload()))
         assert binding_activity.main(["mark", "--workspace", str(tmp_path)]) == code
+
+
+def test_the_cli_exits_non_zero_when_the_mark_fails(tmp_path, monkeypatch):
+    # The Stop hook keeps a binding only after a mark that exited 0.
+    def broken(*_args, **_kwargs):
+        raise RuntimeError("mark failed")
+
+    monkeypatch.setattr(binding_activity, "mark", broken)
+    monkeypatch.setattr(sys, "stdin", __import__("io").StringIO(_payload()))
+    assert binding_activity.main(["mark", "--workspace", str(tmp_path)]) != 0

@@ -1106,3 +1106,16 @@ def test_a_failed_reread_after_the_mark_withholds_the_evidence(tmp_path, host):
     assert (tmp_path / "shim-state").exists()
     assert json.loads(cache.read_text())["prior_process"] is True
     _assert_no_evidence_under(old_csid)
+
+
+@pytest.mark.parametrize("host", ["claude", "codex"])
+@pytest.mark.parametrize("status", [1, 2, 127])
+def test_a_mark_helper_that_fails_withholds_the_evidence(tmp_path, host, status):
+    """The mark helper exits non-zero before it records the idle binding as
+    inherited. The binding still reads back unchanged, but the hook cannot
+    know it was checked, so this turn's evidence goes to the floor."""
+    shim = f'case "$1" in *binding_activity.py) exit {status};; esac'
+    cache, old_csid = _idle_stop(tmp_path, host, python_shim=shim)
+
+    assert json.loads(cache.read_text()).get("prior_process") is not True
+    _assert_no_evidence_under(old_csid)

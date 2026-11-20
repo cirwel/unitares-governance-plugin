@@ -206,7 +206,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         result = mark(args.workspace, sys.stdin.read())
     except Exception:
-        return 0
+        # A failed mark checked nothing; hooks/post-stop keeps the binding
+        # only after a 0.
+        return 1
     # 3 tells hooks/post-stop that the binding is idle but still unmarked.
     return 3 if result == "idle_unmarked" else 0
 
