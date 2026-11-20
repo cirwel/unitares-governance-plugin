@@ -608,15 +608,25 @@ fi
 # Ping governance server
 # ---------------------------------------------------------------------------
 # The body is capped at 64 KiB. A real /health answer is a small JSON object;
-# a larger one fails the probe (pipefail carries curl's or head's failure into
-# HEALTH_EXIT) and counts as unreachable instead of being buffered for the
-# whole timeout. Keep the `|| HEALTH_EXIT=$?` form: under `set -e` a bare
-# failing assignment would abort the hook.
+# a larger one fails the probe (pipefail carries the failure into HEALTH_EXIT)
+# and counts as unreachable instead of being buffered for the whole timeout.
+# The reader takes one byte past the cap and fails when it gets it, because
+# curl before 8.4 ignores --max-filesize when the response declares no length
+# and can exit 0 after writing a body only slightly over the cap. Keep the
+# `|| HEALTH_EXIT=$?` form: under `set -e` a bare failing assignment would
+# abort the hook.
 HEALTH_MAX_BYTES=65536
 HEALTH_EXIT=0
 HEALTH_STATUS=$(curl -sS --max-time 3 --max-filesize "${HEALTH_MAX_BYTES}" \
   "${SERVER_URL}/health" 2> >(append_health_log) \
-  | head -c "${HEALTH_MAX_BYTES}") || HEALTH_EXIT=$?
+  | python3 -c '
+import sys
+limit = int(sys.argv[1])
+body = sys.stdin.buffer.read(limit + 1)
+if len(body) > limit:
+    sys.exit(63)
+sys.stdout.buffer.write(body)
+' "${HEALTH_MAX_BYTES}") || HEALTH_EXIT=$?
 if [[ "${HEALTH_EXIT}" -ne 0 ]]; then
   HEALTH_STATUS=""
 fi

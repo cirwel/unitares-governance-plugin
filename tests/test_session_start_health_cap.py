@@ -123,3 +123,52 @@ def test_cleartext_non_loopback_server_url_is_warned(tmp_path):
 def test_loopback_server_url_is_not_warned(tmp_path):
     stdout, _ = _run_with_health(tmp_path, body_size=18, declare_length=True)
     assert "UNITARES_SERVER_URL is not https://" not in _context(stdout)
+
+
+def _curl_ignoring_max_filesize(tmp_path: Path) -> str:
+    """A PATH with a curl that drops --max-filesize, as curl before 8.4 does
+    for a response that declares no length."""
+    shim_dir = tmp_path / "old-curl"
+    shim_dir.mkdir()
+    shim = shim_dir / "curl"
+    shim.write_text(
+        "#!/bin/sh\n"
+        "skip=0\n"
+        "for arg do\n"
+        "  shift\n"
+        "  if [ \"$skip\" = 1 ]; then skip=0; continue; fi\n"
+        "  if [ \"$arg\" = --max-filesize ]; then skip=1; continue; fi\n"
+        "  set -- \"$@\" \"$arg\"\n"
+        "done\n"
+        "exec /usr/bin/curl \"$@\"\n"
+    )
+    shim.chmod(0o755)
+    return f"{shim_dir}:/usr/bin:/bin:/usr/local/bin"
+
+
+@pytest.mark.parametrize("overshoot", [1, 100, 4096])
+def test_slightly_oversized_body_fails_even_when_curl_ignores_the_cap(
+    tmp_path, overshoot
+):
+    _HealthHandler.body_size = CAP + overshoot
+    _HealthHandler.declare_length = False
+    srv = _ReusableTCPServer(("127.0.0.1", 0), _HealthHandler)
+    port = srv.server_address[1]
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    try:
+        stdout, _ = _run_hook(
+            tmp_path,
+            f"http://127.0.0.1:{port}",
+            extra_env={
+                "UNITARES_AUTO_ONBOARD": "off",
+                "UNITARES_EAGER_BIND": "off",
+                "PATH": _curl_ignoring_max_filesize(tmp_path),
+            },
+        )
+    finally:
+        srv.shutdown()
+        thread.join(timeout=2)
+    assert "UNITARES Governance: OFFLINE" in _context(stdout)
+    line = _health_log_line(tmp_path)
+    assert " len=0 " in line
