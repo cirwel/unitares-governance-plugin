@@ -85,13 +85,88 @@ def _is_loopback_host(host: str) -> bool:
         return False
 
 
+def _whatwg_ipv4_number(part: str) -> int | None:
+    """One dotted part, read as the WHATWG IPv4 number parser reads it."""
+    radix = 10
+    if part[:2] in {"0x", "0X"}:
+        part, radix = part[2:], 16
+    elif len(part) > 1 and part.startswith("0"):
+        part, radix = part[1:], 8
+    if not part:
+        return 0
+    digits = "0123456789abcdef"[:radix]
+    if any(ch not in digits for ch in part.lower()):
+        return None
+    return int(part, radix)
+
+
+def _whatwg_ipv4_address(host: str) -> ipaddress.IPv4Address | None:
+    """The address the WHATWG URL parser reads ``host`` as, or None.
+
+    Follows the URL Standard's IPv4 parser: one to four dotted parts, each
+    decimal, ``0x`` hex or leading-zero octal, an optional trailing dot, and
+    a last part that fills the remaining bytes, so ``127.1`` is 127.0.0.1.
+    Returns None for anything else, including hosts that WHATWG would reject
+    outright; those are not loopback either way.
+    """
+    parts = host.split(".")
+    if len(parts) > 1 and parts[-1] == "":
+        parts.pop()
+    if not 1 <= len(parts) <= 4 or any(part == "" for part in parts):
+        return None
+    numbers = [_whatwg_ipv4_number(part) for part in parts]
+    if any(number is None for number in numbers):
+        return None
+    *leading, last = numbers
+    if any(number > 255 for number in leading) or last >= 256 ** (5 - len(numbers)):
+        return None
+    value = last
+    for index, number in enumerate(leading):
+        value += number * 256 ** (3 - index)
+    return ipaddress.IPv4Address(value)
+
+
+def _is_whatwg_loopback_host(url: str) -> bool:
+    """Whether the WHATWG URL parser resolves ``url``'s host to loopback.
+
+    Claude's MCP transport parses the URL this way and connects to the
+    normalized host, so IPv4 shorthand such as ``127.1`` reaches 127.0.0.1.
+    Only plain ASCII hosts are read: percent-escapes and non-ASCII hosts go
+    through decoding and Unicode mapping steps that Python does not share
+    with WHATWG, so they are not treated as loopback.
+    """
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        host = parsed.hostname
+    except ValueError:
+        return False
+    if not host or not host.isascii() or "%" in host:
+        return False
+    host = host.lower()
+    if host == "localhost":
+        return True
+    if parsed.netloc.startswith("["):
+        try:
+            return ipaddress.IPv6Address(host).is_loopback
+        except ValueError:
+            return False
+    address = _whatwg_ipv4_address(host)
+    return address is not None and address.is_loopback
+
+
 def is_secure_governance_url(url: str) -> bool:
-    """True when ``url`` is HTTPS, or cleartext HTTP to a loopback host."""
+    """True when ``url`` is HTTPS, or cleartext HTTP that WHATWG reads as loopback.
+
+    This models Claude's MCP transport, which parses URLs with the WHATWG
+    parser. Python's own REST helpers use ``_validate_governance_transport``
+    instead, which stays strict: urllib passes the host string to
+    getaddrinfo, whose handling of IPv4 shorthand varies by platform.
+    """
     origin = _http_origin(url)
     if origin is None:
         return False
-    scheme, host, _port = origin
-    return scheme == "https" or (scheme == "http" and _is_loopback_host(host))
+    scheme, _host, _port = origin
+    return scheme == "https" or (scheme == "http" and _is_whatwg_loopback_host(url))
 
 
 def _validate_governance_transport(
