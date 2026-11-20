@@ -496,12 +496,46 @@ def _deadline_timeout(deadline: float | None, cap: float) -> float | None:
     return min(cap, remaining)
 
 
+class _NamespaceProbeError(RuntimeError):
+    """A path's repository/worktree namespace could not be verified."""
+
+
+# Returned by _worktree_roots only when the path is verifiably outside every
+# git repository. ``None`` still means the probe failed or was cut short.
+_NOT_A_REPO = object()
+
+
+def _has_dotgit_ancestor(probe: Path) -> bool:
+    for directory in (probe, *probe.parents):
+        try:
+            os.lstat(directory / ".git")
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        except OSError:
+            return True  # cannot tell; treat as a possible repository
+        return True
+    return False
+
+
+def _verified_not_a_repo(probe: Path, stderr: str) -> bool:
+    if os.environ.get("GIT_DIR"):
+        return False
+    lowered = stderr.lower()
+    if "not a git repository" not in lowered or "dubious ownership" in lowered:
+        return False
+    return not _has_dotgit_ancestor(probe)
+
+
 def _worktree_roots(
     start: Path,
     *,
     timeout_s: float = 0.75,
-) -> tuple[Path, Path] | None:
-    """Return (worktree root, repository-unique file namespace root)."""
+) -> tuple[Path, Path] | object | None:
+    """Return (worktree root, repository-unique file namespace root).
+
+    Returns ``_NOT_A_REPO`` when the path is verifiably outside any git
+    repository and ``None`` when the probe failed, timed out, or git refused.
+    """
     import subprocess
 
     if timeout_s <= 0:
@@ -515,8 +549,11 @@ def _worktree_roots(
             capture_output=True,
             text=True,
             timeout=min(0.75, max(0.01, timeout_s)),
+            env={**os.environ, "LC_ALL": "C"},
         )
         if out.returncode != 0:
+            if _verified_not_a_repo(probe, out.stderr or ""):
+                return _NOT_A_REPO
             return None
         lines = out.stdout.splitlines()
         if len(lines) < 2:
@@ -548,6 +585,8 @@ def _canonicalize_worktree_path(
     roots: tuple[Path, Path] | None = None,
     root_cache: list[tuple[Path, Path]] | None = None,
     deadline: float | None = None,
+    *,
+    strict: bool = False,
 ) -> Path:
     """Map a path inside a git worktree to the equivalent path in the repo's
     main/shared checkout, so the SAME logical file across different worktrees
@@ -562,14 +601,16 @@ def _canonicalize_worktree_path(
     every worktree path into one repository-unique namespace collapses them to
     one surface, so the second agent's acquire conflicts.
 
-    Fail-open: any git error returns ``p`` unchanged. A coordination nicety must
-    never break an edit, so we degrade to the prior per-worktree behavior rather
-    than raising.
+    Fail-open by default: any git error returns ``p`` unchanged. A coordination
+    nicety must never break an edit, so we degrade to the prior per-worktree
+    behavior rather than raising. With ``strict`` (required lease mode) only a
+    path verifiably outside every repository keeps its raw path; a failed,
+    refused or deadline-cut probe raises ``_NamespaceProbeError``.
     """
     try:
         resolved_path = p.resolve()
         candidates: list[tuple[Path, Path]] = []
-        if roots is not None:
+        if isinstance(roots, tuple):
             candidates.append(roots)
         if root_cache is not None:
             candidates.extend(item for item in root_cache if item not in candidates)
@@ -581,15 +622,22 @@ def _canonicalize_worktree_path(
 
         timeout_s = _deadline_timeout(deadline, 0.75)
         if timeout_s is None:
-            return p
+            raise _NamespaceProbeError("deadline reached before the namespace probe")
         resolved_roots = _worktree_roots(resolved_path, timeout_s=timeout_s)
-        if resolved_roots is None:
+        if resolved_roots is _NOT_A_REPO:
             return p
+        if not isinstance(resolved_roots, tuple):
+            raise _NamespaceProbeError("namespace probe failed")
         if root_cache is not None and resolved_roots not in root_cache:
             root_cache.append(resolved_roots)
         worktree_root, namespace_root = resolved_roots
         return namespace_root / resolved_path.relative_to(worktree_root)
-    except Exception:
+    except Exception as exc:
+        if strict:
+            if isinstance(exc, _NamespaceProbeError):
+                raise
+            raise _NamespaceProbeError(type(exc).__name__) from exc
+        _debug(f"worktree namespace fallback to raw path for {p}: {exc}")
         return p
 
 
@@ -599,14 +647,19 @@ def _surface_id(
     roots: tuple[Path, Path] | None = None,
     root_cache: list[tuple[Path, Path]] | None = None,
     deadline: float | None = None,
+    *,
+    strict: bool = False,
 ) -> str:
     p = Path(path).expanduser()
     if not p.is_absolute():
         p = workspace / p
     # Collapse worktrees of the same repo to a single surface so concurrent
     # agents in different worktrees see each other's lease (see
-    # _canonicalize_worktree_path). Fail-open to the raw absolute path.
-    p = _canonicalize_worktree_path(p, roots, root_cache, deadline).resolve()
+    # _canonicalize_worktree_path). Fail-open to the raw absolute path unless
+    # ``strict``.
+    p = _canonicalize_worktree_path(
+        p, roots, root_cache, deadline, strict=strict
+    ).resolve()
     return f"file://{p}"
 
 
@@ -929,7 +982,10 @@ def _cmd_pre_edit_locked(args: argparse.Namespace, stdin_text: str) -> int:
         rollback()
         return _fail_open_or_block("batch lease deadline reached during path setup")
     roots = _worktree_roots(workspace, timeout_s=roots_timeout)
-    if roots is None and _required():
+    # Required mode keeps blocking a workspace that is not a verified git
+    # checkout (including one outside any repository); individual targets
+    # outside every repository are still allowed below.
+    if not isinstance(roots, tuple) and _required():
         rollback()
         return _fail_open_or_block(
             "required lease mode could not verify the repository/worktree namespace"
@@ -940,13 +996,21 @@ def _cmd_pre_edit_locked(args: argparse.Namespace, stdin_text: str) -> int:
         if _deadline_timeout(operation_deadline, 1.0) is None:
             rollback()
             return _fail_open_or_block("batch lease deadline reached during path setup")
-        surface_id = _surface_id(
-            file_path,
-            workspace,
-            roots,
-            root_cache,
-            operation_deadline,
-        )
+        try:
+            surface_id = _surface_id(
+                file_path,
+                workspace,
+                roots,
+                root_cache,
+                operation_deadline,
+                strict=_required(),
+            )
+        except _NamespaceProbeError:
+            rollback()
+            return _fail_open_or_block(
+                "required lease mode could not verify the repository/worktree "
+                f"namespace for {file_path}"
+            )
         targets_by_surface[surface_id] = file_path
     if _deadline_timeout(operation_deadline, 1.0) is None:
         rollback()
