@@ -258,11 +258,20 @@ the slot with
 `python3 scripts/session_cache.py clear session --workspace "$PWD" --slot codex-local`
 or start a sidecar on a new `--slot`.
 
-`POST /session/start` (used by `u-run`) is a separate re-onboard route: it
-mints a fresh identity for the slot and replaces the binding, so it is not
-covered by the rule above. Two concurrent first mints into an empty slot are
-also not serialized: only one reply is persisted, but both identities exist on
-the server.
+`POST /session/start` (used by `u-run`) is a re-onboard route: it mints a
+fresh identity for the slot and replaces the binding. On a slot whose
+protected binding names an identity, or whose protected binding exists but
+cannot be read, it is refused with 409 unless the request body carries
+`replace_existing: true` (the JSON boolean; `"true"` or `1` do not count).
+An empty slot is onboarded as before. `u-run` sends the flag on its own start
+call, because it owns the session it starts, including on a reused `--slot`.
+The flag is an accident guard, not an authority boundary: every holder of the
+sidecar capability, including every process under `u-run`, can send it and
+replace the binding. The check and the onboard are not one transaction: two
+concurrent `/session/start` calls on an empty slot can both pass the check and
+both mint, and the later one can replace the earlier binding. Two concurrent
+first mints into an empty slot through tool calls are also not serialized:
+only one reply is persisted, but both identities exist on the server.
 
 Useful endpoints:
 
@@ -293,7 +302,8 @@ The first `--` separates wrapper options from the child command. `u-run` then:
    separate `UNITARES_SIDECAR_CAPABILITY`; otherwise it starts one with fresh
    random secrets and owns its cleanup;
 2. creates one unique slot (or uses an explicit `--slot`) and calls
-   `/session/start` once, which writes `.unitares/session-<slot>.json`;
+   `/session/start` once with `replace_existing: true`, which writes
+   `.unitares/session-<slot>.json`;
 3. exports `UNITARES_SERVER_URL`, `UNITARES_SIDECAR_URL`,
    `UNITARES_SIDECAR_SLOT`, `UNITARES_SIDECAR_CAPABILITY`, and
    `UNITARES_MODEL_TYPE` to the child;

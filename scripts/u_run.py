@@ -515,7 +515,8 @@ def _start_session(
         sidecar_url,
         startup_secret,
         path="/session/start",
-        payload={"slot": slot, "model_type": model_type},
+        # u-run owns the session it starts, including on a reused --slot.
+        payload={"slot": slot, "model_type": model_type, "replace_existing": True},
         slot=slot,
         capability=capability,
     )
