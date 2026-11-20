@@ -56,8 +56,10 @@ Contract:
   agent-supplied, as a key, a value, text, or inside a string holding JSON)
   when UNITARES_SERVER_URL is not HTTPS or loopback HTTP as Claude's WHATWG
   URL parser reads it. The Claude manifest routes every tool on that server
-  here. An input past the scan budget, a scan error, and a payload the hook
-  cannot read count as carrying proof. Calls that never name a proof field
+  here. An input past the scan budget, a scan error, a JSON-shaped string the
+  decoder rejects, and a payload the hook cannot read count as carrying
+  proof. A lineage reference (parent_agent_id) alone is not proof. Calls
+  that never name a proof field
   pass; other aliases are not checked because their transport is configured
   outside this plugin.
 - Fails open: any error or missing cache → no output, tool runs untouched.
@@ -86,6 +88,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -366,6 +369,24 @@ def _gateway_target_injectable(tool_input: dict) -> bool:
 # needs more is denied rather than half-scanned.
 _PROOF_SCAN_BUDGET = 4_000_000
 _BUNDLED_CLAUDE_TOOL_PREFIX = f"mcp__{BUNDLED_CLAUDE_SERVER_ALIAS}__"
+_PROOF_KEYS = frozenset(PROOF_FIELDS)
+# A proof field name in text, unless a name character runs into it from the
+# left: parent_agent_id names a lineage parent, not this caller, so it alone
+# must not read as agent_id. Nothing on the right is excluded, so agent_ids
+# or agent_id_x still count.
+_PROOF_NAME_IN_TEXT = re.compile(
+    r"(?<![A-Za-z0-9_])(?:" + "|".join(re.escape(f) for f in PROOF_FIELDS) + ")"
+)
+_JSON_START = ("{", "[", '"')
+
+
+class _JsonObject(list):
+    """Every (key, value) pair of one decoded JSON object, duplicates kept."""
+
+
+def _is_proof_key(key: object) -> bool:
+    """Whether a decoded key is a proof field name (case and spaces ignored)."""
+    return isinstance(key, str) and key.strip().casefold() in _PROOF_KEYS
 
 
 def _carries_proof(value: object) -> bool:
@@ -373,11 +394,15 @@ def _carries_proof(value: object) -> bool:
 
     The whole input crosses the wire, whatever the server later accepts or
     rejects, so the scan walks all of it: every dict key and value, every
-    list item, and every string, which it also decodes when the string holds
-    JSON and then walks again. Any string that contains a proof field name,
-    raw or decoded, counts as proof, whether it is a key, a value or text.
-    The scan fails closed: running out of budget, or a string the JSON
-    decoder cannot finish (RecursionError), counts as proof too.
+    list item, and every string. A key equal to a proof field name counts as
+    proof, and so does any string that contains one (see _PROOF_NAME_IN_TEXT),
+    whether it is a key, a value or text.
+
+    A string that could be JSON (it starts with {, [ or " once leading
+    whitespace is stripped) is decoded with every object pair kept,
+    duplicate keys included, and walked again, so escaped names are compared
+    after decoding. The scan fails closed: running out of budget, or any
+    exception while decoding such a string, counts as proof.
     """
     budget = _PROOF_SCAN_BUDGET
     pending = [value]
@@ -387,21 +412,24 @@ def _carries_proof(value: object) -> bool:
         if budget < 0:
             return True
         if isinstance(item, dict):
-            pending.extend(item.keys())
-            pending.extend(item.values())
+            item = _JsonObject(item.items())
+        if isinstance(item, _JsonObject):
+            for key, val in item:
+                if _is_proof_key(key):
+                    return True
+                pending.append(key)
+                pending.append(val)
         elif isinstance(item, (list, tuple)):
             pending.extend(item)
         elif isinstance(item, str):
-            if any(field in item for field in PROOF_FIELDS):
+            if _PROOF_NAME_IN_TEXT.search(item):
                 return True
-            try:
-                decoded = json.loads(item)
-            except ValueError:
+            if not item.lstrip().startswith(_JSON_START):
                 continue
-            except RecursionError:
+            try:
+                pending.append(json.loads(item, object_pairs_hook=_JsonObject))
+            except Exception:
                 return True
-            if isinstance(decoded, (dict, list, str)):
-                pending.append(decoded)
     return False
 
 

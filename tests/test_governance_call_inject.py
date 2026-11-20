@@ -782,19 +782,131 @@ class TestBundledCleartextTransport:
         "wrapped",
         [
             '{"continuity_token": "v1.tok"',  # truncated JSON
-            "[" * 5000 + "]" * 5000,  # too deep for the JSON parser
             json.dumps(json.dumps({"client_session_id": SID})),  # double-encoded
         ],
-        ids=["truncated-json", "too-deep-json", "double-encoded"],
+        ids=["truncated-json", "double-encoded"],
     )
     def test_unparseable_string_container_with_proof_is_denied(
         self, tmp_path, monkeypatch, wrapped
     ):
         monkeypatch.setenv("UNITARES_SERVER_URL", "http://gov.example.test")
-        if wrapped.startswith("["):
-            wrapped = wrapped[:2500] + '{"agent_id": "a"}' + wrapped[2500:]
         result = _run(_hook_input(f"{BUNDLED}sync_state", {"kwargs": wrapped}),
                       tmp_path, host="claude")
+        assert "cleartext HTTP" in (_deny_reason(result) or "")
+
+    @pytest.mark.parametrize(
+        "wrapped",
+        [
+            # Too deep for the JSON decoder on every supported Python (3.9
+            # stops near 1,000 levels, 3.14 near 500,000), yet inside the
+            # scan budget. No proof field name appears anywhere, so only the
+            # decoder failure itself can deny it.
+            "[" * 600_000 + "]" * 600_000,
+            '{"x": 1',  # truncated JSON
+            '{"n": ' + "1" * 5000 + "}",  # past Python's int-conversion limit
+            '["unterminated',
+        ],
+        ids=["too-deep-json", "truncated-json", "int-limit", "unterminated"],
+    )
+    def test_json_shaped_string_the_decoder_rejects_is_denied(
+        self, tmp_path, monkeypatch, wrapped
+    ):
+        # The decoder cannot show what such a string carries, so a skip would
+        # let a proof field through unseen; the scan has to deny instead.
+        import governance_call_inject as inject
+
+        assert not any(field in wrapped for field in inject.PROOF_FIELDS)
+        if wrapped.startswith('{"n"'):
+            if not hasattr(sys, "get_int_max_str_digits"):
+                pytest.skip("this Python has no int-conversion limit")
+            with pytest.raises(ValueError):
+                json.loads(wrapped)
+        assert inject._carries_proof({"kwargs": wrapped}) is True
+        monkeypatch.setenv("UNITARES_SERVER_URL", "http://gov.example.test")
+        result = _run(_hook_input(f"{BUNDLED}sync_state", {"kwargs": wrapped}),
+                      tmp_path, host="claude")
+        assert "cleartext HTTP" in (_deny_reason(result) or "")
+
+    @pytest.mark.parametrize(
+        "error", [ValueError, RecursionError, MemoryError, OverflowError, TypeError]
+    )
+    def test_any_decoder_exception_counts_as_proof(self, monkeypatch, error):
+        import governance_call_inject as inject
+
+        class _FailingJson:
+            @staticmethod
+            def loads(*_args, **_kwargs):
+                raise error("decoder failed")
+
+        monkeypatch.setattr(inject, "json", _FailingJson)
+        for text in ("[1]", ' {"a": 1}', '"quoted"'):
+            assert inject._carries_proof({"kwargs": text}) is True, text
+        # Strings that cannot be JSON are never handed to the decoder.
+        assert inject._carries_proof({"kwargs": "plain text"}) is False
+
+    @pytest.mark.parametrize(
+        "wrapped",
+        [
+            # a later duplicate key replaces the object that holds the proof
+            '{"a": {"client\\u005fsession_id": "x"}, "a": 1}',
+            # a duplicate of the proof key itself, escaped differently
+            '{"agent\\u005fuuid": "u", "agent\\u005fuuid": "v"}',
+            # proof under an escaped key, next to an unrelated huge integer
+            '{"continuity\\u005ftoken": "t", "n": ' + "1" * 5000 + "}",
+        ],
+        ids=["shadowed-object", "duplicate-key", "int-limit"],
+    )
+    def test_proof_a_lossy_decode_would_drop_is_denied(
+        self, tmp_path, monkeypatch, wrapped
+    ):
+        import governance_call_inject as inject
+
+        assert not any(field in wrapped for field in inject.PROOF_FIELDS)
+        assert inject._carries_proof({"note": wrapped}) is True
+        monkeypatch.setenv("UNITARES_SERVER_URL", "http://gov.example.test")
+        result = _run(_hook_input(f"{BUNDLED}sync_state", {"note": wrapped}),
+                      tmp_path, host="claude")
+        assert "cleartext HTTP" in (_deny_reason(result) or "")
+
+    @pytest.mark.parametrize(
+        "tool_input",
+        [
+            {"force_new": True, "parent_agent_id": "11111111-2222-3333-4444-555555555555"},
+            {"force_new": True, "spawn_reason": "subagent",
+             "parent_agent_id": "11111111-2222-3333-4444-555555555555"},
+        ],
+    )
+    def test_lineage_reference_alone_is_not_proof(self, tmp_path, monkeypatch, tool_input):
+        # parent_agent_id names a lineage parent, not this caller's identity.
+        import governance_call_inject as inject
+
+        assert inject._carries_proof(tool_input) is False
+        monkeypatch.setenv("UNITARES_SERVER_URL", "http://gov.example.test")
+        result = _run(_hook_input(f"{BUNDLED}start_session", tool_input), tmp_path,
+                      host="claude")
+        assert result.returncode == 0
+        assert result.stdout.strip() == ""
+
+    @pytest.mark.parametrize(
+        "tool_input",
+        [
+            {"parent_agent_id": "p", "agent_id": "a"},
+            {"parent_agent_id": json.dumps({"agent_id": "a"})},
+            {"parent_agent_id": "p", "note": "agent_id=a"},
+            {"note": "parent_agent_id=p agent_id=a"},
+            {"note": json.dumps({"parent_agent_id": "p", "agent_uuid": "u"})},
+            {"AGENT_ID": "a"},
+            {json.dumps({"Client_Session_Id": "x"}): 1},
+        ],
+        ids=["sibling-key", "json-value", "text-value", "same-text",
+             "json-sibling", "upper-case-key", "mixed-case-json-key"],
+    )
+    def test_proof_beside_a_lineage_reference_is_denied(
+        self, tmp_path, monkeypatch, tool_input
+    ):
+        monkeypatch.setenv("UNITARES_SERVER_URL", "http://gov.example.test")
+        result = _run(_hook_input(f"{BUNDLED}start_session", tool_input), tmp_path,
+                      host="claude")
         assert "cleartext HTTP" in (_deny_reason(result) or "")
 
     @pytest.mark.parametrize(
