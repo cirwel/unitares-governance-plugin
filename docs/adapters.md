@@ -228,7 +228,43 @@ implementation. It wraps REST `/v1/tools/call` and minimal JSON-RPC MCP
 `/mcp/` requests, lazily onboards a slot when needed, injects
 `client_session_id` into attribution-relevant governance calls, forces
 `force_new=true` for bare `onboard` / `start_session`, stamps the slot cache
-after check-ins, and exposes `GET /audit`. Useful endpoints:
+after check-ins, and exposes `GET /audit`.
+
+The sidecar checks exactly the call it forwards. Before any check it reads a
+tool name the way the server does (an `mcp_unitares_` or
+`mcp__<server>__` prefix, case and surrounding space are removed) and merges
+`kwargs` wrappers (an object or a JSON-object string, up to four levels,
+inner keys winning) into the arguments; it then forwards that canonical name
+and those flat arguments, for the `use_tool` target too. A call it cannot
+read that way (another `mcp_` prefix, a `kwargs` value that is not an
+object, `use_tool` invoking `use_tool`, an unreadable `tools/call`, or a
+repeated `tools/call` id in a batch) is refused with 409.
+
+A slot that already names an identity keeps it on tool calls (REST
+`/v1/tools/call` and `/mcp/` `tools/call`). On a bound slot the sidecar
+forwards an `onboard`, `start_session` or `identity` call only as a resume of
+the bound identity: `force_new` absent or `false`, `resume` absent or `true`,
+no `parent_agent_id` or `spawn_reason`, and the bound `client_session_id`
+(for `identity`, the bound `agent_uuid` also serves). Everything else,
+including any proof for another identity, is refused with 409 before any
+upstream call. It refuses identity tools sent through `use_tool` and never
+mints a `spawn_reason=subagent` identity. It persists only
+successful replies for the bound identity, and binds an empty slot only from a
+reply that carries a session id. A
+binding marked `prior_process` is not used as proof and refuses identity calls
+until the slot is cleared. A long-lived slot such as `--slot codex-local`
+therefore stays on its first identity across client sessions. To switch, clear
+the slot with
+`python3 scripts/session_cache.py clear session --workspace "$PWD" --slot codex-local`
+or start a sidecar on a new `--slot`.
+
+`POST /session/start` (used by `u-run`) is a separate re-onboard route: it
+mints a fresh identity for the slot and replaces the binding, so it is not
+covered by the rule above. Two concurrent first mints into an empty slot are
+also not serialized: only one reply is persisted, but both identities exist on
+the server.
+
+Useful endpoints:
 
 - `GET http://127.0.0.1:8768/client-config` for an authenticated MCP/client snippet
 - `POST http://127.0.0.1:8768/v1/tools/call` with `{"name": "...", "arguments": {...}}`

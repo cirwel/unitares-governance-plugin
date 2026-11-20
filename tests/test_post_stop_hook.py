@@ -6,6 +6,7 @@ import json
 import subprocess
 import sys
 import threading
+from contextlib import ExitStack
 import pytest
 from pathlib import Path
 
@@ -925,3 +926,196 @@ def test_post_stop_timeout_at_most_preserves_float_spellings():
     assert got["2.5"] == "2.5"
     for invalid in ("0", "-1", "nan", "inf", "1e999", "garbage"):
         assert got[invalid] == "15"
+
+
+def _idle_stop(tmp_path, host, *, hold_cache_lock=False, python_shim=None):
+    """Run one Stop over a binding idle for two days, with a transcript that
+    has tool calls in it, so both the turn_stop check-in and the
+    tool-outcome rollup would be sent if the binding were used.
+
+    ``python_shim`` is a bash snippet run before every python3 the hook
+    starts (with the script path in ``$1``), to stage a race or a failure."""
+    import os
+    import time
+
+    from _session_cache_io import session_cache_lock
+
+    RecordingHandler.calls = []
+    RecordingHandler.paths = []
+    srv = _ReusableTCPServer(("127.0.0.1", 0), RecordingHandler)
+    port = srv.server_address[1]
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+
+    slot = "idle-inherited-slot"
+    old_csid = "agent-idle-predecessor-csid"
+    cache = tmp_path / ".unitares" / _slot_filename(slot)
+    cache.parent.mkdir()
+    cache.write_text(json.dumps({
+        "uuid": "86ae619f-87e0-4040-8f29-eacece0c7904",
+        "client_session_id": old_csid,
+        "schema_version": 2,
+        "slot": slot,
+    }))
+    cache.chmod(0o600)
+    two_days_ago = time.time() - 2 * 24 * 3600
+    os.utime(cache, (two_days_ago, two_days_ago))
+
+    transcript = tmp_path / "session.jsonl"
+    if host == "codex":
+        entries = [
+            {"type": "session_meta", "payload": {"id": slot}},
+            {"type": "event_msg", "payload": {"type": "task_started"}},
+            {"type": "event_msg", "payload": {
+                "type": "item_completed", "thread_id": slot,
+                "item": {"type": "CommandExecution", "id": "a", "command": "true",
+                         "cwd": "/", "status": "failed", "exit_code": 2}}},
+        ]
+    else:
+        entries = [
+            {"type": "user", "message": {"role": "user", "content": "go"}},
+            {"type": "assistant", "message": {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "a", "name": "Bash", "input": {"command": "true"}}]}},
+            {"type": "user", "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "a", "content": "x", "is_error": True}]}},
+        ]
+    transcript.write_text("".join(json.dumps(entry) + "\n" for entry in entries))
+
+    path = "/usr/bin:/bin:/usr/local/bin"
+    if python_shim is not None:
+        shim_dir = tmp_path / "shim-bin"
+        shim_dir.mkdir()
+        shim = shim_dir / "python3"
+        shim.write_text(
+            "#!/bin/bash\n"
+            f"CACHE={str(cache)!r}\n"
+            f"STATE={str(tmp_path / 'shim-state')!r}\n"
+            + python_shim
+            + f"\nexec {sys.executable!r} \"$@\"\n"
+        )
+        shim.chmod(0o755)
+        path = f"{shim_dir}:{path}"
+
+    try:
+        with ExitStack() as stack:
+            if hold_cache_lock:
+                stack.enter_context(session_cache_lock(cache))
+            subprocess.run(
+                [str(PLUGIN_ROOT / "hooks" / "post-stop"), "--host", host],
+                env={
+                    "PATH": path,
+                    "HOME": str(tmp_path),
+                    "UNITARES_SERVER_URL": f"http://127.0.0.1:{port}",
+                    "UNITARES_CHECKIN_LOG": str(tmp_path / "checkins.log"),
+                    "UNITARES_AUTO_ONBOARD": "off",
+                    "UNITARES_SESSION_CACHE_LOCK_TIMEOUT_S": "0.2",
+                    "CLAUDE_PLUGIN_ROOT": str(PLUGIN_ROOT),
+                    "PWD": str(tmp_path),
+                },
+                cwd=str(tmp_path),
+                input=json.dumps({
+                    "hook_event_name": "Stop",
+                    "session_id": slot,
+                    "last_assistant_message": "Done.",
+                    "transcript_path": str(transcript),
+                }),
+                text=True,
+                capture_output=True,
+                timeout=30,
+                check=False,
+            )
+    finally:
+        srv.shutdown()
+        thread.join(timeout=2)
+    return cache, old_csid
+
+
+def _assert_no_evidence_under(old_csid):
+    assert old_csid not in json.dumps(RecordingHandler.calls)
+    assert not [
+        c for c in RecordingHandler.calls if c.get("name") == "process_agent_update"
+    ]
+    assert not [
+        c for c in RecordingHandler.calls
+        if c.get("observation_kind") == "tool_outcome_rollup"
+    ]
+    assert "/v1/runtime/observe" not in RecordingHandler.paths
+    assert "/v1/substrate/observe" in RecordingHandler.paths
+
+
+@pytest.mark.parametrize("host", ["claude", "codex"])
+def test_a_binding_marked_inherited_at_this_stop_is_not_used_for_its_evidence(tmp_path, host):
+    """The Stop that marks an idle binding prior_process must not then send
+    its turn_stop or tool-outcome evidence under that binding."""
+    cache, old_csid = _idle_stop(tmp_path, host)
+
+    assert json.loads(cache.read_text())["prior_process"] is True
+    _assert_no_evidence_under(old_csid)
+
+
+@pytest.mark.parametrize("host", ["claude", "codex"])
+def test_an_idle_binding_the_stop_could_not_mark_is_not_used_for_its_evidence(tmp_path, host):
+    """A cache lock timeout leaves the idle binding unmarked; it still
+    belongs to the earlier process, so this turn's evidence is withheld."""
+    cache, old_csid = _idle_stop(tmp_path, host, hold_cache_lock=True)
+
+    assert json.loads(cache.read_text()).get("prior_process") is not True
+    _assert_no_evidence_under(old_csid)
+
+
+#: A binding the next turn wrote: fresh, so the mark only refreshes it.
+LATER_CSID = "agent-later-turn-csid"
+LATER_BINDING = json.dumps({
+    "uuid": "bbbbbbbb-2222-4333-8444-555555555555",
+    "client_session_id": LATER_CSID,
+    "schema_version": 2,
+    "slot": "idle-inherited-slot",
+})
+
+
+@pytest.mark.parametrize("host", ["claude", "codex"])
+def test_a_binding_written_after_the_stop_read_is_not_used_for_its_evidence(tmp_path, host):
+    """Stop runs asynchronously: the next turn can replace the binding
+    between this Stop's read and its mark. The mark leaves the replacement
+    alone, and this turn's evidence must not then be sent under it."""
+    shim = (
+        'case "$1" in *binding_activity.py)\n'
+        f"  printf '%s' {LATER_BINDING!r} > \"$CACHE\"; chmod 600 \"$CACHE\";;\n"
+        "esac"
+    )
+    cache, old_csid = _idle_stop(tmp_path, host, python_shim=shim)
+
+    assert json.loads(cache.read_text())["client_session_id"] == LATER_CSID
+    assert json.loads(cache.read_text()).get("prior_process") is not True
+    _assert_no_evidence_under(old_csid)
+    _assert_no_evidence_under(LATER_CSID)
+
+
+@pytest.mark.parametrize("host", ["claude", "codex"])
+def test_a_failed_reread_after_the_mark_withholds_the_evidence(tmp_path, host):
+    """The mark writes prior_process, then the re-read fails and prints
+    nothing. The binding read before the mark must not survive that."""
+    shim = (
+        'case "$1" in *_session_lookup.py)\n'
+        '  if [[ -e "$STATE" ]]; then exit 1; fi\n'
+        '  : > "$STATE";;\n'
+        "esac"
+    )
+    cache, old_csid = _idle_stop(tmp_path, host, python_shim=shim)
+
+    assert (tmp_path / "shim-state").exists()
+    assert json.loads(cache.read_text())["prior_process"] is True
+    _assert_no_evidence_under(old_csid)
+
+
+@pytest.mark.parametrize("host", ["claude", "codex"])
+@pytest.mark.parametrize("status", [1, 2, 127])
+def test_a_mark_helper_that_fails_withholds_the_evidence(tmp_path, host, status):
+    """The mark helper exits non-zero before it records the idle binding as
+    inherited. The binding still reads back unchanged, but the hook cannot
+    know it was checked, so this turn's evidence goes to the floor."""
+    shim = f'case "$1" in *binding_activity.py) exit {status};; esac'
+    cache, old_csid = _idle_stop(tmp_path, host, python_shim=shim)
+
+    assert json.loads(cache.read_text()).get("prior_process") is not True
+    _assert_no_evidence_under(old_csid)

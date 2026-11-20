@@ -329,8 +329,26 @@ fi
 # session without SessionStart (Codex often does), so this process has not
 # minted its own identity yet (scripts/binding_activity.py).
 if [[ -n "${CSID:-}" && -f "${PLUGIN_ROOT}/scripts/binding_activity.py" ]]; then
+  MARKED_CSID="${CSID}"
+  MARKED_UUID="${UUID:-}"
+  MARK_STATUS=0
   printf '%s' "${PAYLOAD}" | python3 "${PLUGIN_ROOT}/scripts/binding_activity.py" mark \
-    --workspace "${LOOKUP_WORKSPACE}" >/dev/null 2>&1 || true
+    --workspace "${LOOKUP_WORKSPACE}" >/dev/null 2>&1 || MARK_STATUS=$?
+  # This turn keeps the binding only if a re-read after the mark returns the
+  # very binding read before it, still usable. A binding just marked
+  # prior_process reads back empty; a later turn's binding is not this
+  # turn's; a mark that exited non-zero (status 3: an idle binding it could
+  # not write; anything else: it failed before deciding) leaves the binding
+  # unchecked, possibly still the earlier process's; and an empty or failed
+  # re-read proves nothing. Each of those sends this turn to the
+  # identity-free substrate floor.
+  CSID=""
+  UUID=""
+  eval "$(printf '%s' "${PAYLOAD}" | python3 "${SESSION_LOOKUP}" --workspace "${LOOKUP_WORKSPACE}" 2>/dev/null)"
+  if [[ "${MARK_STATUS}" != "0" || "${CSID}" != "${MARKED_CSID}" || "${UUID}" != "${MARKED_UUID}" ]]; then
+    CSID=""
+    UUID=""
+  fi
 fi
 
 if [[ "${HOOK_MODE}" == "session_start" ]]; then

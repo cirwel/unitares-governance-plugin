@@ -299,3 +299,35 @@ def test_a_live_threads_turn_end_keeps_the_guard(tmp_path, host):
     assert json.loads(path.read_text()).get("prior_process") is not True
     assert binding_activity.activity_path(SLOT).read_text().startswith(UUID + " ")
     assert _denied(_mint(tmp_path, env, host))
+
+
+def test_an_idle_binding_that_cannot_be_marked_is_reported(tmp_path, monkeypatch):
+    # A cache lock timeout leaves the idle binding unmarked; the Stop must
+    # still learn it is idle so it does not send evidence under it.
+    import _session_cache_io
+
+    _cache(tmp_path, age_s=2 * DAY)
+
+    def locked(*_args, **_kwargs):
+        raise TimeoutError("session cache lock timed out")
+
+    monkeypatch.setattr(_session_cache_io, "update_session_cache", locked)
+    assert binding_activity.mark(str(tmp_path), _payload()) == "idle_unmarked"
+
+
+def test_the_cli_exits_3_only_for_an_idle_unmarked_binding(tmp_path, monkeypatch):
+    for result, code in (("idle_unmarked", 3), ("marked_prior_process", 0),
+                         ("touched", 0), ("none", 0)):
+        monkeypatch.setattr(binding_activity, "mark", lambda *_a, _r=result, **_k: _r)
+        monkeypatch.setattr(sys, "stdin", __import__("io").StringIO(_payload()))
+        assert binding_activity.main(["mark", "--workspace", str(tmp_path)]) == code
+
+
+def test_the_cli_exits_non_zero_when_the_mark_fails(tmp_path, monkeypatch):
+    # The Stop hook keeps a binding only after a mark that exited 0.
+    def broken(*_args, **_kwargs):
+        raise RuntimeError("mark failed")
+
+    monkeypatch.setattr(binding_activity, "mark", broken)
+    monkeypatch.setattr(sys, "stdin", __import__("io").StringIO(_payload()))
+    assert binding_activity.main(["mark", "--workspace", str(tmp_path)]) != 0
