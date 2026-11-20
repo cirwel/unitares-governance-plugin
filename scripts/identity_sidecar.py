@@ -8,6 +8,9 @@ It wraps the server's `/v1/tools/call` surface with local lifecycle help:
 * lazy onboard when a slot has no cached `client_session_id`
 * inject `client_session_id` into attribution-relevant governance calls
 * force fresh posture for bare `onboard` / `start_session` calls
+* keep a bound slot's identity: refuse foreign proof and unmarked mints
+  before the upstream call, and persist only successful responses for the
+  bound uuid (a binding marked `prior_process` is never used as proof)
 * stamp the slot cache after successful check-ins
 * expose the local identity-contract audit
 * proxy minimal JSON-RPC MCP `tools/call` requests through `/mcp/`
@@ -44,10 +47,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from audit_identity_contract import audit_checkin_log, audit_session_caches, parse_since  # noqa: E402
 from checkin import _plugin_version, submit_checkin  # noqa: E402
 from governance_call_inject import (  # noqa: E402
+    DELIBERATE_SPAWN_REASONS,
     GATEWAY_SUFFIXES,
     INJECT_SUFFIXES,
     PROOF_FIELDS,
     SLOT_BOUND_PROOF_FIELDS,
+    _truthy,
 )
 from governance_tool_name import parse_mcp_tool_name  # noqa: E402
 from _http_auth import authorization_safe_urlopen, read_limited_response  # noqa: E402
@@ -341,6 +346,16 @@ class IdentitySidecar:
                     "error": "another sidecar request is onboarding this slot",
                 }
             session = self.read_session(slot)
+            if session.get("prior_process") is True:
+                # The binding belongs to an earlier process (a resume marked
+                # it inherited). It is no proof for this process's calls.
+                return {
+                    "status": "inherited_binding",
+                    "error": (
+                        "protected HOME session binding belongs to a prior "
+                        "process; clear it explicitly before onboarding a replacement"
+                    ),
+                }
             sid = session.get("client_session_id")
             if isinstance(sid, str) and sid.strip():
                 # The workspace cache is a compatibility mirror only.  A
@@ -417,12 +432,23 @@ class IdentitySidecar:
         parsed: dict[str, Any],
         *,
         expected_generation: CacheGenerationToken | None = None,
-    ) -> None:
+        arguments: dict[str, Any] | None = None,
+    ) -> str:
+        """Persist an identity response for this slot, or say why not.
+
+        Owner rule: a slot that already names an identity keeps it. Only a
+        response for that same uuid (a resume refreshing its session id) is
+        merged; the sidecar has no lineage support, so any other uuid is
+        refused whatever the caller declared. Failed responses, responses
+        without a uuid and declared subagent mints are never persisted.
+        """
         if not isinstance(parsed, dict):
-            return
+            return "no_identity"
         canonical = parsed.get("raw_governance")
         if not isinstance(canonical, dict):
             canonical = {}
+        if parsed.get("success") is False or canonical.get("success") is False:
+            return "refused_failed_response"
         uuid = (
             parsed.get("uuid")
             or parsed.get("agent_uuid")
@@ -431,8 +457,22 @@ class IdentitySidecar:
         )
         sid = parsed.get("client_session_id") or canonical.get("client_session_id")
         if not uuid and not sid:
-            return
-        def merge_identity(existing: dict[str, Any]) -> dict[str, Any]:
+            return "no_identity"
+        if not isinstance(uuid, str) or not uuid.strip():
+            return "refused_no_uuid"
+        uuid = uuid.strip()
+        spawn_reason = str((arguments or {}).get("spawn_reason") or "").strip().lower()
+        if spawn_reason == "subagent":
+            return "refused_subagent"
+        decision = "superseded"
+
+        def merge_identity(existing: dict[str, Any]) -> dict[str, Any] | None:
+            nonlocal decision
+            bound_uuid = str(existing.get("uuid") or "").strip()
+            if bound_uuid and bound_uuid != uuid:
+                decision = "refused_owner_mismatch"
+                return None
+            decision = "updated"
             payload: dict[str, Any] = {
                 "server_url": self.server_url,
                 "agent_name": self.agent_name,
@@ -453,14 +493,79 @@ class IdentitySidecar:
                 "schema_version": 2,
                 "updated_at": _now_iso(),
             }
+            # Same identity, so who minted it and which process owns it stay.
+            for key in ("onboard_origin", "onboard_origin_basis", "prior_process"):
+                if key in existing:
+                    payload[key] = existing[key]
             return payload
 
-        _update_cache_transaction(
+        _authoritative, committed = _update_cache_transaction(
             self.workspace,
             merge_identity,
             slot,
             expected_generation=expected_generation,
         )
+        if decision == "updated" and not committed:
+            return "superseded"
+        return decision
+
+    def refuse_identity_call_over_bound_slot(
+        self,
+        key: str,
+        arguments: dict[str, Any],
+        slot: str,
+    ) -> None:
+        """Refuse, before any upstream call, an identity call that would
+        bind or mint another identity into a slot that already names one.
+
+        Mirrors the pre-governance-call guard: foreign slot proof, an
+        unmarked force_new mint and a proofless identity() are refused. The
+        response owner rule stays the authority; this only keeps the call
+        from reaching the server under the sidecar's credential.
+        """
+        binding = self.read_session(slot)
+        bound_uuid = str(binding.get("uuid") or "").strip()
+        if not bound_uuid:
+            return
+        mismatched = []
+        for field in (*SLOT_BOUND_PROOF_FIELDS, "agent_uuid"):
+            value = arguments.get(field)
+            if value is None or (isinstance(value, str) and not value.strip()):
+                continue
+            expected = bound_uuid if field == "agent_uuid" else binding.get(field)
+            if (
+                not isinstance(value, str)
+                or not isinstance(expected, str)
+                or value.strip() != expected.strip()
+            ):
+                mismatched.append(field)
+        if mismatched:
+            raise ForeignSlotProofError(
+                "sidecar identity proof does not match its configured slot binding: "
+                + ", ".join(sorted(mismatched))
+            )
+        if key in START_TOOL_NAMES and _truthy(arguments.get("force_new")):
+            parent = arguments.get("parent_agent_id")
+            declared_parent = isinstance(parent, str) and bool(parent.strip())
+            reason = str(arguments.get("spawn_reason") or "").strip().lower()
+            if not declared_parent and reason not in DELIBERATE_SPAWN_REASONS:
+                raise ForeignSlotProofError(
+                    f"sidecar slot is already bound to agent_uuid {bound_uuid}; "
+                    "force_new would mint a second identity for it. Declare "
+                    "parent_agent_id or a deliberate spawn_reason, or clear the slot."
+                )
+        if key == "identity" and not _truthy(arguments.get("force_new")):
+            has_proof = any(
+                arguments.get(field) is not None
+                and (not isinstance(arguments.get(field), str) or arguments.get(field).strip())
+                for field in PROOF_FIELDS
+            )
+            name = arguments.get("name")
+            if not has_proof and not (isinstance(name, str) and name.strip()):
+                raise ForeignSlotProofError(
+                    f"sidecar slot is already bound to agent_uuid {bound_uuid}; "
+                    "a proofless identity() would replace it."
+                )
 
     def prepare_tool_arguments(
         self,
@@ -472,11 +577,14 @@ class IdentitySidecar:
         arguments = dict(arguments)
         lifecycle: dict[str, Any] = {"slot": slot, "session_proof_injected": False}
 
-        if name in START_TOOL_NAMES:
-            arguments.setdefault("force_new", True)
-            arguments.setdefault("name", self.agent_name)
-            arguments.setdefault("model_type", self.model_type)
-        elif _tool_key(name) in INJECT_SUFFIXES:
+        key = _tool_key(name)
+        if key in IDENTITY_TOOL_NAMES:
+            if key in START_TOOL_NAMES:
+                arguments.setdefault("force_new", True)
+                arguments.setdefault("name", self.agent_name)
+                arguments.setdefault("model_type", self.model_type)
+            self.refuse_identity_call_over_bound_slot(key, arguments, slot)
+        elif key in INJECT_SUFFIXES:
             ensured = self.ensure_session(slot)
             lifecycle["ensure_session"] = {k: v for k, v in ensured.items() if k != "session"}
             sid = ensured.get("client_session_id")
@@ -541,18 +649,26 @@ class IdentitySidecar:
         slot: str,
         raw: Any,
         identity_generation: CacheGenerationToken | None = None,
-    ) -> None:
+        arguments: dict[str, Any] | None = None,
+    ) -> str | None:
         if not isinstance(raw, dict):
-            return
+            return None
         parsed = unwrap_tool_response(raw)
-        if name in IDENTITY_TOOL_NAMES:
-            self.update_cache_from_identity_response(
-                slot,
-                parsed,
-                expected_generation=identity_generation,
-            )
+        decision = None
+        if _tool_key(name) in IDENTITY_TOOL_NAMES:
+            result = raw.get("result")
+            if isinstance(result, dict) and result.get("isError") is True:
+                decision = "refused_failed_response"
+            else:
+                decision = self.update_cache_from_identity_response(
+                    slot,
+                    parsed,
+                    expected_generation=identity_generation,
+                    arguments=arguments,
+                )
         if name in CHECKIN_TOOL_NAMES:
             self.stamp_session(slot)
+        return decision
 
     def tool_call(self, body: dict[str, Any], headers: Any) -> tuple[int, dict[str, Any]]:
         name = body.get("name")
@@ -574,7 +690,7 @@ class IdentitySidecar:
         except ForeignSlotProofError as exc:
             return 409, {"success": False, "error": str(exc)}
         identity_generation = None
-        if name in IDENTITY_TOOL_NAMES:
+        if _tool_key(name) in IDENTITY_TOOL_NAMES:
             _session, identity_generation = _read_cache_snapshot(self.workspace, slot)
 
         upstream_payload = {"name": name, "arguments": arguments}
@@ -591,12 +707,15 @@ class IdentitySidecar:
                 "sidecar": lifecycle | {"upstream_latency_ms": latency_ms},
             })
 
-        self.process_tool_response(
+        cache_decision = self.process_tool_response(
             name=name,
             slot=slot,
             raw=raw,
             identity_generation=identity_generation,
+            arguments=arguments,
         )
+        if cache_decision is not None:
+            lifecycle["identity_cache_update"] = cache_decision
 
         raw.setdefault("sidecar", {})
         if isinstance(raw["sidecar"], dict):
@@ -646,7 +765,7 @@ class IdentitySidecar:
                         new_params["arguments"] = prepared
                         req["params"] = new_params
                         identity_generation = None
-                        if name in IDENTITY_TOOL_NAMES:
+                        if _tool_key(name) in IDENTITY_TOOL_NAMES:
                             _session, identity_generation = _read_cache_snapshot(
                                 self.workspace,
                                 slot,
@@ -655,6 +774,7 @@ class IdentitySidecar:
                             name,
                             lifecycle,
                             identity_generation,
+                            prepared,
                         )
             mutated.append(req)
 
@@ -683,12 +803,13 @@ class IdentitySidecar:
             meta = metadata_by_id.get(response.get("id"))
             if not meta:
                 continue
-            name, _lifecycle, identity_generation = meta
+            name, _lifecycle, identity_generation, prepared = meta
             self.process_tool_response(
                 name=name,
                 slot=slot,
                 raw=response,
                 identity_generation=identity_generation,
+                arguments=prepared,
             )
         return status, sanitize_model_visible_payload(upstream)
 

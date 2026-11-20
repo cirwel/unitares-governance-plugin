@@ -1148,3 +1148,258 @@ def test_bounded_server_refuses_connections_above_worker_cap() -> None:
         release.set()
         first.join(timeout=2)
         _stop_server(server, serving)
+
+
+# --- Slot owner rule: a bound slot keeps its identity -----------------------
+
+BOUND_UUID = "aaaaaaaa-2222-4333-8444-555555555555"
+BOUND_CSID = "agent-bound-owner"
+
+
+def _bind_slot_a(sidecar, **extra) -> dict:
+    record = {
+        "uuid": BOUND_UUID,
+        "agent_id": "Bound_Owner",
+        "client_session_id": BOUND_CSID,
+        "schema_version": 2,
+        "slot": "slot-a",
+        **extra,
+    }
+    sidecar.write_session("slot-a", record)
+    return sidecar.read_session("slot-a")
+
+
+def _mcp_call(sidecar, name: str, arguments: dict, request_id: int = 1):
+    return sidecar.mcp_proxy(
+        {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": "tools/call",
+            "params": {"name": name, "arguments": arguments},
+        },
+        headers={},
+        path="/mcp/",
+    )
+
+
+@pytest.mark.parametrize("transport", ["rest", "mcp"])
+@pytest.mark.parametrize("name", ["onboard", "start_session", "ONBOARD", "mcp__unitares__start_session"])
+def test_unmarked_mint_into_a_bound_slot_is_refused_before_the_upstream_call(
+    tmp_path: Path, fake_server: str, transport: str, name: str,
+) -> None:
+    sidecar = _sidecar(tmp_path, fake_server)
+    before = _bind_slot_a(sidecar)
+
+    if transport == "rest":
+        status, payload = sidecar.tool_call({"name": name, "arguments": {}}, headers={})
+        message = payload["error"]
+    else:
+        status, payload = _mcp_call(sidecar, name, {})
+        message = payload["error"]["message"]
+
+    assert status == 409
+    assert "already bound" in message
+    assert FakeGovernanceHandler.calls == []
+    assert sidecar.read_session("slot-a") == before
+
+
+@pytest.mark.parametrize("transport", ["rest", "mcp"])
+@pytest.mark.parametrize(
+    "name, arguments",
+    [
+        ("onboard", {"spawn_reason": "subagent"}),
+        ("start_session", {"spawn_reason": "explicit"}),
+        ("onboard", {"parent_agent_id": BOUND_UUID}),
+        ("onboard", {"force_new": False}),
+    ],
+)
+def test_a_different_identity_never_replaces_the_bound_slot(
+    tmp_path: Path, fake_server: str, transport: str, name: str, arguments: dict,
+) -> None:
+    sidecar = _sidecar(tmp_path, fake_server)
+    before = _bind_slot_a(sidecar)
+
+    if transport == "rest":
+        status, payload = sidecar.tool_call({"name": name, "arguments": arguments}, headers={})
+        assert payload["sidecar"]["identity_cache_update"] in {
+            "refused_owner_mismatch",
+            "refused_subagent",
+        }
+    else:
+        status, _payload = _mcp_call(sidecar, name, arguments)
+
+    assert status == 200
+    assert len(FakeGovernanceHandler.calls) == 1
+    assert sidecar.read_session("slot-a") == before
+
+
+def test_a_declared_subagent_onboard_never_claims_an_empty_slot(
+    tmp_path: Path, fake_server: str,
+) -> None:
+    sidecar = _sidecar(tmp_path, fake_server)
+
+    status, payload = sidecar.tool_call(
+        {"name": "onboard", "arguments": {"spawn_reason": "subagent"}},
+        headers={},
+    )
+
+    assert status == 200
+    assert payload["sidecar"]["identity_cache_update"] == "refused_subagent"
+    assert sidecar.read_session("slot-a") == {}
+
+
+@pytest.mark.parametrize("transport", ["rest", "mcp"])
+@pytest.mark.parametrize(
+    "name, arguments",
+    [
+        ("identity", {"agent_uuid": "bbbbbbbb-2222-4333-8444-555555555555", "resume": True}),
+        ("identity", {"client_session_id": "agent-foreign-222"}),
+        ("identity", {"agent_uuid": BOUND_UUID, "continuity_token": "v1.foreign.token"}),
+        ("bind_session", {"agent_uuid": "bbbbbbbb-2222-4333-8444-555555555555"}),
+        ("bind_session", {"client_session_id": "agent-foreign-222"}),
+        ("onboard", {"force_new": False, "client_session_id": "agent-foreign-222"}),
+        ("start_session", {"force_new": False, "client_session_id": "agent-foreign-222"}),
+        (" Identity ", {"agent_uuid": "bbbbbbbb-2222-4333-8444-555555555555"}),
+    ],
+)
+def test_foreign_identity_proof_is_refused_before_the_upstream_call(
+    tmp_path: Path, fake_server: str, transport: str, name: str, arguments: dict,
+) -> None:
+    sidecar = _sidecar(tmp_path, fake_server)
+    before = _bind_slot_a(sidecar)
+
+    if transport == "rest":
+        status, payload = sidecar.tool_call({"name": name, "arguments": arguments}, headers={})
+        message = payload["error"]
+    else:
+        status, payload = _mcp_call(sidecar, name, arguments)
+        message = payload["error"]["message"]
+
+    assert status == 409
+    assert "configured slot binding" in message
+    assert FakeGovernanceHandler.calls == []
+    assert sidecar.read_session("slot-a") == before
+
+
+@pytest.mark.parametrize("transport", ["rest", "mcp"])
+def test_proofless_identity_in_a_bound_slot_is_refused(
+    tmp_path: Path, fake_server: str, transport: str,
+) -> None:
+    sidecar = _sidecar(tmp_path, fake_server)
+    before = _bind_slot_a(sidecar)
+
+    if transport == "rest":
+        status, payload = sidecar.tool_call({"name": "identity", "arguments": {}}, headers={})
+        message = payload["error"]
+    else:
+        status, payload = _mcp_call(sidecar, "identity", {})
+        message = payload["error"]["message"]
+
+    assert status == 409
+    assert "already bound" in message
+    assert FakeGovernanceHandler.calls == []
+    assert sidecar.read_session("slot-a") == before
+
+
+def test_same_identity_resume_still_refreshes_the_session_id(
+    tmp_path: Path, fake_server: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sidecar = _sidecar(tmp_path, fake_server)
+    _bind_slot_a(sidecar, onboard_origin="agent")
+    sent: list[dict] = []
+
+    def resumed(_url, payload, *_args, **_kwargs):
+        sent.append(payload)
+        return (
+            {"result": {"success": True, "uuid": BOUND_UUID, "client_session_id": "agent-bound-refreshed"}},
+            1,
+            None,
+        )
+
+    monkeypatch.setattr(identity_sidecar, "_post_json", resumed)
+    status, payload = sidecar.tool_call(
+        {"name": "identity", "arguments": {"agent_uuid": BOUND_UUID, "resume": True}},
+        headers={},
+    )
+
+    assert status == 200
+    assert payload["sidecar"]["identity_cache_update"] == "updated"
+    assert sent[0]["arguments"]["agent_uuid"] == BOUND_UUID
+    session = sidecar.read_session("slot-a")
+    assert session["uuid"] == BOUND_UUID
+    assert session["client_session_id"] == "agent-bound-refreshed"
+    assert session["onboard_origin"] == "agent"
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        {"success": False, "uuid": "bbbbbbbb-2222-4333-8444-555555555555", "client_session_id": "agent-x"},
+        {
+            "uuid": "bbbbbbbb-2222-4333-8444-555555555555",
+            "client_session_id": "agent-x",
+            "raw_governance": {"success": False},
+        },
+        {"client_session_id": "agent-x"},
+    ],
+)
+def test_failed_or_uuidless_identity_response_is_not_persisted(
+    tmp_path: Path, fake_server: str, monkeypatch: pytest.MonkeyPatch, response: dict,
+) -> None:
+    sidecar = _sidecar(tmp_path, fake_server)
+    monkeypatch.setattr(
+        identity_sidecar, "_post_json", lambda *_a, **_k: ({"result": dict(response)}, 1, None)
+    )
+
+    status, payload = sidecar.tool_call({"name": "onboard", "arguments": {}}, headers={})
+
+    assert status == 200
+    assert payload["sidecar"]["identity_cache_update"].startswith("refused_")
+    assert sidecar.read_session("slot-a") == {}
+
+
+def test_mcp_error_result_is_not_persisted(
+    tmp_path: Path, fake_server: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sidecar = _sidecar(tmp_path, fake_server)
+    body = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "result": {
+            "isError": True,
+            "content": [{"type": "text", "text": json.dumps({
+                "uuid": "bbbbbbbb-2222-4333-8444-555555555555",
+                "client_session_id": "agent-x",
+            })}],
+        },
+    }
+    monkeypatch.setattr(identity_sidecar, "_post_json_any", lambda *_a, **_k: (body, 200, 1, None))
+
+    status, _payload = _mcp_call(sidecar, "onboard", {})
+
+    assert status == 200
+    assert sidecar.read_session("slot-a") == {}
+
+
+def test_inherited_binding_is_not_used_for_session_proof(tmp_path: Path, fake_server: str) -> None:
+    sidecar = _sidecar(tmp_path, fake_server)
+    _bind_slot_a(sidecar, prior_process=True)
+
+    ensured = sidecar.ensure_session("slot-a")
+    arguments, lifecycle = sidecar.prepare_tool_arguments(
+        name="process_agent_update",
+        arguments={"response_text": "x"},
+        slot="slot-a",
+    )
+
+    assert ensured["status"] == "inherited_binding"
+    assert "client_session_id" not in ensured
+    assert "client_session_id" not in arguments
+    assert lifecycle["session_proof_injected"] is False
+    assert lifecycle["ensure_session"]["status"] == "inherited_binding"
+    assert FakeGovernanceHandler.calls == []
+
+    status, payload = sidecar.turn_checkin({"response_text": "x"}, headers={})
+    assert status == 502
+    assert payload["success"] is False
+    assert BOUND_CSID not in _json_text(FakeGovernanceHandler.calls)
