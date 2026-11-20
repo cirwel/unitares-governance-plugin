@@ -84,6 +84,12 @@ head and honors `automerge-hold`, `do-not-merge`, and `governance-sensitive`.
 It updates a behind branch and waits for fresh CI, or merges the verified head
 using GitHub's normal protections. It never executes code from the PR.
 
+Checks of what a skill says live in `cirwel/unitares`, beside the text they
+check. A test here that pins mirrored skill wording fails only after the
+canonical change has merged, on a mirror PR its author does not watch (#204,
+#367, #402). Tests in this repository cover the mirror's integrity, not its
+wording.
+
 The `mirror-delivery` environment allows only `master`, with no required human
 reviewers. Its `UNITARES_AGENT_APP_PRIVATE_KEY` secret and
 `UNITARES_AGENT_APP_CLIENT_ID` variable mint a short-lived token for this repo
