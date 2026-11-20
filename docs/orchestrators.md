@@ -71,6 +71,11 @@ runs the hooks. The launcher gets it by setting the variable to its own PID and
 then calling `exec`, so the CLI takes over that PID. Setting the variable in
 the bridge's own environment, or to the bridge's PID, does not work.
 
+This needs a POSIX system. On native Windows the hooks are started through
+`cmd.exe` and Git Bash, so the process they see as their parent is never the
+CLI and the anchor is always dropped. Run the bridge and the CLI under WSL
+there.
+
 When the owner PID is missing or is not the process running the hooks, the
 anchor is dropped and the session-start hook writes this line to standard
 error:
@@ -98,7 +103,8 @@ apart. Each condition closes one way that can happen:
   an interactive session has neither the marker nor an owner, and is ignored.
 - **The owner PID.** Environment variables are inherited. A CLI that the agent
   starts during its turn, such as a reviewer or a sub-agent, inherits the
-  anchor but has a different PID, so it is refused and gets its own identity.
+  anchor but has a different PID, so it is refused and treated as an ordinary
+  session, which binds an identity of its own or none.
 - **The server.** With strict identity on, a thread anchor that matches no
   existing identity and arrives without the orchestrated declaration is
   refused (`lineage_declaration_required`) instead of quietly creating one.
@@ -114,14 +120,18 @@ parent in its environment:
 env -u UNITARES_CLIENT_SESSION_ID -u UNITARES_ORCHESTRATED \
     -u UNITARES_ORCHESTRATED_OWNER_PID \
     UNITARES_PARENT_AGENT_ID="<uuid of the turn's identity>" \
-    UNITARES_SPAWN_REASON=subagent \
+    UNITARES_SPAWN_REASON=dispatch \
     <cli> [args...]
 ```
 
 Those two variables are a suggestion to the child, not a record. The child's
 session-start hook shows it the parent and the reason, and the lineage is
 recorded only when the child passes them in its own call:
-`start_session(force_new=true, parent_agent_id="<uuid>", spawn_reason="subagent")`.
+`start_session(force_new=true, parent_agent_id="<uuid>", spawn_reason="dispatch")`.
+
+Use `dispatch` for a separate CLI process. `subagent` is for a sub-agent
+running inside the parent's own CLI process, and the hooks do not cache an
+identity created with it.
 
 Without the `env` line above, the inherited anchor and the inherited lineage
 variables are both dropped, so the spawner's declaration is lost. The child's

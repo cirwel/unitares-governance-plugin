@@ -129,8 +129,10 @@ def test_shipped_hook_refuses_the_anchor_to_a_nested_cli(tmp_path, host, manifes
     )
     assert result.returncode == 0, result.stderr
     hook = json.loads(result.stdout)
-    # The hook ran to completion and declined to rewrite the call; an early
-    # failure would also leave no anchor in its output.
+    # The hook exited cleanly and did not rewrite the call. The hook hides a
+    # crash of its own helper, so on its own this cannot tell a refusal from a
+    # failure: the test above is the control, running the same command in the
+    # same environment and differing only in which process is the owner.
     assert hook["rc"] == 0 and hook["err"].strip() == "", hook
     assert "agent:/thread-t1" not in hook["out"]
     assert "orchestrated" not in hook["out"]
@@ -196,7 +198,14 @@ def test_cli_that_cannot_run_is_told_apart_from_a_missing_one(tmp_path, shell):
     not_executable = tmp_path / "cli"
     not_executable.write_text("#!/bin/sh\n")
     by_path = [str(not_executable), str(tmp_path)]
-    for target, env in [(by_path[0], {}), (by_path[1], {}), ("cli", {"PATH": str(tmp_path)})]:
+    (tmp_path / "sub").mkdir()
+    cases = [
+        (by_path[0], {}),
+        (by_path[1], {}),
+        ("cli", {"PATH": str(tmp_path)}),
+        ("sub", {"PATH": str(tmp_path)}),  # a directory found by name
+    ]
+    for target, env in cases:
         result = _run("t1", "--", target, shell=shell, env=env)
         assert result.returncode == 126, (target, result.stderr)
         assert "cannot execute" in result.stderr
@@ -222,3 +231,11 @@ def test_cli_named_like_a_builtin_or_an_option_still_runs_anchored(tmp_path, she
     result = _run("t1", "--", name, shell=shell, env={"PATH": f"{tmp_path}:/usr/bin:/bin"})
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "agent:/thread-t1"
+
+
+@pytest.mark.parametrize("shell", SHELLS)
+@pytest.mark.parametrize("path", ["/usr/bin:/bin:", ":/usr/bin:/bin", "/usr/bin::/bin"])
+def test_empty_path_entry_means_the_current_directory(tmp_path, shell, path):
+    _executable(tmp_path / "local-cli", "#!/bin/sh\necho ran\n")
+    result = _run("t1", "--", "local-cli", shell=shell, env={"PATH": path}, cwd=tmp_path)
+    assert result.stdout.strip() == "ran", result.stderr

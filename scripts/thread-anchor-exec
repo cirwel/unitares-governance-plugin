@@ -63,19 +63,23 @@ case "$name" in
         fi
         ;;
     *)
-        set -f
-        old_ifs=$IFS
-        IFS=:
-        for dir in ${PATH-}; do
+        # Walk PATH by hand: field splitting on `:` drops empty entries
+        # differently from shell to shell, and an empty entry means the
+        # current directory.
+        rest=${PATH-}
+        while :; do
+            case "$rest" in
+                *:*) dir=${rest%%:*}; rest=${rest#*:}; more=1 ;;
+                *) dir=$rest; more= ;;
+            esac
             [ -n "$dir" ] || dir=.
             if [ -f "$dir/$name" ] && [ -x "$dir/$name" ]; then
                 cli=$dir/$name
                 break
             fi
-            [ -f "$dir/$name" ] && blocked=1
+            [ -e "$dir/$name" ] && blocked=1
+            [ -n "$more" ] || break
         done
-        IFS=$old_ifs
-        set +f
         ;;
 esac
 if [ -z "$cli" ]; then
