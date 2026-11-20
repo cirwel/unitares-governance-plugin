@@ -625,7 +625,8 @@ def test_nested_lookup_target_is_not_treated_as_a_slot_proof(
         ("USE_TOOL", "knowledge"),
         (" use_tool ", "knowledge"),
         ("mcp__unitares-governance__use_tool", "knowledge"),
-        ("use_tool", "mcp__unitares__use_tool"),
+        ("mcp_unitares_use_tool", "knowledge"),
+        ("use_tool", "mcp_unitares_knowledge"),
     ],
 )
 def test_gateway_name_variants_cannot_skip_the_nested_proof_check(
@@ -634,8 +635,6 @@ def test_gateway_name_variants_cannot_skip_the_nested_proof_check(
     sidecar = _sidecar(tmp_path, fake_server)
     _slot_a(sidecar)
     inner = {"action": "search", "client_session_id": "agent-foreign-111"}
-    if inner_tool != "knowledge":
-        inner = {"tool_name": "knowledge", "arguments": inner}
 
     status, payload = sidecar.tool_call(
         {"name": outer_name, "arguments": {"tool_name": inner_tool, "arguments": inner}},
@@ -664,20 +663,28 @@ def test_non_object_gateway_arguments_are_refused(
     assert FakeGovernanceHandler.calls == []
 
 
-def test_gateway_nesting_beyond_the_cap_is_refused(tmp_path: Path, fake_server: str) -> None:
+@pytest.mark.parametrize("inner_tool", ["use_tool", "mcp__unitares__use_tool", "mcp_unitares_use_tool"])
+def test_gateway_invoking_the_gateway_is_refused(
+    tmp_path: Path, fake_server: str, inner_tool: str,
+) -> None:
+    # The server refuses use_tool invoking itself, so only one gateway layer
+    # exists and the sidecar checks exactly that one.
     sidecar = _sidecar(tmp_path, fake_server)
     _slot_a(sidecar)
-    inner: dict = {"action": "search"}
-    for _ in range(identity_sidecar.MAX_GATEWAY_DEPTH + 1):
-        inner = {"tool_name": "use_tool", "arguments": inner}
 
     status, payload = sidecar.tool_call(
-        {"name": "use_tool", "arguments": inner},
+        {
+            "name": "use_tool",
+            "arguments": {
+                "tool_name": inner_tool,
+                "arguments": {"tool_name": "knowledge", "arguments": {"action": "search"}},
+            },
+        },
         headers={},
     )
 
     assert status == 409
-    assert "nested more than" in payload["error"]
+    assert "use_tool invoking use_tool" in payload["error"]
     assert FakeGovernanceHandler.calls == []
 
 
@@ -761,8 +768,11 @@ def test_recursively_nested_foreign_gateway_proof_is_rejected(
         headers={},
     )
 
+    # The server refuses use_tool invoking itself, so the sidecar refuses the
+    # nested gateway outright rather than checking a layer that never runs.
     assert status == 409
-    assert "arguments.arguments.client_session_id" in payload["error"]
+    assert "use_tool invoking use_tool" in payload["error"]
+    assert FakeGovernanceHandler.calls == []
     assert FakeGovernanceHandler.calls == []
 
 
@@ -1333,9 +1343,9 @@ def test_the_bound_agent_id_still_resumes(tmp_path: Path, fake_server: str, agen
     sidecar = _sidecar(tmp_path, fake_server)
     _bind_slot_a(sidecar)
 
-    arguments, _lifecycle = sidecar.prepare_tool_arguments(
+    _name, arguments, _lifecycle = sidecar.prepare_tool_arguments(
         name="identity",
-        arguments={"agent_id": agent_id, "resume": True},
+        arguments={"agent_id": agent_id, "client_session_id": BOUND_CSID, "resume": True},
         slot="slot-a",
     )
 
@@ -1480,7 +1490,7 @@ def test_inherited_binding_is_not_used_for_session_proof(tmp_path: Path, fake_se
     _bind_slot_a(sidecar, prior_process=True)
 
     ensured = sidecar.ensure_session("slot-a")
-    arguments, lifecycle = sidecar.prepare_tool_arguments(
+    _name, arguments, lifecycle = sidecar.prepare_tool_arguments(
         name="process_agent_update",
         arguments={"response_text": "x"},
         slot="slot-a",
@@ -1729,10 +1739,315 @@ def test_a_strict_bind_may_pin_the_owner_by_any_server_alias(
     sidecar = _sidecar(tmp_path, fake_server)
     _bind_slot_a(sidecar)
 
-    arguments, _lifecycle = sidecar.prepare_tool_arguments(
+    _name, arguments, _lifecycle = sidecar.prepare_tool_arguments(
         name="bind_session",
         arguments={"client_session_id": BOUND_CSID, "agent_id": alias, "strict": True},
         slot="slot-a",
     )
 
     assert arguments["agent_id"] == alias
+
+
+# --- Check what is sent, send what was checked -----------------------------
+#
+# The server strips an "mcp_unitares_" tool-name prefix and merges object or
+# JSON-string kwargs over the outer arguments. The sidecar canonicalizes both
+# before any check and forwards the canonical call.
+
+
+def _forwarded(transport: str) -> tuple[str, dict]:
+    (sent,) = FakeGovernanceHandler.calls
+    if transport == "mcp":
+        sent = sent["params"]
+    return sent["name"], sent["arguments"]
+
+
+@pytest.mark.parametrize("transport", ["rest", "mcp"])
+@pytest.mark.parametrize(
+    "name, arguments",
+    [
+        ("mcp_unitares_onboard", {}),
+        ("mcp_unitares_start_session", {"force_new": False}),
+        ("MCP_UNITARES_ONBOARD", {}),
+        ("mcp_unitares_identity", {"agent_uuid": FOREIGN_UUID}),
+        ("mcp_unitares_identity", {"client_session_id": BOUND_CSID, "resume": False}),
+        ("mcp_unitares_use_tool", {"tool_name": "onboard"}),
+        ("use_tool", {"tool_name": "mcp_unitares_onboard"}),
+    ],
+)
+def test_the_server_name_prefix_cannot_skip_the_owner_rule(
+    tmp_path: Path, fake_server: str, transport: str, name: str, arguments: dict,
+) -> None:
+    sidecar = _sidecar(tmp_path, fake_server)
+    before = _bind_slot_a(sidecar)
+
+    status, _message, _payload = _call(sidecar, transport, name, arguments)
+
+    assert status == 409
+    assert FakeGovernanceHandler.calls == []
+    assert sidecar.read_session("slot-a") == before
+
+
+@pytest.mark.parametrize("transport", ["rest", "mcp"])
+@pytest.mark.parametrize(
+    "name",
+    ["mcp_unitares_mcp_unitares_onboard", "mcp_other_onboard", "mcp__unitares__mcp_x", "mcp_unitares_", " ", 7],
+)
+def test_a_tool_name_the_sidecar_cannot_canonicalize_is_refused(
+    tmp_path: Path, fake_server: str, transport: str, name: object,
+) -> None:
+    sidecar = _sidecar(tmp_path, fake_server)
+    _bind_slot_a(sidecar)
+
+    if transport == "rest":
+        status, _payload = sidecar.tool_call({"name": name, "arguments": {}}, headers={})
+    else:
+        status, _payload = _mcp_call(sidecar, name, {})  # type: ignore[arg-type]
+
+    assert status in {400, 409}
+    assert FakeGovernanceHandler.calls == []
+
+
+@pytest.mark.parametrize("transport", ["rest", "mcp"])
+@pytest.mark.parametrize("name", ["mcp_unitares_knowledge", "mcp__unitares__Knowledge", " KNOWLEDGE "])
+def test_the_canonical_tool_name_is_what_is_forwarded(
+    tmp_path: Path, fake_server: str, transport: str, name: str,
+) -> None:
+    sidecar = _sidecar(tmp_path, fake_server)
+    _bind_slot_a(sidecar)
+
+    status, _message, _payload = _call(sidecar, transport, name, {"action": "search"})
+
+    assert status == 200
+    sent_name, sent_arguments = _forwarded(transport)
+    assert sent_name == "knowledge"
+    assert sent_arguments["client_session_id"] == BOUND_CSID
+
+
+def _wrap(arguments: dict, as_string: bool) -> dict:
+    return {"kwargs": json.dumps(arguments) if as_string else arguments}
+
+
+@pytest.mark.parametrize("transport", ["rest", "mcp"])
+@pytest.mark.parametrize("as_string", [False, True])
+@pytest.mark.parametrize(
+    "name, outer, wrapped",
+    [
+        # A wrapped flag replaces the checked outer one.
+        ("onboard", {"force_new": False, "client_session_id": BOUND_CSID}, {"force_new": True}),
+        ("onboard", {"force_new": False, "client_session_id": BOUND_CSID}, {"resume": False}),
+        ("identity", {"client_session_id": BOUND_CSID}, {"parent_agent_id": BOUND_UUID}),
+        # Wrapped proof replaces the checked outer proof.
+        ("identity", {"client_session_id": BOUND_CSID}, {"client_session_id": "agent-foreign-222"}),
+        ("knowledge", {"action": "search"}, {"client_session_id": "agent-foreign-222"}),
+        # A wrapped gateway target or nested proof.
+        ("use_tool", {"tool_name": "knowledge"}, {"tool_name": "onboard"}),
+        ("use_tool", {"tool_name": "knowledge"}, {"arguments": {"client_session_id": "agent-foreign-222"}}),
+        ("use_tool", {"tool_name": "knowledge", "arguments": {"kwargs": {"client_session_id": "agent-foreign-222"}}}, {}),
+    ],
+)
+def test_wrapped_kwargs_cannot_replace_what_was_checked(
+    tmp_path: Path, fake_server: str, transport: str, as_string: bool,
+    name: str, outer: dict, wrapped: dict,
+) -> None:
+    sidecar = _sidecar(tmp_path, fake_server)
+    before = _bind_slot_a(sidecar)
+
+    status, _message, _payload = _call(sidecar, transport, name, {**outer, **_wrap(wrapped, as_string)})
+
+    assert status == 409
+    assert FakeGovernanceHandler.calls == []
+    assert sidecar.read_session("slot-a") == before
+
+
+@pytest.mark.parametrize("transport", ["rest", "mcp"])
+def test_a_wrapped_subagent_mint_is_refused_in_an_empty_slot(
+    tmp_path: Path, fake_server: str, transport: str,
+) -> None:
+    sidecar = _sidecar(tmp_path, fake_server)
+
+    status, message, _payload = _call(
+        sidecar, transport, "onboard", {"kwargs": {"kwargs": '{"spawn_reason": "subagent"}'}},
+    )
+
+    assert status == 409
+    assert "subagent" in message
+    assert FakeGovernanceHandler.calls == []
+
+
+@pytest.mark.parametrize("transport", ["rest", "mcp"])
+def test_flattened_kwargs_are_what_is_forwarded(
+    tmp_path: Path, fake_server: str, transport: str,
+) -> None:
+    sidecar = _sidecar(tmp_path, fake_server)
+    _bind_slot_a(sidecar)
+    arguments = {
+        "tool_name": "knowledge",
+        "action": "outer",
+        "kwargs": json.dumps({"action": "middle", "kwargs": {"limit": 3}}),
+        "arguments": {"query": "x", "kwargs": '{"action": "search"}'},
+    }
+
+    status, _message, _payload = _call(sidecar, transport, "use_tool", arguments)
+
+    assert status == 200
+    sent_name, sent_arguments = _forwarded(transport)
+    assert sent_name == "use_tool"
+    assert sent_arguments == {
+        "tool_name": "knowledge",
+        "action": "middle",
+        "limit": 3,
+        "arguments": {"query": "x", "action": "search"},
+        "client_session_id": BOUND_CSID,
+    }
+
+
+@pytest.mark.parametrize("transport", ["rest", "mcp"])
+@pytest.mark.parametrize("kwargs", ["not json", "[1]", '"x"', None, ["x"], 7])
+def test_kwargs_the_sidecar_cannot_flatten_are_refused(
+    tmp_path: Path, fake_server: str, transport: str, kwargs: object,
+) -> None:
+    sidecar = _sidecar(tmp_path, fake_server)
+    _bind_slot_a(sidecar)
+
+    status, message, _payload = _call(sidecar, transport, "knowledge", {"action": "search", "kwargs": kwargs})
+
+    assert status == 409
+    assert "kwargs" in message
+    assert FakeGovernanceHandler.calls == []
+
+
+def test_kwargs_nested_past_the_cap_are_refused(tmp_path: Path, fake_server: str) -> None:
+    sidecar = _sidecar(tmp_path, fake_server)
+    _bind_slot_a(sidecar)
+    arguments: dict = {"action": "search"}
+    for _ in range(identity_sidecar.MAX_KWARGS_DEPTH + 1):
+        arguments = {"kwargs": arguments}
+
+    status, payload = sidecar.tool_call({"name": "knowledge", "arguments": arguments}, headers={})
+
+    assert status == 409
+    assert "nested more than" in payload["error"]
+    assert FakeGovernanceHandler.calls == []
+
+
+@pytest.mark.parametrize("transport", ["rest", "mcp"])
+@pytest.mark.parametrize(
+    "name, arguments",
+    [
+        # The server skips reuse and mints when resume is not true.
+        ("onboard", {"force_new": False, "client_session_id": BOUND_CSID, "resume": False}),
+        ("start_session", {"force_new": False, "client_session_id": BOUND_CSID, "resume": "false"}),
+        ("identity", {"client_session_id": BOUND_CSID, "resume": False}),
+        ("identity", {"client_session_id": BOUND_CSID, "resume": None}),
+        ("identity", {"agent_uuid": BOUND_UUID, "resume": 0}),
+        ("identity", {"client_session_id": BOUND_CSID, "force_new": None}),
+        ("identity", {"client_session_id": BOUND_CSID, "spawn_reason": "new_session"}),
+        # Matching proof that does not pin the session: the server resolves
+        # the session from the transport and may mint for it.
+        ("onboard", {"force_new": False, "agent_uuid": BOUND_UUID}),
+        ("onboard", {"force_new": False, "agent_id": "Bound_Owner"}),
+        ("identity", {"agent_id": "Bound_Owner"}),
+    ],
+)
+def test_matching_proof_that_could_still_mint_is_refused(
+    tmp_path: Path, fake_server: str, transport: str, name: str, arguments: dict,
+) -> None:
+    sidecar = _sidecar(tmp_path, fake_server)
+    before = _bind_slot_a(sidecar)
+
+    status, message, _payload = _call(sidecar, transport, name, arguments)
+
+    assert status == 409
+    assert "already bound" in message
+    assert FakeGovernanceHandler.calls == []
+    assert sidecar.read_session("slot-a") == before
+
+
+@pytest.mark.parametrize("transport", ["rest", "mcp"])
+@pytest.mark.parametrize(
+    "name, arguments",
+    [
+        ("onboard", {"force_new": False, "client_session_id": BOUND_CSID}),
+        ("onboard", {"force_new": False, "client_session_id": BOUND_CSID, "resume": True}),
+        ("start_session", {"force_new": False, "client_session_id": BOUND_CSID, "agent_id": "Bound_Owner"}),
+        ("identity", {"client_session_id": BOUND_CSID, "name": "Renamed"}),
+        ("identity", {"agent_uuid": BOUND_UUID}),
+        ("identity", {"agent_uuid": BOUND_UUID, "resume": True, "force_new": False}),
+        ("bind_session", {"client_session_id": BOUND_CSID, "resume": True}),
+    ],
+)
+def test_a_resume_of_the_bound_identity_is_forwarded_as_sent(
+    tmp_path: Path, fake_server: str, transport: str, name: str, arguments: dict,
+) -> None:
+    sidecar = _sidecar(tmp_path, fake_server)
+    _bind_slot_a(sidecar)
+
+    status, _message, _payload = _call(sidecar, transport, name, {"kwargs": dict(arguments)})
+
+    assert status == 200
+    sent_name, sent_arguments = _forwarded(transport)
+    assert sent_name == name
+    assert "kwargs" not in sent_arguments
+    for key, value in arguments.items():
+        assert sent_arguments[key] == value
+
+
+def test_a_batch_with_a_repeated_tools_call_id_is_refused(tmp_path: Path, fake_server: str) -> None:
+    # Replies are matched to calls by id; a repeated id would let one call's
+    # reply be read as an identity reply.
+    sidecar = _sidecar(tmp_path, fake_server)
+    call = {"jsonrpc": "2.0", "id": 1, "method": "tools/call"}
+
+    status, payload = sidecar.mcp_proxy(
+        [
+            {**call, "params": {"name": "knowledge", "arguments": {"action": "search"}}},
+            {**call, "params": {"name": "onboard", "arguments": {}}},
+        ],
+        headers={},
+        path="/mcp/",
+    )
+
+    assert status == 409
+    assert "repeated" in payload["error"]["message"]
+    assert FakeGovernanceHandler.calls == []
+
+
+@pytest.mark.parametrize("params", [None, ["onboard"], {"name": "onboard", "arguments": "{}"}])
+def test_an_unreadable_mcp_tools_call_is_refused_not_passed_through(
+    tmp_path: Path, fake_server: str, params: object,
+) -> None:
+    sidecar = _sidecar(tmp_path, fake_server)
+    _bind_slot_a(sidecar)
+
+    status, _payload = sidecar.mcp_proxy(
+        {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": params},
+        headers={},
+        path="/mcp/",
+    )
+
+    assert status == 409
+    assert FakeGovernanceHandler.calls == []
+
+
+@pytest.mark.parametrize("transport", ["rest", "mcp"])
+@pytest.mark.parametrize(
+    "name, arguments",
+    [
+        ("identity", {"client_session_id": f" {BOUND_CSID} "}),
+        ("onboard", {"force_new": False, "client_session_id": f"{BOUND_CSID}\n"}),
+        ("knowledge", {"action": "search", "client_session_id": f" {BOUND_CSID}"}),
+        ("identity", {"client_session_id": BOUND_CSID, "agent_id": " Bound_Owner "}),
+    ],
+)
+def test_proof_is_compared_exactly_as_it_is_forwarded(
+    tmp_path: Path, fake_server: str, transport: str, name: str, arguments: dict,
+) -> None:
+    sidecar = _sidecar(tmp_path, fake_server)
+    _bind_slot_a(sidecar)
+
+    status, message, _payload = _call(sidecar, transport, name, arguments)
+
+    assert status == 409
+    assert "configured slot binding" in message
+    assert FakeGovernanceHandler.calls == []

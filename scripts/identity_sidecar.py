@@ -8,11 +8,15 @@ It wraps the server's `/v1/tools/call` surface with local lifecycle help:
 * lazy onboard when a slot has no cached `client_session_id`
 * inject `client_session_id` into attribution-relevant governance calls
 * force fresh posture for bare `onboard` / `start_session` calls
-* keep a bound slot's identity on tool calls: refuse foreign or missing
-  proof, mints and identity tools sent through use_tool before the upstream
-  call, and persist only successful responses for the bound uuid (a binding
-  marked `prior_process` is never used as proof). `POST /session/start` is
-  a separate re-onboard route and is not covered by this rule.
+* check and forward the same call: tool names and `kwargs` wrappers are
+  canonicalized the way the server reads them before any check, and a call
+  it cannot canonicalize is refused
+* keep a bound slot's identity on tool calls: forward only a resume of the
+  bound identity, refuse foreign proof and identity tools sent through
+  use_tool before the upstream call, and persist only successful responses
+  for the bound uuid (a binding marked `prior_process` is never used as
+  proof). `POST /session/start` is a separate re-onboard route and is not
+  covered by this rule.
 * stamp the slot cache after successful check-ins
 * expose the local identity-contract audit
 * proxy minimal JSON-RPC MCP `tools/call` requests through `/mcp/`
@@ -53,7 +57,6 @@ from governance_call_inject import (  # noqa: E402
     INJECT_SUFFIXES,
     PROOF_FIELDS,
     SLOT_BOUND_PROOF_FIELDS,
-    _truthy,
 )
 from governance_tool_name import parse_mcp_tool_name  # noqa: E402
 from _http_auth import authorization_safe_urlopen, read_limited_response  # noqa: E402
@@ -90,21 +93,100 @@ class RequestBodyError(ValueError):
         self.status = status
 
 
-#: use_tool layers the sidecar unwraps before it refuses the call outright.
-MAX_GATEWAY_DEPTH = 4
-
-
-def _tool_key(value: object) -> str:
-    """Normalized tool name: trimmed, casefolded, MCP prefix removed."""
-    if not isinstance(value, str):
-        return ""
-    stripped = value.strip()
-    parsed = parse_mcp_tool_name(stripped)
-    return parsed[1] if parsed else stripped.casefold()
+#: The upstream REST parser strips ``mcp_<server name>_`` from a tool name
+#: (unitares src/services/http_request_parser.py; the server is "unitares").
+UPSTREAM_NAME_PREFIX = "mcp_unitares_"
+#: ``kwargs`` wrapper levels the sidecar flattens. Upstream dispatch merges a
+#: ``kwargs`` object or JSON-object string over the outer arguments, inner
+#: keys winning, and some handlers unwrap again (params_step.unwrapped_view
+#: looks four levels deep). Deeper wrapping is refused.
+MAX_KWARGS_DEPTH = 4
 
 
 class ForeignSlotProofError(ValueError):
-    """A caller tried to route a slot-bound sidecar through another identity."""
+    """A call the sidecar refuses before any upstream call: proof for another
+    identity, a mint into a bound slot, or a shape it cannot canonicalize."""
+
+
+def canonical_tool_name(value: object) -> str:
+    """The tool name the server will dispatch, which the sidecar forwards.
+
+    Applies every name normalization the server applies (the REST
+    ``mcp_unitares_`` prefix) plus the sidecar's own (surrounding space, the
+    ``mcp__<server>__<tool>`` form, case; every server tool name is lower
+    case). A name still carrying an ``mcp_`` prefix could be read another
+    way by the server and is refused.
+    """
+    if not isinstance(value, str):
+        raise ForeignSlotProofError("sidecar refuses a tool name that is not a string")
+    stripped = value.strip()
+    parsed = parse_mcp_tool_name(stripped)
+    name = (parsed[1] if parsed else stripped).casefold()
+    if name.startswith(UPSTREAM_NAME_PREFIX):
+        name = name[len(UPSTREAM_NAME_PREFIX):]
+    if not name or name.startswith("mcp_") or name != name.strip() or len(name) > 100:
+        raise ForeignSlotProofError(
+            f"sidecar refuses tool name {value!r}: it cannot tell which tool the server would run"
+        )
+    return name
+
+
+def flatten_kwargs(arguments: dict[str, Any], where: str = "arguments") -> dict[str, Any]:
+    """The arguments as upstream dispatch will act on them, with no ``kwargs``.
+
+    Each ``kwargs`` level (an object or a JSON-object string) is merged over
+    the outer keys, inner keys winning, as upstream unwrap_kwargs does. The
+    sidecar checks and forwards this flat copy, so the server never sees a
+    wrapper it could unwrap differently. Any other ``kwargs`` value, or
+    wrapping deeper than MAX_KWARGS_DEPTH, is refused.
+    """
+    flat = {key: value for key, value in arguments.items() if key != "kwargs"}
+    layer: dict[str, Any] = arguments
+    for _ in range(MAX_KWARGS_DEPTH):
+        if "kwargs" not in layer:
+            return flat
+        wrapped = layer["kwargs"]
+        if isinstance(wrapped, str):
+            try:
+                wrapped = json.loads(wrapped)
+            except (ValueError, RecursionError):
+                wrapped = None
+        if not isinstance(wrapped, dict):
+            raise ForeignSlotProofError(
+                f"sidecar refuses {where}.kwargs that is not an object or a JSON object string"
+            )
+        flat.update({key: value for key, value in wrapped.items() if key != "kwargs"})
+        layer = wrapped
+    if "kwargs" in layer:
+        raise ForeignSlotProofError(
+            f"sidecar refuses {where}.kwargs nested more than {MAX_KWARGS_DEPTH} deep"
+        )
+    return flat
+
+
+def canonicalize_call(name: object, arguments: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    """The exact (name, arguments) the sidecar checks and then forwards.
+
+    For use_tool the target name and its arguments are canonicalized the
+    same way, since the server dispatches them as a call of their own. The
+    server refuses use_tool invoking itself, so only one gateway layer
+    exists and a nested one is refused here.
+    """
+    name = canonical_tool_name(name)
+    arguments = flatten_kwargs(arguments)
+    if name in GATEWAY_SUFFIXES:
+        if arguments.get("tool_name") is not None:
+            arguments["tool_name"] = canonical_tool_name(arguments["tool_name"])
+        if arguments.get("tool_name") in GATEWAY_SUFFIXES:
+            raise ForeignSlotProofError("sidecar refuses use_tool invoking use_tool")
+        nested = arguments.get("arguments")
+        if nested is not None:
+            if not isinstance(nested, dict):
+                raise ForeignSlotProofError(
+                    "sidecar refuses use_tool arguments that are not an object: arguments"
+                )
+            arguments["arguments"] = flatten_kwargs(nested, "arguments.arguments")
+    return name, arguments
 
 
 class BoundedThreadingHTTPServer(ThreadingHTTPServer):
@@ -529,12 +611,14 @@ class IdentitySidecar:
         """Refuse, before any upstream call, an identity call that would
         bind or mint another identity into a slot that already names one.
 
-        On a bound slot an identity call must prove the bound identity, and
-        anything the server would turn into a mint is refused: foreign slot
-        proof, any force_new mint, a declared parent_agent_id (the server
-        promotes it to a fresh mint) and an onboard, start_session or
-        identity without session, token, uuid or agent_id proof (a name
-        alone is not proof; the server mints for it). Unlike the
+        ``arguments`` are the flattened arguments the sidecar forwards. On a
+        bound slot every proof given must name the bound identity, and an
+        onboard, start_session or identity call must have the one shape
+        known not to mint: a resume of the bound identity. That is
+        force_new absent or false, resume absent or true, no
+        parent_agent_id or spawn_reason, and the bound client_session_id
+        (or, for identity, the bound agent_uuid, which the server resolves
+        by uuid and never mints for). Anything else is refused. Unlike the
         pre-governance-call hook, declared lineage does not exempt a mint:
         the sidecar has no lineage support, so the owner rule would never
         cache the new identity and the caller never sees its session id. A
@@ -586,7 +670,7 @@ class IdentitySidecar:
             if (
                 not isinstance(value, str)
                 or not isinstance(expected, str)
-                or value.strip() != expected.strip()
+                or value != expected.strip()
             ):
                 mismatched.append(field)
         agent_id = arguments.get("agent_id")
@@ -597,7 +681,7 @@ class IdentitySidecar:
         pinned_by_session = key == "bind_session" and provided("client_session_id")
         if provided("agent_id") and not pinned_by_session:
             accepted = {bound_uuid, str(binding.get("agent_id") or "").strip()} - {""}
-            if not isinstance(agent_id, str) or agent_id.strip() not in accepted:
+            if not isinstance(agent_id, str) or agent_id not in accepted:
                 mismatched.append("agent_id")
         if mismatched:
             raise ForeignSlotProofError(
@@ -608,58 +692,39 @@ class IdentitySidecar:
             # bind_session never mints; without client_session_id the server
             # refuses it.
             return
-        if _truthy(arguments.get("force_new")):
-            raise ForeignSlotProofError(
-                f"sidecar slot is already bound to agent_uuid {bound_uuid}; "
-                "force_new would mint a second identity the sidecar cannot hold. "
-                + switch_hint
-            )
-        if provided("parent_agent_id"):
-            raise ForeignSlotProofError(
-                f"sidecar slot is already bound to agent_uuid {bound_uuid}; "
-                "a declared parent_agent_id makes the server mint a new identity "
-                "the sidecar cannot hold. " + switch_hint
-            )
-        if not any(provided(field) for field in PROOF_FIELDS):
-            raise ForeignSlotProofError(
-                f"sidecar slot is already bound to agent_uuid {bound_uuid}; "
-                f"a {key} call without proof of that identity would mint or "
-                "resolve another one. Pass the bound client_session_id."
-            )
-
-    def refuse_identity_tool_through_gateway(self, key: str, arguments: dict[str, Any]) -> None:
-        """Refuse an identity tool dispatched through use_tool.
-
-        The gateway would carry it upstream under the sidecar's credential
-        while its reply is processed as a use_tool result, so neither the
-        owner rule above nor the response owner rule would apply.
-        """
-        layer_name, layer = key, arguments
-        for _ in range(MAX_GATEWAY_DEPTH + 1):
-            if layer_name not in GATEWAY_SUFFIXES:
-                return
-            target = _tool_key(layer.get("tool_name"))
-            if target in IDENTITY_TOOL_NAMES:
-                raise ForeignSlotProofError(
-                    f"sidecar refuses {target} through use_tool: call it directly "
-                    "so the slot owner rule applies"
-                )
-            nested = layer.get("arguments")
-            if not isinstance(nested, dict):
-                return
-            layer_name, layer = target, nested
+        if "force_new" in arguments and arguments["force_new"] is not False:
+            reason = "force_new"
+        elif "resume" in arguments and arguments["resume"] is not True:
+            reason = "resume other than true"
+        elif arguments.get("parent_agent_id") is not None:
+            reason = "a declared parent_agent_id"
+        elif arguments.get("spawn_reason") is not None:
+            reason = "a declared spawn_reason"
+        elif not (
+            provided("client_session_id")
+            or (key == "identity" and provided("agent_uuid"))
+        ):
+            reason = f"a {key} call without the bound client_session_id"
+        else:
+            return
+        raise ForeignSlotProofError(
+            f"sidecar slot is already bound to agent_uuid {bound_uuid}; only a "
+            f"resume of that identity is forwarded, and {reason} could make the "
+            "server mint another one the sidecar cannot hold. " + switch_hint
+        )
 
     def prepare_tool_arguments(
         self,
         *,
-        name: str,
+        name: object,
         arguments: dict[str, Any],
         slot: str,
-    ) -> tuple[dict[str, Any], dict[str, Any]]:
-        arguments = dict(arguments)
+    ) -> tuple[str, dict[str, Any], dict[str, Any]]:
+        """Return the canonical (name, arguments) to forward, and lifecycle
+        notes. Every check runs on exactly what is forwarded."""
+        key, arguments = canonicalize_call(name, arguments)
         lifecycle: dict[str, Any] = {"slot": slot, "session_proof_injected": False}
 
-        key = _tool_key(name)
         if key in IDENTITY_TOOL_NAMES:
             if key in START_TOOL_NAMES:
                 arguments.setdefault("force_new", True)
@@ -667,7 +732,16 @@ class IdentitySidecar:
                 arguments.setdefault("model_type", self.model_type)
             self.refuse_identity_call_over_bound_slot(key, arguments, slot)
         elif key in INJECT_SUFFIXES:
-            self.refuse_identity_tool_through_gateway(key, arguments)
+            gateway = key in GATEWAY_SUFFIXES
+            target = arguments.get("tool_name") if gateway else None
+            if target in IDENTITY_TOOL_NAMES:
+                # The gateway would carry it upstream under the sidecar's
+                # credential while its reply is processed as a use_tool
+                # result, so neither owner rule would apply.
+                raise ForeignSlotProofError(
+                    f"sidecar refuses {target} through use_tool: call it directly "
+                    "so the slot owner rule applies"
+                )
             ensured = self.ensure_session(slot)
             lifecycle["ensure_session"] = {k: v for k, v in ensured.items() if k != "session"}
             sid = ensured.get("client_session_id")
@@ -678,28 +752,9 @@ class IdentitySidecar:
             # slot-bound proofs, as the PreToolUse hook does: agent_id and
             # agent_uuid there commonly name the agent a tool should look up.
             proof_sources = [("", arguments, PROOF_FIELDS)]
-            gateway_name = _tool_key(name)
-            gateway_arguments = arguments
-            gateway_prefix = ""
-            depth = 0
-            while gateway_name in GATEWAY_SUFFIXES:
-                nested = gateway_arguments.get("arguments")
-                if nested is None:
-                    break
-                if not isinstance(nested, dict):
-                    raise ForeignSlotProofError(
-                        "sidecar refuses use_tool arguments that are not an object: "
-                        + gateway_prefix + "arguments"
-                    )
-                depth += 1
-                if depth > MAX_GATEWAY_DEPTH:
-                    raise ForeignSlotProofError(
-                        f"sidecar refuses use_tool nested more than {MAX_GATEWAY_DEPTH} deep"
-                    )
-                gateway_prefix += "arguments."
-                proof_sources.append((gateway_prefix, nested, SLOT_BOUND_PROOF_FIELDS))
-                gateway_name = _tool_key(gateway_arguments.get("tool_name"))
-                gateway_arguments = nested
+            nested = arguments.get("arguments") if gateway else None
+            if isinstance(nested, dict):
+                proof_sources.append(("arguments.", nested, SLOT_BOUND_PROOF_FIELDS))
             provided = [
                 (prefix, field, value)
                 for prefix, source, fields in proof_sources
@@ -712,7 +767,7 @@ class IdentitySidecar:
                 for prefix, field, value in provided
                 if not isinstance(value, str)
                 or not isinstance(authority.get(field), str)
-                or value.strip() != str(authority.get(field)).strip()
+                or value != str(authority.get(field)).strip()
             ]
             if mismatched:
                 raise ForeignSlotProofError(
@@ -723,7 +778,7 @@ class IdentitySidecar:
             if isinstance(sid, str) and sid.strip() and not top_level_provided:
                 arguments["client_session_id"] = sid.strip()
                 lifecycle["session_proof_injected"] = True
-        return arguments, lifecycle
+        return key, arguments, lifecycle
 
     def process_tool_response(
         self,
@@ -738,7 +793,7 @@ class IdentitySidecar:
             return None
         parsed = unwrap_tool_response(raw)
         decision = None
-        if _tool_key(name) in IDENTITY_TOOL_NAMES:
+        if name in IDENTITY_TOOL_NAMES:
             result = raw.get("result")
             if isinstance(result, dict) and result.get("isError") is True:
                 decision = "refused_failed_response"
@@ -757,7 +812,6 @@ class IdentitySidecar:
         name = body.get("name")
         if not isinstance(name, str) or not name.strip():
             return 400, {"success": False, "error": "missing tool name"}
-        name = name.strip()
         arguments = body.get("arguments")
         if arguments is None:
             arguments = {}
@@ -765,7 +819,7 @@ class IdentitySidecar:
             return 400, {"success": False, "error": "arguments must be an object"}
         slot = self.slot_from(body, headers)
         try:
-            arguments, lifecycle = self.prepare_tool_arguments(
+            name, arguments, lifecycle = self.prepare_tool_arguments(
                 name=name,
                 arguments=arguments,
                 slot=slot,
@@ -773,7 +827,7 @@ class IdentitySidecar:
         except ForeignSlotProofError as exc:
             return 409, {"success": False, "error": str(exc)}
         identity_generation = None
-        if _tool_key(name) in IDENTITY_TOOL_NAMES:
+        if name in IDENTITY_TOOL_NAMES:
             _session, identity_generation = _read_cache_snapshot(self.workspace, slot)
 
         upstream_payload = {"name": name, "arguments": arguments}
@@ -822,43 +876,60 @@ class IdentitySidecar:
                 "error": {"code": -32600, "message": "invalid JSON-RPC request"},
             }
 
-        metadata_by_id: dict[Any, tuple[str, dict[str, Any], int | None]] = {}
+        # Replies are matched to calls by id, so each tools/call id must be a
+        # JSON-RPC scalar no other call in the batch shares.
+        call_ids = [item.get("id") for item in requests if item.get("method") == "tools/call"]
+        if any(
+            isinstance(call_id, bool) or not isinstance(call_id, (str, int, float, type(None)))
+            for call_id in call_ids
+        ) or len(call_ids) != len(set(call_ids)):
+            return 409, {
+                "jsonrpc": "2.0",
+                "id": None,
+                "error": {
+                    "code": -32001,
+                    "message": "sidecar refuses tools/call ids that are repeated or not a string or number",
+                },
+            }
+
+        metadata_by_id: dict[Any, tuple[str, dict[str, Any], Any, dict[str, Any]]] = {}
         mutated: list[dict[str, Any]] = []
         for item in requests:
             req = dict(item)
             if req.get("method") == "tools/call":
+                # Every tools/call is checked and forwarded in canonical form;
+                # one the sidecar cannot read is refused, never passed through.
                 params = req.get("params")
-                if isinstance(params, dict):
-                    name = params.get("name")
-                    arguments = params.get("arguments")
-                    if isinstance(name, str):
-                        try:
-                            prepared, lifecycle = self.prepare_tool_arguments(
-                                name=name,
-                                arguments=arguments if isinstance(arguments, dict) else {},
-                                slot=slot,
-                            )
-                        except ForeignSlotProofError as exc:
-                            return 409, {
-                                "jsonrpc": "2.0",
-                                "id": req.get("id"),
-                                "error": {"code": -32001, "message": str(exc)},
-                            }
-                        new_params = dict(params)
-                        new_params["arguments"] = prepared
-                        req["params"] = new_params
-                        identity_generation = None
-                        if _tool_key(name) in IDENTITY_TOOL_NAMES:
-                            _session, identity_generation = _read_cache_snapshot(
-                                self.workspace,
-                                slot,
-                            )
-                        metadata_by_id[req.get("id")] = (
-                            name,
-                            lifecycle,
-                            identity_generation,
-                            prepared,
-                        )
+                arguments = params.get("arguments") if isinstance(params, dict) else None
+                try:
+                    if not isinstance(params, dict):
+                        raise ForeignSlotProofError("sidecar refuses tools/call params that are not an object")
+                    if arguments is not None and not isinstance(arguments, dict):
+                        raise ForeignSlotProofError("sidecar refuses tools/call arguments that are not an object")
+                    name, prepared, lifecycle = self.prepare_tool_arguments(
+                        name=params.get("name"),
+                        arguments=arguments or {},
+                        slot=slot,
+                    )
+                except ForeignSlotProofError as exc:
+                    return 409, {
+                        "jsonrpc": "2.0",
+                        "id": req.get("id"),
+                        "error": {"code": -32001, "message": str(exc)},
+                    }
+                req["params"] = {**params, "name": name, "arguments": prepared}
+                identity_generation = None
+                if name in IDENTITY_TOOL_NAMES:
+                    _session, identity_generation = _read_cache_snapshot(
+                        self.workspace,
+                        slot,
+                    )
+                metadata_by_id[req.get("id")] = (
+                    name,
+                    lifecycle,
+                    identity_generation,
+                    prepared,
+                )
             mutated.append(req)
 
         outbound: Any = mutated if isinstance(body, list) else mutated[0]
