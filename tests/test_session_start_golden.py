@@ -320,6 +320,56 @@ def test_no_dangling_hint_reference_without_a_hint(tmp_path):
     )
 
 
+ANCHOR_ENV = {
+    "UNITARES_ORCHESTRATED": "1",
+    "UNITARES_CLIENT_SESSION_ID": "agent:/thread-0001",
+    "UNITARES_ORCHESTRATED_OWNER_PID": "12345",
+    "UNITARES_HOOK_HOST_PID": "12345",
+}
+STOP_BINDS = "the Stop hook binds this conversation's anchor"
+STOP_DOES_NOT_BIND = "The Stop hook will not bind this conversation's anchor"
+
+
+@pytest.mark.parametrize("env", [
+    {},
+    {"UNITARES_AUTO_ONBOARD": "true"},
+    {"UNITARES_AUTO_ONBOARD": "anything-not-an-off-word"},
+    {"UNITARES_DISABLE_AUTO_ONBOARD": "0"},
+])
+def test_anchored_variant_promises_a_stop_bind_only_when_stop_will_bind(tmp_path, env):
+    rendered = _render(tmp_path, extra_env={**ANCHOR_ENV, **env})
+    assert STOP_BINDS in rendered
+    assert STOP_DOES_NOT_BIND not in rendered
+
+
+@pytest.mark.parametrize("env", [
+    {"UNITARES_AUTO_ONBOARD": "off"},
+    {"UNITARES_AUTO_ONBOARD": ""},  # unset or empty is the shipped default
+    {"UNITARES_AUTO_ONBOARD": "0"},
+    {"UNITARES_AUTO_ONBOARD": "FALSE"},
+    {"UNITARES_AUTO_ONBOARD": "no"},
+    {"UNITARES_DISABLE_AUTO_ONBOARD": "1"},
+    {"UNITARES_DISABLE_AUTO_ONBOARD": "true"},
+    {"UNITARES_DISABLE_AUTO_ONBOARD": "on"},
+    {"UNITARES_CHECKINS": "off"},
+])
+def test_anchored_variant_says_so_when_stop_will_not_bind(tmp_path, env):
+    """post-stop binds an unbound anchor only with check-ins on and
+    auto-onboarding on and not overridden. Telling the agent otherwise leaves
+    a conversation identity-free while it believes it is covered (#419)."""
+    rendered = _render(tmp_path, extra_env={**ANCHOR_ENV, **env})
+    assert STOP_DOES_NOT_BIND in rendered
+    assert STOP_BINDS not in rendered
+    assert "`start_session()` with no" in rendered
+    assert "Do NOT call `start_session(force_new=true)`" in rendered
+
+
+def test_golden_anchored_auto_onboard_off(tmp_path):
+    _assert_golden("anchored_auto_onboard_off", _render(
+        tmp_path, extra_env={**ANCHOR_ENV, "UNITARES_AUTO_ONBOARD": "off"},
+    ))
+
+
 def test_anchored_variant_does_not_tell_the_agent_to_force_new(tmp_path):
     rendered = _render(
         tmp_path,

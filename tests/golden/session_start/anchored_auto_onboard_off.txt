@@ -1,0 +1,24 @@
+UNITARES Governance: ONLINE (anchored session)
+This conversation carries a stable governance resume anchor, so your identity
+resumes automatically across turns — ONE identity per conversation, not a fresh
+one per turn. Do NOT call `start_session(force_new=true)`: force_new mints a
+new identity and breaks that continuity.
+If you need an identity-gated tool before your first
+turn ends, call `start_session()` with no arguments. The orchestrated anchor
+and first-bind declaration are attached to that call and resolve this
+conversation's identity. If it fails, report the failure; do not retry with
+`force_new`.
+A spawned child or reviewer must start its own identity with declared lineage;
+it must never use an inherited thread anchor.
+To declare lineage for a nested CLI, its launcher must first unset
+`UNITARES_CLIENT_SESSION_ID`, `UNITARES_ORCHESTRATED`, and
+`UNITARES_ORCHESTRATED_OWNER_PID`, then set its own
+`UNITARES_PARENT_AGENT_ID` and `UNITARES_SPAWN_REASON`.
+The Stop hook will not bind this conversation's anchor (auto-onboarding or check-ins are off).
+If this conversation has no identity yet, call `start_session()` with no
+arguments to bind it; otherwise it stays identity-free. Declare
+`parent_agent_id` only for a real spawn/handoff, never
+for the turn-to-turn flow of this conversation.
+Use `sync_state(...)` only for meaningful state worth reporting; do not
+manufacture a check-in to satisfy this note.
+Recovery: run /diagnose.
