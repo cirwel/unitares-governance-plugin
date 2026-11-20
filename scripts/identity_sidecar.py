@@ -168,7 +168,7 @@ def _json_response(
     handler.wfile.write(body)
 
 
-def _read_request_json(handler: BaseHTTPRequestHandler) -> Any:
+def _read_request_body(handler: BaseHTTPRequestHandler) -> bytes:
     raw_len = handler.headers.get("Content-Length")
     if raw_len is None:
         raise RequestBodyError(411, "Content-Length required")
@@ -186,6 +186,10 @@ def _read_request_json(handler: BaseHTTPRequestHandler) -> Any:
         raise RequestBodyError(408, "request body timed out") from None
     if len(raw) != length:
         raise RequestBodyError(400, "incomplete request body")
+    return raw
+
+
+def _decode_request_json(raw: bytes) -> Any:
     if not raw:
         return {}
     try:
@@ -958,12 +962,18 @@ def make_handler(sidecar: IdentitySidecar) -> type[BaseHTTPRequestHandler]:
                 return
             self._arm_read_deadline()
             try:
-                body = _read_request_json(self)
+                raw = _read_request_body(self)
             except RequestBodyError as exc:
                 if self._disarm_read_deadline():
                     _json_response(self, exc.status, {"success": False, "error": str(exc)})
                 return
+            # The deadline bounds reading the request, not handling it.
             if not self._disarm_read_deadline():
+                return
+            try:
+                body = _decode_request_json(raw)
+            except RequestBodyError as exc:
+                _json_response(self, exc.status, {"success": False, "error": str(exc)})
                 return
             parsed = urllib.parse.urlparse(self.path)
             path = parsed.path

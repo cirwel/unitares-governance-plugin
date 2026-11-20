@@ -688,3 +688,78 @@ def test_trickled_exit_proof_cannot_hold_u_run_past_its_deadline(
     assert finished - child_returned[0] < 2.0
     assert [path for path, _body in calls] == ["/session/start"]
     assert "u-run: warning:" in capsys.readouterr().err
+
+
+def _proof_for(path: str) -> str:
+    challenge = urllib.parse.parse_qs(urllib.parse.urlsplit(path).query)["challenge"][0]
+    return hmac.new(STARTUP_SECRET.encode(), challenge.encode(), hashlib.sha256).hexdigest()
+
+
+def _short_body_handler(*, short_part: str, ending: str) -> type[BaseHTTPRequestHandler]:
+    """A proven listener whose ``short_part`` response is valid JSON cut short.
+
+    ``ending`` is "trickle" (keep sending JSON whitespace until u-run's
+    deadline shuts the socket) or "close" (close before the declared length).
+    """
+
+    class ShortBody(BaseHTTPRequestHandler):
+        def log_message(self, _fmt, *_args):  # pragma: no cover
+            return
+
+        def do_GET(self):  # noqa: N802
+            is_proof = self.path.startswith("/startup-proof")
+            payload: dict[str, Any] = {"success": True}
+            if is_proof:
+                payload["proof"] = _proof_for(self.path)
+            body = json.dumps(payload).encode()
+            short = (short_part == "proof") == is_proof
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body) + 4000 if short else len(body)))
+            self.send_header("Connection", "keep-alive" if is_proof else "close")
+            self.end_headers()
+            self.wfile.write(body)
+            self.wfile.flush()
+            if not short:
+                self.close_connection = not is_proof
+                return
+            if ending == "trickle":
+                stop = time.monotonic() + 4.0
+                try:
+                    while time.monotonic() < stop:
+                        self.wfile.write(b" ")
+                        self.wfile.flush()
+                        time.sleep(0.05)
+                except OSError:
+                    pass
+            self.close_connection = True
+
+    return ShortBody
+
+
+@pytest.mark.parametrize("ending", ["trickle", "close"])
+@pytest.mark.parametrize("short_part", ["proof", "request"])
+def test_response_cut_short_of_its_declared_length_is_refused(
+    short_part: str, ending: str
+) -> None:
+    """A deadline-cut or truncated body is never parsed as the answer."""
+    server, thread, sidecar_url = _serve(_short_body_handler(short_part=short_part, ending=ending))
+    started = time.monotonic()
+    try:
+        with pytest.raises(u_run.URunError) as raised:
+            u_run._proven_exchange(
+                sidecar_url,
+                STARTUP_SECRET,
+                path="/health",
+                capability=CAPABILITY,
+                timeout=0.5,
+            )
+    finally:
+        _stop_server(server, thread)
+    assert time.monotonic() - started < 2.0
+    if short_part == "proof":
+        expected = u_run.SidecarUnavailable if ending == "trickle" else u_run.ListenerNotProven
+        assert type(raised.value) is expected
+    else:
+        assert type(raised.value) is u_run.URunError
+        expected_reason = "no response within" if ending == "trickle" else "IncompleteRead"
+        assert expected_reason in str(raised.value)

@@ -23,7 +23,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
 
-from _http_auth import read_limited_response
+from _http_auth import DEFAULT_MAX_RESPONSE_BYTES, read_limited_response
 
 
 DEFAULT_SERVER_URL = "http://localhost:8767"
@@ -140,14 +140,26 @@ def _sidecar_bind(sidecar_url: str) -> tuple[str, int, str]:
     return bind_host, port, base
 
 
-@contextmanager
-def _wall_clock_limit(
-    connection: http.client.HTTPConnection, seconds: float
-) -> Iterator[threading.Event]:
-    """Shut the connection down once ``seconds`` pass, however bytes arrive.
+def _exchange(
+    connection: http.client.HTTPConnection,
+    method: str,
+    path: str,
+    *,
+    headers: dict[str, str],
+    seconds: float,
+    max_bytes: int,
+    body: bytes | None = None,
+) -> tuple[http.client.HTTPResponse, bytes]:
+    """Send one request and read its whole response within ``seconds``.
 
     The socket timeout bounds each read, not the exchange: a peer that keeps
-    sending a byte at a time would otherwise hold u-run indefinitely.
+    sending a byte at a time would otherwise hold u-run indefinitely, so a
+    watchdog shuts the socket down when the wall clock runs out. That shutdown
+    can end a read early with whatever bytes had arrived, so the response is
+    accepted only if the watchdog had not fired and the body is exactly the
+    declared ``Content-Length``. Raises ``TimeoutError`` when the time ran out
+    and ``OSError``, ``http.client.HTTPException`` or ``ValueError`` when the
+    exchange failed or the response was malformed or incomplete.
     """
     expired = threading.Event()
     sock = connection.sock
@@ -163,9 +175,22 @@ def _wall_clock_limit(
     timer.daemon = True
     timer.start()
     try:
-        yield expired
+        connection.request(method, path, body=body, headers=headers)
+        response = connection.getresponse()
+        raw = read_limited_response(response, max_bytes=max_bytes)
+    except (OSError, http.client.HTTPException, ValueError) as exc:
+        if expired.is_set():
+            raise TimeoutError(f"no response within {seconds}s") from exc
+        raise
     finally:
         timer.cancel()
+    if expired.is_set():
+        raise TimeoutError(f"no response within {seconds}s")
+    # http.client counts down the declared length as it reads; anything but
+    # zero is a body cut short, or one with no declared length at all.
+    if response.length != 0:
+        raise http.client.IncompleteRead(raw, response.length)
+    return response, raw
 
 
 def _prove_listener(
@@ -174,33 +199,31 @@ def _prove_listener(
     """Challenge the listener and leave the proven connection open."""
     challenge = secrets.token_urlsafe(32)
     query = urllib.parse.urlencode({"challenge": challenge})
-    with _wall_clock_limit(connection, PROOF_TIMEOUT) as expired:
-        try:
-            connection.request(
-                "GET",
-                f"/startup-proof?{query}",
-                headers={"Accept": "application/json", "Connection": "keep-alive"},
-            )
-            response = connection.getresponse()
-            raw = read_limited_response(response, max_bytes=PROOF_MAX_BYTES)
-        except (OSError, http.client.HTTPException, ValueError) as exc:
-            if expired.is_set():
-                raise SidecarUnavailable(
-                    f"{url} did not answer the startup challenge within {PROOF_TIMEOUT}s"
-                ) from exc
-            if isinstance(exc, OSError):
-                # Refused, reset or closed before any answer, or timed out.
-                raise SidecarUnavailable(f"{url} is unavailable: {exc}") from exc
-            raise ListenerNotProven(
-                f"{url} returned a malformed startup-proof response: "
-                f"{type(exc).__name__}"
-            ) from exc
-    if expired.is_set():
+    try:
+        response, raw = _exchange(
+            connection,
+            "GET",
+            f"/startup-proof?{query}",
+            headers={"Accept": "application/json", "Connection": "keep-alive"},
+            seconds=PROOF_TIMEOUT,
+            max_bytes=PROOF_MAX_BYTES,
+        )
+    except TimeoutError as exc:
         raise SidecarUnavailable(
             f"{url} did not answer the startup challenge within {PROOF_TIMEOUT}s"
-        )
+        ) from exc
+    except OSError as exc:
+        # Refused, reset or closed before any answer.
+        raise SidecarUnavailable(f"{url} is unavailable: {exc}") from exc
+    except (http.client.HTTPException, ValueError) as exc:
+        raise ListenerNotProven(
+            f"{url} returned a malformed startup-proof response: "
+            f"{type(exc).__name__}"
+        ) from exc
     if response.status != 200:
-        raise ListenerNotProven(f"{url} answered the startup challenge with HTTP {response.status}")
+        raise ListenerNotProven(
+            f"{url} answered the startup challenge with HTTP {response.status}"
+        )
     try:
         decoded = json.loads(raw.decode("utf-8"))
     except ValueError as exc:
@@ -267,20 +290,19 @@ def _proven_exchange(
         if payload is not None:
             body = json.dumps(payload).encode("utf-8")
             headers["Content-Type"] = "application/json"
-        with _wall_clock_limit(connection, timeout) as expired:
-            try:
-                connection.sock.settimeout(timeout)
-                connection.request(
-                    "POST" if payload is not None else "GET",
-                    path,
-                    body=body,
-                    headers=headers,
-                )
-                response = connection.getresponse()
-                raw = read_limited_response(response)
-            except (OSError, http.client.HTTPException, ValueError) as exc:
-                reason = f"no response within {timeout}s" if expired.is_set() else exc
-                raise URunError(f"{url} failed: {reason}") from exc
+        try:
+            connection.sock.settimeout(timeout)
+            response, raw = _exchange(
+                connection,
+                "POST" if payload is not None else "GET",
+                path,
+                headers=headers,
+                body=body,
+                seconds=timeout,
+                max_bytes=DEFAULT_MAX_RESPONSE_BYTES,
+            )
+        except (OSError, http.client.HTTPException, ValueError) as exc:
+            raise URunError(f"{url} failed: {exc}") from exc
     finally:
         connection.close()
     if not 200 <= response.status < 300:

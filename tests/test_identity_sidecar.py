@@ -1281,40 +1281,98 @@ def test_post_headers_and_body_share_one_read_deadline(
     assert FakeGovernanceHandler.calls == []
 
 
+def _proof_exchange(client: socket.socket, challenge: str, *, keep_alive: bool) -> dict:
+    """Send one startup-proof request on ``client`` and read its whole response."""
+    connection = "Connection: keep-alive\r\n" if keep_alive else ""
+    client.sendall(
+        f"GET /startup-proof?challenge={challenge} HTTP/1.1\r\n"
+        f"Host: 127.0.0.1\r\n{connection}\r\n".encode("ascii")
+    )
+    reader = client.makefile("rb")
+    try:
+        status_line = reader.readline()
+        length = None
+        while (line := reader.readline()) not in (b"\r\n", b"\n", b""):
+            name, _, value = line.decode("latin-1").partition(":")
+            if name.strip().lower() == "content-length":
+                length = int(value.strip())
+        assert b" 200 " in status_line
+        assert length is not None
+        return json.loads(reader.read(length))
+    finally:
+        reader.close()
+
+
+def _server_closed(client: socket.socket, *, within: float = 2.0) -> bool:
+    """True when the server closes the connection (EOF) while the client waits."""
+    client.settimeout(within)
+    try:
+        return client.recv(1) == b""
+    except socket.timeout:
+        return False
+
+
 def test_startup_proof_keeps_its_connection_for_exactly_one_follow_up(
     tmp_path: Path, fake_server: str
 ) -> None:
-    import http.client
-
     sidecar = _sidecar(tmp_path, fake_server)
     sidecar.startup_secret = "startup-secret"
     server = BoundedThreadingHTTPServer(("127.0.0.1", 0), make_handler(sidecar))
     serving = threading.Thread(target=server.serve_forever, daemon=True)
     serving.start()
     port = server.server_address[1]
-    try:
-        plain = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
-        plain.request("GET", "/startup-proof?challenge=c1")
-        response = plain.getresponse()
-        response.read()
-        assert response.status == 200
-        assert response.will_close, "keep-alive is opt-in"
-        plain.close()
 
-        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
-        conn.request("GET", "/startup-proof?challenge=c2", headers={"Connection": "keep-alive"})
-        first = conn.getresponse()
-        payload = json.loads(first.read())
-        assert payload["proof"] == hmac.new(b"startup-secret", b"c2", hashlib.sha256).hexdigest()
-        assert not first.will_close
-        socket_before = conn.sock
-        # A second proof on the same connection does not extend it again.
-        conn.request("GET", "/startup-proof?challenge=c3", headers={"Connection": "keep-alive"})
-        assert conn.sock is socket_before
-        second = conn.getresponse()
-        second.read()
-        assert second.status == 200
-        assert second.will_close
-        conn.close()
+    def expected(challenge: str) -> str:
+        return hmac.new(b"startup-secret", challenge.encode(), hashlib.sha256).hexdigest()
+
+    try:
+        # Keep-alive is opt-in: without it the server closes after the proof.
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as plain:
+            assert _proof_exchange(plain, "c1", keep_alive=False)["proof"] == expected("c1")
+            assert _server_closed(plain)
+
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as client:
+            assert _proof_exchange(client, "c2", keep_alive=True)["proof"] == expected("c2")
+            assert not _server_closed(client, within=0.3), "the proven connection was not kept"
+            # The one follow-up is answered, and a second proof on the same
+            # connection does not extend it again: the server closes it.
+            assert _proof_exchange(client, "c3", keep_alive=True)["proof"] == expected("c3")
+            assert _server_closed(client)
     finally:
         _stop_server(server, serving)
+
+
+def test_request_handling_after_the_last_body_byte_is_outside_the_read_deadline(
+    tmp_path: Path, fake_server: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A body that arrived in time is handled, however long decoding takes."""
+    monkeypatch.setattr(identity_sidecar, "REQUEST_READ_DEADLINE", 0.5)
+    real_loads = json.loads
+    marker = "slow-to-decode-marker"
+    slowed: list[bool] = []
+
+    def slow_loads(text: object, *args: object, **kwargs: object) -> object:
+        # Only the sidecar's decode of the request body is slowed.
+        if isinstance(text, str) and marker in text and not slowed:
+            slowed.append(True)
+            time.sleep(1.0)
+        return real_loads(text, *args, **kwargs)
+
+    monkeypatch.setattr(identity_sidecar.json, "loads", slow_loads)
+    sidecar = _sidecar(tmp_path, fake_server)
+    server = BoundedThreadingHTTPServer(
+        ("127.0.0.1", 0), make_handler(sidecar), max_workers=1
+    )
+    serving = threading.Thread(target=server.serve_forever, daemon=True)
+    serving.start()
+    try:
+        status, payload = _http_post_json(
+            f"http://127.0.0.1:{server.server_address[1]}/v1/tools/call",
+            {"name": "knowledge", "arguments": {"action": "search", "query": marker}},
+            headers={"Authorization": f"Bearer {sidecar.capability_token}"},
+        )
+    finally:
+        _stop_server(server, serving)
+    assert status == 200
+    assert payload["result"]["success"] is True
+    assert [call["name"] for call in FakeGovernanceHandler.calls] == ["onboard", "knowledge"]
