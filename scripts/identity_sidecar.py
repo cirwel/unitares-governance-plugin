@@ -618,7 +618,10 @@ class IdentitySidecar:
         force_new absent or false, resume absent or true, no
         parent_agent_id or spawn_reason, and the bound client_session_id
         (or, for identity, the bound agent_uuid, which the server resolves
-        by uuid and never mints for). Anything else is refused. Unlike the
+        by uuid and never mints for). An accepted resume is forwarded with
+        resume=true and force_new=false set explicitly, so the server's
+        per-tool defaults cannot turn it into a mint. Anything else is
+        refused. Unlike the
         pre-governance-call hook, declared lineage does not exempt a mint:
         the sidecar has no lineage support, so the owner rule would never
         cache the new identity and the caller never sees its session id. A
@@ -706,6 +709,11 @@ class IdentitySidecar:
         ):
             reason = f"a {key} call without the bound client_session_id"
         else:
+            # Forward the flags that were checked: the server's own defaults
+            # differ by tool (identity defaults resume to false and can then
+            # mint), so an omitted flag is never left for it to decide.
+            arguments["resume"] = True
+            arguments["force_new"] = False
             return
         raise ForeignSlotProofError(
             f"sidecar slot is already bound to agent_uuid {bound_uuid}; only a "
@@ -719,9 +727,14 @@ class IdentitySidecar:
         name: object,
         arguments: dict[str, Any],
         slot: str,
+        onboard: bool = True,
     ) -> tuple[str, dict[str, Any], dict[str, Any]]:
         """Return the canonical (name, arguments) to forward, and lifecycle
-        notes. Every check runs on exactly what is forwarded."""
+        notes. Every check runs on exactly what is forwarded.
+
+        With ``onboard=False`` only the checks that need no session run, and
+        nothing is written: a batch runs them on every call before any call
+        may lazy-onboard the slot."""
         key, arguments = canonicalize_call(name, arguments)
         lifecycle: dict[str, Any] = {"slot": slot, "session_proof_injected": False}
 
@@ -742,6 +755,8 @@ class IdentitySidecar:
                     f"sidecar refuses {target} through use_tool: call it directly "
                     "so the slot owner rule applies"
                 )
+            if not onboard:
+                return key, arguments, lifecycle
             ensured = self.ensure_session(slot)
             lifecycle["ensure_session"] = {k: v for k, v in ensured.items() if k != "session"}
             sid = ensured.get("client_session_id")
@@ -892,44 +907,59 @@ class IdentitySidecar:
                 },
             }
 
+        def prepare(req: dict[str, Any], onboard: bool) -> tuple[str, dict[str, Any], dict[str, Any]]:
+            # Every tools/call is checked and forwarded in canonical form;
+            # one the sidecar cannot read is refused, never passed through.
+            params = req.get("params")
+            arguments = params.get("arguments") if isinstance(params, dict) else None
+            if not isinstance(params, dict):
+                raise ForeignSlotProofError("sidecar refuses tools/call params that are not an object")
+            if arguments is not None and not isinstance(arguments, dict):
+                raise ForeignSlotProofError("sidecar refuses tools/call arguments that are not an object")
+            return self.prepare_tool_arguments(
+                name=params.get("name"),
+                arguments=arguments or {},
+                slot=slot,
+                onboard=onboard,
+            )
+
+        # Two passes: every call's session-free checks run before any call
+        # may lazy-onboard the slot, so a batch refused for one call's
+        # canonical form, identity or arguments mints nothing upstream.
         metadata_by_id: dict[Any, tuple[str, dict[str, Any], Any, dict[str, Any]]] = {}
-        mutated: list[dict[str, Any]] = []
-        for item in requests:
-            req = dict(item)
-            if req.get("method") == "tools/call":
-                # Every tools/call is checked and forwarded in canonical form;
-                # one the sidecar cannot read is refused, never passed through.
-                params = req.get("params")
-                arguments = params.get("arguments") if isinstance(params, dict) else None
+        calls = [item for item in requests if item.get("method") == "tools/call"]
+        prepared_calls: dict[int, tuple[str, dict[str, Any], dict[str, Any]]] = {}
+        for onboard in (False, True):
+            for item in calls:
                 try:
-                    if not isinstance(params, dict):
-                        raise ForeignSlotProofError("sidecar refuses tools/call params that are not an object")
-                    if arguments is not None and not isinstance(arguments, dict):
-                        raise ForeignSlotProofError("sidecar refuses tools/call arguments that are not an object")
-                    name, prepared, lifecycle = self.prepare_tool_arguments(
-                        name=params.get("name"),
-                        arguments=arguments or {},
-                        slot=slot,
-                    )
+                    name, prepared, lifecycle = prepare(item, onboard)
                 except ForeignSlotProofError as exc:
                     return 409, {
                         "jsonrpc": "2.0",
-                        "id": req.get("id"),
+                        "id": item.get("id"),
                         "error": {"code": -32001, "message": str(exc)},
                     }
-                req["params"] = {**params, "name": name, "arguments": prepared}
+                if not onboard:
+                    continue
+                prepared_calls[id(item)] = (name, prepared, lifecycle)
                 identity_generation = None
                 if name in IDENTITY_TOOL_NAMES:
                     _session, identity_generation = _read_cache_snapshot(
                         self.workspace,
                         slot,
                     )
-                metadata_by_id[req.get("id")] = (
+                metadata_by_id[item.get("id")] = (
                     name,
                     lifecycle,
                     identity_generation,
                     prepared,
                 )
+        mutated: list[dict[str, Any]] = []
+        for item in requests:
+            req = dict(item)
+            if id(item) in prepared_calls:
+                name, prepared, _lifecycle = prepared_calls[id(item)]
+                req["params"] = {**req["params"], "name": name, "arguments": prepared}
             mutated.append(req)
 
         outbound: Any = mutated if isinstance(body, list) else mutated[0]

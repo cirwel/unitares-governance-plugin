@@ -2051,3 +2051,102 @@ def test_proof_is_compared_exactly_as_it_is_forwarded(
     assert status == 409
     assert "configured slot binding" in message
     assert FakeGovernanceHandler.calls == []
+
+
+# A stub of the server's identity tools that applies its schema defaults:
+# identity defaults resume to False and then skips reuse, so it can mint;
+# onboard and start_session default resume to True. Every tool defaults
+# force_new to False.
+_SCHEMA_RESUME_DEFAULT = {"identity": False, "onboard": True, "start_session": True}
+
+
+def _schema_default_server(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
+    seen: list[dict] = []
+
+    def reply(name: str, arguments: dict) -> dict:
+        resume = arguments.get("resume", _SCHEMA_RESUME_DEFAULT[name])
+        force_new = arguments.get("force_new", False)
+        minted = bool(force_new) or not resume
+        seen.append({"name": name, "arguments": dict(arguments), "minted": minted})
+        return {
+            "success": True,
+            "uuid": FOREIGN_UUID if minted else BOUND_UUID,
+            "client_session_id": "agent-minted-222" if minted else BOUND_CSID,
+        }
+
+    def rest(_url, payload, *_args, **_kwargs):
+        return {"result": reply(payload["name"], payload["arguments"])}, 1, None
+
+    def mcp(_url, payload, *_args, **_kwargs):
+        params = payload["params"]
+        result = {"content": [{"type": "text", "text": json.dumps(
+            reply(params["name"], params["arguments"])
+        )}]}
+        return {"jsonrpc": "2.0", "id": payload.get("id"), "result": result}, 200, 1, None
+
+    monkeypatch.setattr(identity_sidecar, "_post_json", rest)
+    monkeypatch.setattr(identity_sidecar, "_post_json_any", mcp)
+    return seen
+
+
+@pytest.mark.parametrize("transport", ["rest", "mcp"])
+@pytest.mark.parametrize(
+    "name, arguments",
+    [
+        ("identity", {"client_session_id": BOUND_CSID}),
+        ("identity", {"client_session_id": BOUND_CSID, "name": "Renamed"}),
+        ("identity", {"agent_uuid": BOUND_UUID}),
+        ("onboard", {"force_new": False, "client_session_id": BOUND_CSID}),
+        ("start_session", {"force_new": False, "client_session_id": BOUND_CSID}),
+    ],
+)
+def test_an_accepted_resume_is_forwarded_with_the_flags_that_were_checked(
+    tmp_path: Path, fake_server: str, monkeypatch: pytest.MonkeyPatch,
+    transport: str, name: str, arguments: dict,
+) -> None:
+    # The guard accepts resume omitted as a resume; the server's defaults
+    # must not then decide otherwise.
+    sidecar = _sidecar(tmp_path, fake_server)
+    before = _bind_slot_a(sidecar)
+    seen = _schema_default_server(monkeypatch)
+
+    status, _message, _payload = _call(sidecar, transport, name, dict(arguments))
+
+    assert status == 200
+    (call,) = seen
+    assert call["arguments"]["resume"] is True
+    assert call["arguments"]["force_new"] is False
+    assert call["minted"] is False
+    assert sidecar.read_session("slot-a")["uuid"] == before["uuid"]
+
+
+@pytest.mark.parametrize(
+    "refused",
+    [
+        {"name": "onboard", "arguments": {"spawn_reason": "subagent"}},
+        {"name": "use_tool", "arguments": {"tool_name": "identity", "arguments": {}}},
+        {"name": "use_tool", "arguments": {"tool_name": "use_tool"}},
+        {"name": "knowledge", "arguments": "not an object"},
+    ],
+)
+def test_a_batch_that_will_be_refused_does_not_onboard_first(
+    tmp_path: Path, fake_server: str, refused: dict,
+) -> None:
+    # The first call would lazy-onboard the empty slot; a later call fails
+    # its own checks, so nothing may reach the server.
+    sidecar = _sidecar(tmp_path, fake_server)
+
+    status, payload = sidecar.mcp_proxy(
+        [
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+             "params": {"name": "knowledge", "arguments": {"action": "search"}}},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": refused},
+        ],
+        headers={},
+        path="/mcp/",
+    )
+
+    assert status == 409
+    assert payload["id"] == 2
+    assert FakeGovernanceHandler.calls == []
+    assert sidecar.read_session("slot-a") == {}
