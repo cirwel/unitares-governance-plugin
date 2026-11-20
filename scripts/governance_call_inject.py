@@ -51,13 +51,15 @@ Contract:
   permissionDecision="allow" whenever updatedInput is returned. Codex rewrites
   only anchored lifecycle, check-in, and read-only diagnostic calls; admin-
   capable tools keep their normal permission flow and require explicit proof.
-- Denies, for Claude's bundled server alias only, any call that would carry
-  a proof field (injected or agent-supplied, including inside a ``kwargs``
-  wrapper or a gateway call's nested arguments) when UNITARES_SERVER_URL is
-  not HTTPS or plain loopback HTTP. The Claude manifest routes every tool on
-  that alias here. Nesting past the scan limit, and a payload too deep to
-  parse, count as carrying proof. Proofless calls pass; other aliases are not
-  checked because their transport is configured outside this plugin.
+- Denies, for Claude's bundled server only (matched by its tool-name
+  prefix), any call whose input names a proof field anywhere (injected or
+  agent-supplied, as a key, a value, text, or inside a string holding JSON)
+  when UNITARES_SERVER_URL is not HTTPS or loopback HTTP as Claude's WHATWG
+  URL parser reads it. The Claude manifest routes every tool on that server
+  here. An input past the scan budget, a scan error, and a payload the hook
+  cannot read count as carrying proof. Calls that never name a proof field
+  pass; other aliases are not checked because their transport is configured
+  outside this plugin.
 - Fails open: any error or missing cache → no output, tool runs untouched.
 
 Known residual (KNOWINGLY ACCEPTED, council-reviewed 2026-06-12): both this
@@ -90,7 +92,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _http_auth import is_secure_governance_url
-from governance_tool_name import governance_tool_suffix, parse_mcp_tool_name
+from governance_tool_name import governance_tool_suffix
 
 # Tag normalization (formatting-only, fail-open) is folded into this single
 # hook on purpose: a second PreToolUse hook emitting its own updatedInput for
@@ -359,46 +361,60 @@ def _gateway_target_injectable(tool_input: dict) -> bool:
     return not _has_proof_field(nested)
 
 
-# Containers the server unwraps or forwards: ``kwargs`` (a dict or a
-# JSON-object string, unwrapped up to four levels deep) and a gateway call's
-# ``arguments``. Deep enough for both chains together.
-_PROOF_CONTAINER_KEYS = ("kwargs", "arguments")
-_PROOF_SCAN_DEPTH = 10
+# One budget for the whole proof scan: each node visited costs one, and each
+# string costs its length, because the scan may decode it as JSON. A call that
+# needs more is denied rather than half-scanned.
+_PROOF_SCAN_BUDGET = 4_000_000
+_BUNDLED_CLAUDE_TOOL_PREFIX = f"mcp__{BUNDLED_CLAUDE_SERVER_ALIAS}__"
 
 
-def _carries_proof(value: object, _depth: int = 0) -> bool:
-    """Whether a call input carries proof anywhere it would be sent.
+def _carries_proof(value: object) -> bool:
+    """Whether a call input names a proof field anywhere it would be sent.
 
-    Checks the top level, then every ``kwargs`` and ``arguments`` container
-    below it, whether a dict, a list, or a string holding JSON. A container
-    the server would refuse still crosses the wire, so its proof counts.
-    For the same reason the scan fails closed: nesting deeper than the scan
-    limit counts as carrying proof, and so does a string container that does
-    not parse but names a proof field.
+    The whole input crosses the wire, whatever the server later accepts or
+    rejects, so the scan walks all of it: every dict key and value, every
+    list item, and every string, which it also decodes when the string holds
+    JSON and then walks again. Any string that contains a proof field name,
+    raw or decoded, counts as proof, whether it is a key, a value or text.
+    The scan fails closed: running out of budget, or a string the JSON
+    decoder cannot finish (RecursionError), counts as proof too.
     """
-    if _depth > _PROOF_SCAN_DEPTH:
-        return True
-    if isinstance(value, list):
-        return any(_carries_proof(item, _depth + 1) for item in value)
-    if not isinstance(value, dict):
-        return False
-    if _has_proof_field(value):
-        return True
-    for key in _PROOF_CONTAINER_KEYS:
-        nested = value.get(key)
-        if isinstance(nested, str):
-            text = nested
-            try:
-                nested = json.loads(text)
-            except (ValueError, RecursionError):
-                nested = text
-            if isinstance(nested, str):
-                if any(field in nested for field in PROOF_FIELDS):
-                    return True
-                continue
-        if _carries_proof(nested, _depth + 1):
+    budget = _PROOF_SCAN_BUDGET
+    pending = [value]
+    while pending:
+        item = pending.pop()
+        budget -= 1 + (len(item) if isinstance(item, str) else 0)
+        if budget < 0:
             return True
+        if isinstance(item, dict):
+            pending.extend(item.keys())
+            pending.extend(item.values())
+        elif isinstance(item, (list, tuple)):
+            pending.extend(item)
+        elif isinstance(item, str):
+            if any(field in item for field in PROOF_FIELDS):
+                return True
+            try:
+                decoded = json.loads(item)
+            except ValueError:
+                continue
+            except RecursionError:
+                return True
+            if isinstance(decoded, (dict, list, str)):
+                pending.append(decoded)
     return False
+
+
+def _is_bundled_claude_tool(tool_name: object) -> bool:
+    """Whether ``tool_name`` belongs to the plugin's bundled Claude server.
+
+    Claude names a tool ``mcp__<server>__<tool>``, and ``<tool>`` may itself
+    contain ``__``, so the server is matched by its known prefix rather than
+    by splitting the name.
+    """
+    return isinstance(tool_name, str) and tool_name.casefold().startswith(
+        _BUNDLED_CLAUDE_TOOL_PREFIX
+    )
 
 
 def _insecure_bundled_transport_reason(
@@ -410,22 +426,22 @@ def _insecure_bundled_transport_reason(
     .mcp.json expands it. Over cleartext HTTP to a non-loopback host, any
     client_session_id or continuity_token in the call, whether this hook
     injected it or the agent supplied it, could be read on the path and
-    replayed. Such calls are denied; calls without proof pass unchanged.
+    replayed. Such calls are denied; calls that never name a proof field
+    pass unchanged.
     """
-    if host != "claude":
-        return ""
-    parsed = parse_mcp_tool_name(data.get("tool_name"))
-    if parsed is None or parsed[0] != BUNDLED_CLAUDE_SERVER_ALIAS:
+    if host != "claude" or not _is_bundled_claude_tool(data.get("tool_name")):
         return ""
     specific = (output or {}).get("hookSpecificOutput") or {}
     if specific.get("permissionDecision") == "deny":
         return ""
-    effective = specific.get("updatedInput", data.get("tool_input"))
-    if not _carries_proof(effective):
-        return ""
     if _bundled_transport_is_secure():
         return ""
-    return _INSECURE_TRANSPORT_REASON
+    effective = specific.get("updatedInput", data.get("tool_input"))
+    try:
+        carries = _carries_proof(effective)
+    except Exception:
+        carries = True
+    return _INSECURE_TRANSPORT_REASON if carries else ""
 
 
 _INSECURE_TRANSPORT_REASON = (
@@ -440,18 +456,19 @@ _INSECURE_TRANSPORT_REASON = (
 def _bundled_transport_is_secure() -> bool:
     """Whether Claude's bundled server URL, as .mcp.json expands it, is safe."""
     url = os.environ.get("UNITARES_SERVER_URL") or BUNDLED_CLAUDE_DEFAULT_SERVER_URL
-    return is_secure_governance_url(f"{url}/mcp/")
+    try:
+        return is_secure_governance_url(f"{url}/mcp/")
+    except Exception:
+        return False
 
 
-def _unparseable_call_reason(host: str, raw: str) -> str:
-    """Deny reason for a hook payload too deep or malformed to inspect, or "".
+def _unreadable_call_reason(host: str) -> str:
+    """Deny reason for a hook payload the hook cannot read, or "".
 
-    The proof scan cannot run, so a payload that names the bundled server is
-    denied while its transport is insecure. Anything else keeps failing open.
+    Neither the server nor the proof can be checked, so on Claude the call is
+    denied while the bundled transport is insecure, whatever it names.
     """
-    if host != "claude" or f"mcp__{BUNDLED_CLAUDE_SERVER_ALIAS}__" not in raw:
-        return ""
-    if _bundled_transport_is_secure():
+    if host != "claude" or _bundled_transport_is_secure():
         return ""
     return _INSECURE_TRANSPORT_REASON
 
@@ -572,14 +589,11 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         raw = sys.stdin.read()
-    except Exception:
-        return 0
-    try:
         data = json.loads(raw or "{}")
     except Exception:
-        unparseable = _unparseable_call_reason(args.host, raw)
-        if unparseable:
-            print(json.dumps(_deny_output(unparseable)))
+        unreadable = _unreadable_call_reason(args.host)
+        if unreadable:
+            print(json.dumps(_deny_output(unreadable)))
         return 0
     if not isinstance(data, dict):
         return 0

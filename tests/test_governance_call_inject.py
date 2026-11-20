@@ -797,6 +797,107 @@ class TestBundledCleartextTransport:
                       tmp_path, host="claude")
         assert "cleartext HTTP" in (_deny_reason(result) or "")
 
+    @pytest.mark.parametrize(
+        "tool_input",
+        [
+            # JSON strings inside wrapper lists
+            {"kwargs": [json.dumps({"client_session_id": SID})]},
+            {"tool_name": "sync_state",
+             "arguments": [json.dumps({"continuity_token": "v1.tok"})]},
+            # JSON strings under keys that are not wrappers
+            {"query": json.dumps({"client_session_id": SID})},
+            {"payload": {"inner": [json.dumps([{"agent_id": "a"}])]}},
+            # a JSON string inside a JSON string inside a list
+            {"kwargs": [json.dumps(json.dumps({"agent_uuid": "u"}))]},
+            # the field name only appears once the string is decoded
+            {"note": '{"client\\u005fsession_id": "agent-x"}'},
+            # proof under a key that is itself a JSON object
+            {json.dumps({"continuity_token": "v1.tok"}): 1},
+            # proof in a non-JSON string anywhere in the tree
+            {"items": [["continuity_token=v1.tok"]]},
+        ],
+        ids=[
+            "kwargs-list-json", "arguments-list-json", "plain-key-json",
+            "nested-list-json", "double-encoded-in-list", "escaped-name",
+            "json-key", "text-in-list",
+        ],
+    )
+    def test_proof_anywhere_in_the_tree_is_denied(self, tmp_path, monkeypatch, tool_input):
+        monkeypatch.setenv("UNITARES_SERVER_URL", "http://gov.example.test")
+        result = _run(_hook_input(f"{BUNDLED}use_tool", tool_input), tmp_path,
+                      host="claude")
+        assert "cleartext HTTP" in (_deny_reason(result) or "")
+
+    def test_tree_past_the_scan_budget_is_denied(self, tmp_path, monkeypatch):
+        import governance_call_inject as inject
+
+        monkeypatch.setenv("UNITARES_SERVER_URL", "http://gov.example.test")
+        big = {"items": ["x" * 100] * (inject._PROOF_SCAN_BUDGET // 100 + 1)}
+        assert inject._carries_proof(big) is True
+        assert inject._carries_proof({"items": ["x" * 100] * 10}) is False
+
+    def test_scan_error_counts_as_proof(self, monkeypatch, capsys):
+        import io
+
+        import governance_call_inject as inject
+
+        def _boom(*_args, **_kwargs):
+            raise RuntimeError("scan failed")
+
+        monkeypatch.setenv("UNITARES_SERVER_URL", "http://gov.example.test")
+        monkeypatch.setattr(inject, "_carries_proof", _boom)
+        monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(_hook_input(
+            f"{BUNDLED}search_shared_memory", {"query": "x"}))))
+        assert inject.main(["--host", "claude"]) == 0
+        specific = json.loads(capsys.readouterr().out)["hookSpecificOutput"]
+        assert specific["permissionDecision"] == "deny"
+
+    @pytest.mark.parametrize(
+        "tool_name",
+        [
+            f"{BUNDLED}sync_state__x",
+            f"{BUNDLED}a__b__c",
+            f"{BUNDLED}__sync_state",
+            f"{BUNDLED.upper()}sync_state",
+        ],
+    )
+    def test_bundled_prefix_decides_the_server(self, tmp_path, monkeypatch, tool_name):
+        # Claude names tools mcp__<server>__<tool>; the tool part may itself
+        # contain "__", so the server is the known prefix, not a split.
+        matchers = _pre_governance_matchers("hooks/claude-hooks.json", "claude")
+        if tool_name.startswith(BUNDLED):
+            assert any(re.fullmatch(m, tool_name) for m in matchers), matchers
+        monkeypatch.setenv("UNITARES_SERVER_URL", "http://gov.example.test")
+        result = _run(_hook_input(tool_name, {"agent_id": "agent-x"}), tmp_path,
+                      host="claude")
+        assert "cleartext HTTP" in (_deny_reason(result) or "")
+
+    @pytest.mark.parametrize(
+        "server_url",
+        ["http://127.1:8767", "http://0x7f.0.0.1:8767", "http://2130706433:8767"],
+    )
+    def test_loopback_shorthand_keeps_injection(self, tmp_path, monkeypatch, server_url):
+        # Claude's URL parser resolves these to 127.0.0.1.
+        monkeypatch.setenv("UNITARES_SERVER_URL", server_url)
+        _write_cache(tmp_path)
+        result = _run(_hook_input(f"{BUNDLED}sync_state", {}), tmp_path, host="claude")
+        updated = _updated_input(result)
+        assert updated is not None
+        assert updated["client_session_id"] == SID
+
+    def test_unreadable_payload_is_denied_whatever_it_names(self, tmp_path, monkeypatch):
+        # A payload the hook cannot read cannot be attributed to a server, so
+        # it is denied while the bundled transport is insecure.
+        monkeypatch.setenv("UNITARES_SERVER_URL", "http://gov.example.test")
+        payload = json.dumps(_hook_input("mcp__PLUGIN_x__sync_state", {
+            "client_session_id": SID, "junk": "PLACEHOLDER",
+        })).replace('"PLACEHOLDER"', "[" * _TOO_DEEP + "]" * _TOO_DEEP)
+        result = subprocess.run(
+            [str(HOOK), "--host", "claude"], input=payload, text=True,
+            capture_output=True, timeout=10, cwd=str(tmp_path),
+        )
+        assert "cleartext HTTP" in (_deny_reason(result) or "")
+
     def test_payload_too_deep_for_the_hook_parser_is_denied(self, tmp_path, monkeypatch):
         # Proof sits at the top level, but unrelated nesting makes the whole
         # hook payload unparseable. That must not turn into a silent pass.
