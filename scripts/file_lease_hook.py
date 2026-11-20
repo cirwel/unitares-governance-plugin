@@ -463,13 +463,13 @@ def _http_json(
     headers = {"Accept": "application/json", "Authorization": f"Bearer {token}"}
     if body is not None:
         headers["Content-Type"] = "application/json"
-    request = urllib.request.Request(
-        _base_url() + path,
-        data=data,
-        headers=headers,
-        method=method,
-    )
     try:
+        request = urllib.request.Request(
+            _base_url() + path,
+            data=data,
+            headers=headers,
+            method=method,
+        )
         with authorization_safe_urlopen(
             request,
             timeout=_timeout_s() if timeout_s is None else max(0.05, timeout_s),
@@ -518,13 +518,18 @@ def _has_dotgit_ancestor(probe: Path) -> bool:
 
 
 # Variables that select a repository or work tree instead of discovering one
-# from the path (git's own ``rev-parse --local-env-vars`` set). A lease
-# namespace must depend on the target path alone, so the probe never inherits
-# them: otherwise two sessions could map one file to different surfaces.
+# from the path (git's own ``rev-parse --local-env-vars`` set), plus the two
+# that bound discovery itself. A lease namespace must depend on the target path
+# alone, so the probe never inherits them: otherwise two sessions could map one
+# file to different surfaces, or one could fail to find the repository at all.
+# Global/system config variables stay: they only decide ownership refusals,
+# which already fail closed, and operators rely on them for safe.directory.
 _GIT_REPOSITORY_ENV = frozenset(
     {
         "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_CEILING_DIRECTORIES",
         "GIT_COMMON_DIR",
+        "GIT_DISCOVERY_ACROSS_FILESYSTEM",
         "GIT_CONFIG",
         "GIT_CONFIG_COUNT",
         "GIT_CONFIG_PARAMETERS",
@@ -706,7 +711,12 @@ def _surface_id(
     *,
     strict: bool = False,
 ) -> str:
-    p = Path(path).expanduser()
+    try:
+        p = Path(path).expanduser()
+    except Exception as exc:  # e.g. ``~unknown-user/...``
+        if strict:
+            raise _NamespaceProbeError(f"cannot expand {path!r}") from exc
+        p = Path(path)
     if not p.is_absolute():
         p = workspace / p
     # Collapse worktrees of the same repo to a single surface so concurrent
@@ -1083,6 +1093,11 @@ def _cmd_pre_edit_locked(args: argparse.Namespace, stdin_text: str) -> int:
                 "required lease mode could not verify the repository/worktree "
                 f"namespace for {file_path}"
             )
+        except Exception as exc:
+            rollback()
+            return _fail_open_or_block(
+                f"could not derive a lease surface for {file_path}: {type(exc).__name__}"
+            )
         targets_by_surface[surface_id] = file_path
     if _deadline_timeout(operation_deadline, 1.0) is None:
         rollback()
@@ -1130,13 +1145,19 @@ def _cmd_pre_edit_locked(args: argparse.Namespace, stdin_text: str) -> int:
             heartbeat = _heartbeat(token, str(existing["lease_id"]), timeout_s=timeout_s)
             if heartbeat.get("ok") is True:
                 existing["last_heartbeat_at"] = time.time()
-                _save_state(
-                    workspace,
-                    payload.session_id,
-                    state,
-                    payload.tool_use_id,
-                    token=token,
-                )
+                try:
+                    _save_state(
+                        workspace,
+                        payload.session_id,
+                        state,
+                        payload.tool_use_id,
+                        token=token,
+                    )
+                except Exception as exc:
+                    rollback()
+                    return _fail_open_or_block(
+                        f"lease state persistence failed after heartbeat: {exc}"
+                    )
                 continue
             if heartbeat.get("error") not in {"not_found", "expired"}:
                 rollback()
@@ -1411,7 +1432,19 @@ def _cmd_release_edit_locked(args: argparse.Namespace, stdin_text: str) -> int:
         # New state preserves the raw event path, so the common path needs no
         # Git subprocess at all. Canonicalization is only a compatibility
         # fallback for older rows that lack or changed that field.
-        key = _find_lease_key(leases, file_path=file_path, surface_id="")
+        # An event can hold more than one lease for a path (a retry that could
+        # not release a lease on an earlier surface); release all of them.
+        path_keys = [
+            candidate
+            for candidate, row in leases.items()
+            if isinstance(row, dict)
+            and row.get("lease_id")
+            and row.get("path") == file_path
+        ]
+        for candidate in path_keys:
+            if candidate not in keys:
+                keys.append(candidate)
+        key = path_keys[0] if path_keys else None
         if key is None:
             roots_timeout = _deadline_timeout(deadline, 0.75)
             if roots_timeout is None:
@@ -1420,13 +1453,17 @@ def _cmd_release_edit_locked(args: argparse.Namespace, stdin_text: str) -> int:
             if not roots_loaded:
                 roots = _worktree_roots(workspace, timeout_s=roots_timeout)
                 roots_loaded = True
-            surface_id = _surface_id(
-                file_path,
-                workspace,
-                roots,
-                root_cache,
-                deadline,
-            )
+            try:
+                surface_id = _surface_id(
+                    file_path,
+                    workspace,
+                    roots,
+                    root_cache,
+                    deadline,
+                )
+            except Exception as exc:
+                _debug(f"release-edit could not derive a surface for {file_path}: {exc}")
+                continue
             key = _find_lease_key(
                 leases,
                 file_path=file_path,
