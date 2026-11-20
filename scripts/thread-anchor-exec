@@ -25,8 +25,8 @@ set -eu
 usage() {
     printf '%s\n' \
         'usage: thread-anchor-exec <thread-id> -- <cli> [args...]' \
-        '  <thread-id>  stable id of the conversation: letters, digits, . _ -' \
-        '               and at most 128 characters' >&2
+        '  <thread-id>  stable id of the conversation: ASCII letters, digits,' \
+        '               _ and -, at most 128 characters' >&2
     exit 64
 }
 
@@ -35,17 +35,15 @@ thread_id=$1
 [ "$2" = "--" ] || usage
 shift 2
 
+# Every accepted id must reach the server unchanged. The server rewrites any
+# character outside its safe set to `_` and collapses runs of dots, so two
+# different ids could otherwise land on one identity. The characters are
+# listed one by one because a range such as a-z follows the locale and admits
+# accented letters under a UTF-8 one.
 case "$thread_id" in
-    ''|*[!A-Za-z0-9._-]*) usage ;;
+    ''|*[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-]*) usage ;;
 esac
 [ "${#thread_id}" -le 128 ] || usage
-
-# Resolve now so a missing CLI is reported here rather than by `exec`.
-cli=$(command -v -- "$1") || {
-    printf 'thread-anchor-exec: command not found: %s\n' "$1" >&2
-    exit 127
-}
-shift
 
 UNITARES_CLIENT_SESSION_ID="agent:/thread-$thread_id"
 UNITARES_ORCHESTRATED=1
@@ -56,4 +54,27 @@ export UNITARES_CLIENT_SESSION_ID UNITARES_ORCHESTRATED UNITARES_ORCHESTRATED_OW
 # the bridge's own environment would describe some other process.
 unset UNITARES_PARENT_AGENT_ID UNITARES_SPAWN_REASON
 
-exec "$cli" "$@"
+# Report a CLI that is missing (127) or cannot be run (126) here. What a shell
+# does when `exec` itself fails differs from one shell to the next.
+missing() {
+    printf 'thread-anchor-exec: command not found: %s\n' "$1" >&2
+    exit 127
+}
+case "$1" in
+    */*) cli=$1 ;;
+    *)
+        cli=$(command -v -- "$1" 2>/dev/null) || missing "$1"
+        # A name the shell also knows as a builtin resolves to no path; leave
+        # that lookup to `exec`.
+        case "$cli" in */*) ;; *) cli= ;; esac
+        ;;
+esac
+if [ -n "$cli" ]; then
+    [ -e "$cli" ] || missing "$1"
+    if [ -d "$cli" ] || [ ! -x "$cli" ]; then
+        printf 'thread-anchor-exec: cannot execute: %s\n' "$1" >&2
+        exit 126
+    fi
+fi
+
+exec "$@"

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -21,15 +22,24 @@ ANCHOR_VARS = (
 )
 
 
-def _run(*args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+SHELLS = [sh for sh in ("/bin/sh", "/bin/dash", "/usr/bin/dash") if Path(sh).exists()]
+
+
+def _run(
+    *args: str,
+    env: dict[str, str] | None = None,
+    cwd: Path | None = None,
+    shell: str | None = None,
+) -> subprocess.CompletedProcess[str]:
     base = {k: v for k, v in os.environ.items() if k not in ANCHOR_VARS}
     base.update(env or {})
     return subprocess.run(
-        [str(LAUNCHER), *args],
+        [*([shell] if shell else []), str(LAUNCHER), *args],
         text=True,
         capture_output=True,
         timeout=20,
         env=base,
+        cwd=cwd,
     )
 
 
@@ -50,40 +60,64 @@ def test_cli_runs_as_the_owner_process_with_the_thread_anchor():
     assert owner == pid
 
 
-def test_hook_launcher_would_accept_the_anchor():
-    # hooks/run-hook.cmd takes its parent PID as the hook host and keeps the
-    # anchor only when that equals the declared owner.
-    code = (
-        "import os, subprocess; "
-        "print(subprocess.run(['sh', '-c', "
-        "'[ \"$PPID\" = \"$UNITARES_ORCHESTRATED_OWNER_PID\" ] && echo kept || echo dropped'], "
-        "text=True, capture_output=True).stdout.strip())"
+HOSTS = [
+    ("claude", "claude-hooks.json", "CLAUDE_PLUGIN_ROOT"),
+    ("codex", "codex-hooks.json", "PLUGIN_ROOT"),
+]
+
+
+def _hook_probe(manifest: str) -> str:
+    """Python source for a stand-in CLI: run the shipped PreToolUse hook command
+    for a bare start_session() call and print what the hook answered."""
+    entries = json.loads((ROOT / "hooks" / manifest).read_text())["hooks"]["PreToolUse"]
+    command = next(
+        entry["hooks"][0]["command"] for entry in entries if "pre-governance-call" in str(entry)
     )
-    result = _run("t1", "--", sys.executable, "-c", code)
-    assert result.stdout.strip() == "kept", result.stderr
-
-
-def test_plugin_forwards_the_anchor_for_the_launched_cli():
-    code = (
-        "import os, sys; "
-        f"sys.path.insert(0, {str(ROOT / 'scripts')!r}); "
-        "os.environ['UNITARES_HOOK_HOST_PID'] = str(os.getpid()); "
-        "import governance_call_inject as g; print(g._env_anchor())"
+    payload = json.dumps(
+        {
+            "session_id": "thread-anchor-exec-test",
+            "hook_event_name": "PreToolUse",
+            "tool_name": "mcp__unitares-governance__start_session",
+            "tool_input": {},
+        }
     )
-    result = _run("t1", "--", sys.executable, "-c", code)
-    assert result.stdout.strip() == "agent:/thread-t1", result.stderr
-
-
-def test_nested_cli_is_refused_the_inherited_anchor():
-    inner = (
-        "import os, sys; "
-        f"sys.path.insert(0, {str(ROOT / 'scripts')!r}); "
-        "os.environ['UNITARES_HOOK_HOST_PID'] = str(os.getpid()); "
-        "import governance_call_inject as g; print(repr(g._env_anchor()))"
+    return (
+        "import subprocess, sys; "
+        f"r = subprocess.run(['/bin/sh', '-c', {command!r}], input={payload!r}, "
+        "text=True, capture_output=True, timeout=20); "
+        "sys.stdout.write(r.stdout); sys.stderr.write(r.stderr)"
     )
-    outer = f"import subprocess, sys; subprocess.run([sys.executable, '-c', {inner!r}])"
-    result = _run("t1", "--", sys.executable, "-c", outer)
-    assert result.stdout.strip() == "''", result.stderr
+
+
+@pytest.mark.parametrize("host,manifest,root_var", HOSTS)
+def test_shipped_hook_binds_the_launched_cli_to_the_thread(tmp_path, host, manifest, root_var):
+    result = _run(
+        "t1", "--", sys.executable, "-c", _hook_probe(manifest),
+        env={root_var: str(ROOT)}, cwd=tmp_path,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "ignored unowned" not in result.stderr
+    updated = json.loads(result.stdout)["hookSpecificOutput"]["updatedInput"]
+    assert updated["client_session_id"] == "agent:/thread-t1"
+    assert updated["orchestrated"] is True
+
+
+@pytest.mark.parametrize("host,manifest,root_var", HOSTS)
+def test_shipped_hook_refuses_the_anchor_to_a_nested_cli(tmp_path, host, manifest, root_var):
+    # The launched CLI starts another one, which inherits the whole environment.
+    nested = _hook_probe(manifest)
+    outer = (
+        "import subprocess, sys; "
+        f"r = subprocess.run([sys.executable, '-c', {nested!r}], text=True, capture_output=True); "
+        "sys.stdout.write(r.stdout)"
+    )
+    result = _run(
+        "t1", "--", sys.executable, "-c", outer,
+        env={root_var: str(ROOT)}, cwd=tmp_path,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "agent:/thread-t1" not in result.stdout
+    assert "orchestrated" not in result.stdout
 
 
 def test_inherited_lineage_is_cleared():
@@ -112,17 +146,42 @@ def test_exit_status_and_arguments_pass_through():
         ["", "--", "true"],
         ["a/b", "--", "true"],
         ["a b", "--", "true"],
+        # Forms the server would rewrite, putting two ids on one identity.
+        ["a.b", "--", "true"],
+        ["team..ops", "--", "true"],
+        ["caf\u00e9", "--", "true"],
         ["x" * 129, "--", "true"],
     ],
 )
-def test_bad_invocations_are_refused_before_anything_runs(args):
-    result = _run(*args)
+@pytest.mark.parametrize("locale", ["C", "en_US.UTF-8"])
+@pytest.mark.parametrize("shell", SHELLS)
+def test_bad_invocations_are_refused_before_anything_runs(args, locale, shell):
+    result = _run(*args, env={"LC_ALL": locale}, shell=shell)
     assert result.returncode == 64
     assert "usage:" in result.stderr
     assert result.stdout == ""
 
 
-def test_missing_cli_is_reported():
-    result = _run("t1", "--", "no-such-cli-for-thread-anchor-exec")
+@pytest.mark.parametrize("shell", SHELLS)
+@pytest.mark.parametrize("name", ["no-such-cli-for-thread-anchor-exec", "./no-such-cli"])
+def test_missing_cli_is_reported(shell, name):
+    result = _run("t1", "--", name, shell=shell)
     assert result.returncode == 127
     assert "command not found" in result.stderr
+    assert result.stdout == ""
+
+
+@pytest.mark.parametrize("shell", SHELLS)
+def test_cli_that_cannot_run_is_told_apart_from_a_missing_one(tmp_path, shell):
+    not_executable = tmp_path / "cli"
+    not_executable.write_text("#!/bin/sh\n")
+    for target in (not_executable, tmp_path):
+        result = _run("t1", "--", str(target), shell=shell)
+        assert result.returncode == 126
+        assert "cannot execute" in result.stderr
+
+
+@pytest.mark.parametrize("shell", SHELLS)
+def test_cli_found_on_path_runs(shell):
+    # `true` is also a shell builtin; it must still be found and run.
+    assert _run("t1", "--", "true", shell=shell).returncode == 0

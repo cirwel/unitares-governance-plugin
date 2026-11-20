@@ -4,7 +4,7 @@ Many tools drive an agent CLI from somewhere else: a Discord, Slack or Telegram
 bridge, a job runner, an orchestrator that hands turns to a headless CLI. Most
 of them start a new CLI process for every turn. Each new process is a new
 UNITARES identity, so a conversation of twenty turns reads as twenty unrelated
-agents with one check-in each.
+agents.
 
 A bridge can give a conversation one identity instead. It does not need a
 UNITARES client, a token or any code from this repository beyond one launcher.
@@ -25,14 +25,23 @@ For example, a bridge that runs Claude Code headless for a Discord thread:
 scripts/thread-anchor-exec 1573223283237847113 -- claude -p --resume "$SESSION" "$PROMPT"
 ```
 
-The thread id may hold letters, digits, `.`, `_` and `-`, up to 128
+The thread id may hold ASCII letters, digits, `_` and `-`, up to 128
 characters. Use the id your chat platform already gives the thread or channel.
-The launcher replaces itself with the CLI, so standard input, output and the
-exit status are the CLI's own.
+Anything else is refused, because the server would rewrite it and two
+different ids could then share an identity. The launcher replaces itself with
+the CLI, so standard input, output and the exit status are the CLI's own.
 
-The first turn creates the identity. Every later turn started with the same
-thread id resumes it. The agent still onboards and checks in for itself; the
-bridge only says which conversation the process belongs to.
+The launcher only says which conversation the process belongs to. It does not
+create or bind an identity. That happens when the agent calls
+`start_session()` with no arguments, which the session-start hook tells it to
+do before the first tool that needs an identity. The first such call for a
+thread id creates the identity, and the same call in any later turn resumes
+it.
+
+A turn in which the agent never makes that call ends unbound by default. To
+bind it anyway, set `UNITARES_AUTO_ONBOARD=on` for the CLI; the Stop hook then
+binds the anchor at the end of the turn. See the
+[configuration reference](./configuration.md).
 
 ## What the launcher sets
 
@@ -41,7 +50,7 @@ these are set for the CLI process:
 
 | Variable | Value | Meaning |
 |---|---|---|
-| `UNITARES_CLIENT_SESSION_ID` | `agent:/thread-<thread-id>` | The conversation. The `agent:/thread-` prefix is required. |
+| `UNITARES_CLIENT_SESSION_ID` | `agent:/thread-<thread-id>` | The conversation. Keep the `agent:/thread-` prefix: the server treats only a thread-shaped anchor as an orchestrated first bind. |
 | `UNITARES_ORCHESTRATED` | `1` | The bridge declares that it provisioned the anchor. |
 | `UNITARES_ORCHESTRATED_OWNER_PID` | PID of the CLI | The one process the anchor was provisioned for. |
 
@@ -51,8 +60,8 @@ runs the hooks. The launcher gets it by setting the variable to its own PID and
 then calling `exec`, so the CLI takes over that PID. Setting the variable in
 the bridge's own environment, or to the bridge's PID, does not work.
 
-If the anchor is not honored, the session-start hook writes this line to
-standard error and the turn gets a fresh identity as before:
+When the owner PID does not match the process running the hooks, the anchor
+is dropped and the session-start hook writes this line to standard error:
 
 ```text
 [UNITARES] ignored unowned or inherited governance thread anchor
@@ -61,6 +70,10 @@ standard error and the turn gets a fresh identity as before:
 The usual cause is a CLI command that is a wrapper: a script that starts the
 real program as a child. The child runs the hooks and has a different PID.
 Point the launcher at the real program.
+
+That line covers the PID check only. An anchor without the
+`UNITARES_ORCHESTRATED` marker is ignored with no message. In both cases the
+turn is treated as an ordinary session with no anchor.
 
 ## Why three variables and not one
 
@@ -73,9 +86,9 @@ apart. Each condition closes one way that can happen:
 - **The owner PID.** Environment variables are inherited. A CLI that the agent
   starts during its turn, such as a reviewer or a sub-agent, inherits the
   anchor but has a different PID, so it is refused and gets its own identity.
-- **The server.** With strict identity on, a server refuses a thread anchor
-  that arrives without the orchestrated declaration
-  (`lineage_declaration_required`) instead of quietly creating an identity.
+- **The server.** With strict identity on, a thread anchor that matches no
+  existing identity and arrives without the orchestrated declaration is
+  refused (`lineage_declaration_required`) instead of quietly creating one.
 
 ## Processes the agent starts
 
@@ -92,8 +105,13 @@ env -u UNITARES_CLIENT_SESSION_ID -u UNITARES_ORCHESTRATED \
     <cli> [args...]
 ```
 
-Without that, the inherited anchor and any inherited lineage are both dropped,
-and the child starts as an identity with no declared parent.
+Those two variables are a suggestion to the child, not a record. The child's
+session-start hook shows it the parent and the reason, and the lineage is
+recorded only when the child passes them in its own call:
+`start_session(force_new=true, parent_agent_id="<uuid>", spawn_reason="subagent")`.
+
+Without the `env` line above, the inherited anchor and any inherited lineage
+are both dropped, and the child starts with no parent suggested.
 
 ## Checking it works
 
@@ -104,9 +122,10 @@ that call. `agent_uuid` should be the same in both turns, with
 differ for a second thread id. The agent must not pass `force_new=true` in an
 anchored turn: that creates a new identity and breaks the continuity.
 
-To check the contract without a CLI, run the canary. The first form checks
-only what the plugin sends. The second probes a running server and writes a
-short-lived test identity to it:
+To check the server side without a CLI, run the canary. The first form checks
+only the request the plugin's onboarding helper builds; it does not exercise
+the launcher or the hooks. The second probes a running server and creates a
+test identity there, which it does not remove:
 
 ```bash
 python3 scripts/dev/strict_thread_anchor_contract.py --json
