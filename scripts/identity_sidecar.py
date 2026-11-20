@@ -15,8 +15,11 @@ It wraps the server's `/v1/tools/call` surface with local lifecycle help:
   bound identity, refuse foreign proof and identity tools sent through
   use_tool before the upstream call, and persist only successful responses
   for the bound uuid (a binding marked `prior_process` is never used as
-  proof). `POST /session/start` is a separate re-onboard route and is not
-  covered by this rule.
+  proof). `POST /session/start` re-onboards a slot with a fresh identity;
+  on a bound slot, or one whose protected binding is unreadable, it is
+  refused unless the body carries `replace_existing: true`. That flag is an
+  accident guard, not an authority boundary: every holder of the sidecar
+  capability can send it, and u-run sends it on its own start call.
 * stamp the slot cache after successful check-ins
 * expose the local identity-contract audit
 * proxy minimal JSON-RPC MCP `tools/call` requests through `/mcp/`
@@ -733,6 +736,36 @@ class IdentitySidecar:
             "server mint another one the sidecar cannot hold. " + switch_hint
         )
 
+    def refuse_session_start_over_bound_slot(self, slot: str) -> str | None:
+        """Say why ``POST /session/start`` must not re-onboard ``slot``, or None.
+
+        The route mints a fresh identity and replaces the slot's binding. A
+        slot whose protected binding names a uuid, or whose protected binding
+        exists but cannot be read, is refused unless the caller sends
+        ``replace_existing: true``. This is an accident guard, not an
+        authority boundary: any holder of the sidecar capability may send
+        the flag.
+        """
+        binding = self.read_session(slot)
+        if not binding:
+            protected_path = _cache_path(Path.home(), slot)
+            if protected_path.exists() or protected_path.is_symlink():
+                return (
+                    "sidecar slot's protected HOME session binding is invalid; "
+                    "clear it explicitly, or send replace_existing: true to "
+                    "replace it with a new identity"
+                )
+            return None
+        bound_uuid = str(binding.get("uuid") or "").strip()
+        if not bound_uuid:
+            return None
+        return (
+            f"sidecar slot is already bound to agent_uuid {bound_uuid}; "
+            "/session/start would replace it with a new identity. Send "
+            "replace_existing: true to replace it deliberately, clear the slot "
+            "(session_cache.py clear), or use another slot."
+        )
+
     def prepare_tool_arguments(
         self,
         *,
@@ -1314,6 +1347,13 @@ def make_handler(sidecar: IdentitySidecar) -> type[BaseHTTPRequestHandler]:
                 return
             if path == "/session/start":
                 slot = sidecar.slot_from(body, self.headers)
+                if body.get("replace_existing") is not True:
+                    refusal = sidecar.refuse_session_start_over_bound_slot(slot)
+                    if refusal:
+                        _json_response(
+                            self, 409, {"success": False, "slot": slot, "error": refusal}
+                        )
+                        return
                 result = run_onboard(
                     server_url=sidecar.server_url,
                     agent_name=str(body.get("agent_name") or sidecar.agent_name),

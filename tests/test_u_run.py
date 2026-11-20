@@ -184,7 +184,7 @@ def test_reuses_sidecar_exports_context_and_preserves_child_exit(
     }
     assert [path for path, _body in calls] == ["/session/start", "/turn/stop"]
     start = calls[0][1]
-    assert start == {"slot": "plain-cli", "model_type": "goose"}
+    assert start == {"slot": "plain-cli", "model_type": "goose", "replace_existing": True}
     stopped = calls[1][1]
     assert stopped["event"] == "u_run_exit"
     assert stopped["epistemic_class"] == "substrate_interpretation"
@@ -302,6 +302,47 @@ def test_starts_real_sidecar_writes_slot_cache_and_tears_it_down(tmp_path: Path)
     assert "confidence" not in checkin
     with pytest.raises(urllib.error.URLError):
         urllib.request.urlopen(f"{sidecar_url}/health", timeout=0.2)
+
+
+def test_reused_slot_starts_a_session_on_a_bound_slot_with_a_real_sidecar(
+    tmp_path: Path,
+) -> None:
+    _GovernanceHandler.calls = []
+    server, thread, governance_url = _serve(_GovernanceHandler)
+    results = []
+    try:
+        for _run in range(2):
+            results.append(
+                u_run.main(
+                    [
+                        "--server-url",
+                        governance_url,
+                        "--sidecar-url",
+                        _unused_sidecar_url(),
+                        "--workspace",
+                        str(tmp_path),
+                        "--slot",
+                        "reused-slot",
+                        "--",
+                        sys.executable,
+                        "-c",
+                        "raise SystemExit(0)",
+                    ]
+                )
+            )
+    finally:
+        _stop_server(server, thread)
+
+    # The second run finds the slot bound by the first and still starts.
+    assert results == [0, 0]
+    assert [call["name"] for call in _GovernanceHandler.calls] == [
+        "onboard",
+        "process_agent_update",
+        "onboard",
+        "process_agent_update",
+    ]
+    cache = json.loads((tmp_path / ".unitares" / "session-reused-slot.json").read_text())
+    assert cache["uuid"] == "11111111-2222-4333-8444-555555555555"
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX process-group signal semantics")

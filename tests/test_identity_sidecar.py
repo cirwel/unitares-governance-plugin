@@ -1970,6 +1970,89 @@ def test_an_invalid_protected_binding_refuses_identity_calls(
     assert json.loads(protected.read_text(encoding="utf-8"))["slot"] == "wrong-slot"
 
 
+def _post_session_start(sidecar, body: dict) -> tuple[int, dict]:
+    srv, thread, base_url = _serve_sidecar(sidecar)
+    try:
+        try:
+            return _http_post_json(
+                f"{base_url}/session/start",
+                body,
+                headers={"Authorization": f"Bearer {sidecar.capability_token}"},
+            )
+        except urllib.error.HTTPError as exc:
+            return exc.code, json.loads(exc.read().decode("utf-8"))
+    finally:
+        _stop_server(srv, thread)
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [{}, {"replace_existing": False}, {"replace_existing": "true"}, {"replace_existing": 1}],
+)
+def test_session_start_over_a_bound_slot_needs_replace_existing(
+    tmp_path: Path, fake_server: str, extra: dict,
+) -> None:
+    sidecar = _sidecar(tmp_path, fake_server)
+    before = _bind_slot_a(sidecar)
+
+    status, payload = _post_session_start(sidecar, {"agent_name": "sidecar-agent", **extra})
+
+    assert status == 409
+    assert payload["success"] is False
+    assert BOUND_UUID in payload["error"]
+    assert "replace_existing" in payload["error"]
+    assert FakeGovernanceHandler.calls == []
+    assert sidecar.read_session("slot-a") == before
+
+
+def test_session_start_with_replace_existing_reonboards_a_bound_slot(
+    tmp_path: Path, fake_server: str,
+) -> None:
+    sidecar = _sidecar(tmp_path, fake_server)
+    before = _bind_slot_a(sidecar)
+
+    refused, _payload = _post_session_start(sidecar, {"agent_name": "sidecar-agent"})
+    assert refused == 409
+    assert sidecar.read_session("slot-a") == before
+
+    status, payload = _post_session_start(
+        sidecar, {"agent_name": "sidecar-agent", "replace_existing": True}
+    )
+
+    assert status == 200
+    assert payload["result"]["status"] == "ok"
+    assert [call["name"] for call in FakeGovernanceHandler.calls] == ["onboard"]
+    assert FakeGovernanceHandler.calls[0]["arguments"]["force_new"] is True
+    assert sidecar.read_session("slot-a")["uuid"] == "11111111-2222-4333-8444-555555555555"
+
+
+def test_session_start_over_an_invalid_protected_binding_needs_replace_existing(
+    tmp_path: Path, fake_server: str,
+) -> None:
+    protected = Path.home() / ".unitares" / "session-slot-a.json"
+    protected.parent.mkdir(parents=True, exist_ok=True)
+    protected.write_text(json.dumps({
+        "schema_version": 2, "slot": "wrong-slot",
+        "uuid": BOUND_UUID, "client_session_id": BOUND_CSID,
+    }), encoding="utf-8")
+    protected.chmod(0o600)
+    sidecar = _sidecar(tmp_path, fake_server)
+
+    status, payload = _post_session_start(sidecar, {})
+
+    assert status == 409
+    assert "clear it explicitly" in payload["error"]
+    assert FakeGovernanceHandler.calls == []
+    assert json.loads(protected.read_text(encoding="utf-8"))["slot"] == "wrong-slot"
+
+    # u-run's start call: the unreadable binding is replaced, as before.
+    status, payload = _post_session_start(sidecar, {"replace_existing": True})
+
+    assert status == 200
+    assert [call["name"] for call in FakeGovernanceHandler.calls] == ["onboard"]
+    assert sidecar.read_session("slot-a")["uuid"] == "11111111-2222-4333-8444-555555555555"
+
+
 def _reply(monkeypatch: pytest.MonkeyPatch, result: dict) -> None:
     monkeypatch.setattr(
         identity_sidecar, "_post_json", lambda *_a, **_k: ({"result": dict(result)}, 1, None)
