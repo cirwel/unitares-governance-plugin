@@ -8,6 +8,7 @@ import hmac
 import json
 import socket
 import threading
+import time
 import urllib.request
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
@@ -1158,6 +1159,316 @@ def test_bounded_server_refuses_connections_above_worker_cap() -> None:
         release.set()
         first.join(timeout=2)
         _stop_server(server, serving)
+
+
+def _trickle_until_closed(client: socket.socket, *, budget: float) -> bool:
+    """Send one byte at a time; report whether the server closed the socket."""
+    client.settimeout(0.2)
+    deadline = time.monotonic() + budget
+    while time.monotonic() < deadline:
+        try:
+            client.sendall(b"X")
+            if client.recv(4096) == b"":
+                return True
+        except socket.timeout:
+            continue
+        except OSError:
+            return True
+    return False
+
+
+@pytest.mark.parametrize("stalled_part", ["headers", "body"])
+def test_slow_request_cannot_hold_a_worker_past_read_deadline(
+    tmp_path: Path, fake_server: str, monkeypatch: pytest.MonkeyPatch, stalled_part: str
+) -> None:
+    monkeypatch.setattr(identity_sidecar, "REQUEST_READ_DEADLINE", 0.5)
+    sidecar = _sidecar(tmp_path, fake_server)
+    server = BoundedThreadingHTTPServer(
+        ("127.0.0.1", 0), make_handler(sidecar), max_workers=1
+    )
+    serving = threading.Thread(target=server.serve_forever, daemon=True)
+    serving.start()
+    port = server.server_address[1]
+    base_url = f"http://127.0.0.1:{port}"
+    if stalled_part == "headers":
+        opening = "GET /health HTTP/1.1\r\nX-Slow: "
+    else:
+        opening = (
+            "POST /v1/tools/call HTTP/1.1\r\n"
+            f"Authorization: Bearer {sidecar.capability_token}\r\n"
+            "Content-Length: 4096\r\n\r\n"
+        )
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as client:
+            client.sendall(opening.encode("ascii"))
+            assert _trickle_until_closed(client, budget=4.0)
+        # The worker frees its slot just after the socket closes.
+        released_by = time.monotonic() + 2.0
+        while True:
+            try:
+                status, payload = _http_get_json(
+                    f"{base_url}/health",
+                    headers={"Authorization": f"Bearer {sidecar.capability_token}"},
+                )
+                break
+            except urllib.error.HTTPError as exc:
+                if exc.code != 503 or time.monotonic() > released_by:
+                    raise
+                time.sleep(0.05)
+    finally:
+        _stop_server(server, serving)
+    assert status == 200
+    assert payload["success"] is True
+    assert FakeGovernanceHandler.calls == []
+
+
+def test_read_deadline_on_partial_request_line_is_not_reported_as_server_error(
+    tmp_path: Path, fake_server: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(identity_sidecar, "REQUEST_READ_DEADLINE", 0.5)
+    sidecar = _sidecar(tmp_path, fake_server)
+    server = BoundedThreadingHTTPServer(
+        ("127.0.0.1", 0), make_handler(sidecar), max_workers=1
+    )
+    handler_errors: list[BaseException | None] = []
+    handled = threading.Event()
+
+    def record_error(request: object, client_address: object) -> None:
+        handler_errors.append(sys.exc_info()[1])
+
+    original_shutdown = server.shutdown_request
+
+    def note_shutdown(request: object) -> None:
+        original_shutdown(request)
+        handled.set()
+
+    server.handle_error = record_error  # type: ignore[method-assign]
+    server.shutdown_request = note_shutdown  # type: ignore[method-assign]
+    serving = threading.Thread(target=server.serve_forever, daemon=True)
+    serving.start()
+    port = server.server_address[1]
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as client:
+            client.sendall(b"G")
+            assert _trickle_until_closed(client, budget=4.0)
+        assert handled.wait(2.0)
+    finally:
+        _stop_server(server, serving)
+    assert handler_errors == []
+
+
+def test_post_headers_and_body_share_one_read_deadline(
+    tmp_path: Path, fake_server: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(identity_sidecar, "REQUEST_READ_DEADLINE", 1.0)
+    sidecar = _sidecar(tmp_path, fake_server)
+    server = BoundedThreadingHTTPServer(
+        ("127.0.0.1", 0), make_handler(sidecar), max_workers=1
+    )
+    serving = threading.Thread(target=server.serve_forever, daemon=True)
+    serving.start()
+    port = server.server_address[1]
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as client:
+            started = time.monotonic()
+            client.sendall(
+                (
+                    "POST /v1/tools/call HTTP/1.1\r\n"
+                    f"Authorization: Bearer {sidecar.capability_token}\r\n"
+                    "Content-Length: 4096\r\nX-Slow: "
+                ).encode("ascii")
+            )
+            # Spend most of the deadline on the headers, then trickle the body.
+            while time.monotonic() - started < 0.8:
+                client.sendall(b"a")
+                time.sleep(0.05)
+            client.sendall(b"\r\n\r\n")
+            assert _trickle_until_closed(client, budget=4.0)
+            closed_after = time.monotonic() - started
+    finally:
+        _stop_server(server, serving)
+    assert closed_after < 1.4
+    assert FakeGovernanceHandler.calls == []
+
+
+def _proof_exchange(client: socket.socket, challenge: str, *, keep_alive: bool) -> dict:
+    """Send one startup-proof request on ``client`` and read its whole response."""
+    connection = "Connection: keep-alive\r\n" if keep_alive else ""
+    client.sendall(
+        f"GET /startup-proof?challenge={challenge} HTTP/1.1\r\n"
+        f"Host: 127.0.0.1\r\n{connection}\r\n".encode("ascii")
+    )
+    reader = client.makefile("rb")
+    try:
+        status_line = reader.readline()
+        length = None
+        while (line := reader.readline()) not in (b"\r\n", b"\n", b""):
+            name, _, value = line.decode("latin-1").partition(":")
+            if name.strip().lower() == "content-length":
+                length = int(value.strip())
+        assert b" 200 " in status_line
+        assert length is not None
+        return json.loads(reader.read(length))
+    finally:
+        reader.close()
+
+
+def _server_closed(client: socket.socket, *, within: float = 2.0) -> bool:
+    """True when the server closes the connection (EOF) while the client waits."""
+    client.settimeout(within)
+    try:
+        return client.recv(1) == b""
+    except socket.timeout:
+        return False
+
+
+def test_startup_proof_keeps_its_connection_for_exactly_one_follow_up(
+    tmp_path: Path, fake_server: str
+) -> None:
+    sidecar = _sidecar(tmp_path, fake_server)
+    sidecar.startup_secret = "startup-secret"
+    server = BoundedThreadingHTTPServer(("127.0.0.1", 0), make_handler(sidecar))
+    serving = threading.Thread(target=server.serve_forever, daemon=True)
+    serving.start()
+    port = server.server_address[1]
+
+    def expected(challenge: str) -> str:
+        return hmac.new(b"startup-secret", challenge.encode(), hashlib.sha256).hexdigest()
+
+    try:
+        # Keep-alive is opt-in: without it the server closes after the proof.
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as plain:
+            assert _proof_exchange(plain, "c1", keep_alive=False)["proof"] == expected("c1")
+            assert _server_closed(plain)
+
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as client:
+            assert _proof_exchange(client, "c2", keep_alive=True)["proof"] == expected("c2")
+            assert not _server_closed(client, within=0.3), "the proven connection was not kept"
+            # The one follow-up is answered, and a second proof on the same
+            # connection does not extend it again: the server closes it.
+            assert _proof_exchange(client, "c3", keep_alive=True)["proof"] == expected("c3")
+            assert _server_closed(client)
+    finally:
+        _stop_server(server, serving)
+
+
+def test_request_handling_after_the_last_body_byte_is_outside_the_read_deadline(
+    tmp_path: Path, fake_server: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A body that arrived in time is handled, however long decoding takes."""
+    monkeypatch.setattr(identity_sidecar, "REQUEST_READ_DEADLINE", 0.5)
+    real_loads = json.loads
+    marker = "slow-to-decode-marker"
+    slowed: list[bool] = []
+
+    def slow_loads(text: object, *args: object, **kwargs: object) -> object:
+        # Only the sidecar's decode of the request body is slowed.
+        if isinstance(text, str) and marker in text and not slowed:
+            slowed.append(True)
+            time.sleep(1.0)
+        return real_loads(text, *args, **kwargs)
+
+    monkeypatch.setattr(identity_sidecar.json, "loads", slow_loads)
+    sidecar = _sidecar(tmp_path, fake_server)
+    server = BoundedThreadingHTTPServer(
+        ("127.0.0.1", 0), make_handler(sidecar), max_workers=1
+    )
+    serving = threading.Thread(target=server.serve_forever, daemon=True)
+    serving.start()
+    try:
+        status, payload = _http_post_json(
+            f"http://127.0.0.1:{server.server_address[1]}/v1/tools/call",
+            {"name": "knowledge", "arguments": {"action": "search", "query": marker}},
+            headers={"Authorization": f"Bearer {sidecar.capability_token}"},
+        )
+    finally:
+        _stop_server(server, serving)
+    assert status == 200
+    assert payload["result"]["success"] is True
+    assert [call["name"] for call in FakeGovernanceHandler.calls] == ["onboard", "knowledge"]
+
+
+class _CountingClock:
+    """A monotonic clock that moves only when a test moves it, counting reads."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+        self.reads = 0
+        self._changed = threading.Condition()
+
+    def __call__(self) -> float:
+        with self._changed:
+            self.reads += 1
+            self._changed.notify_all()
+            return self.now
+
+    def wait_for_reads(self, count: int, *, timeout: float = 5.0) -> bool:
+        with self._changed:
+            return self._changed.wait_for(lambda: self.reads >= count, timeout)
+
+
+def _read_reply(client: socket.socket, *, within: float = 3.0) -> bytes:
+    """Everything the server sends before it closes the connection."""
+    client.settimeout(within)
+    received = b""
+    try:
+        while chunk := client.recv(4096):
+            received += chunk
+    except socket.timeout:
+        pass
+    return received
+
+
+@pytest.mark.parametrize("late_part", ["headers", "body"])
+def test_request_read_that_finishes_after_its_deadline_is_refused(
+    tmp_path: Path, fake_server: str, monkeypatch: pytest.MonkeyPatch, late_part: str
+) -> None:
+    """A late last byte is refused even when the watchdog never ran.
+
+    The injected clock passes the deadline while the request is still being
+    read; real time stays far inside it, so the watchdog thread cannot fire.
+    """
+    clock = _CountingClock()
+    monkeypatch.setattr(identity_sidecar, "_read_clock", clock)
+    sidecar = _sidecar(tmp_path, fake_server)
+    server = BoundedThreadingHTTPServer(
+        ("127.0.0.1", 0), make_handler(sidecar), max_workers=1
+    )
+    serving = threading.Thread(target=server.serve_forever, daemon=True)
+    serving.start()
+    port = server.server_address[1]
+    body = json.dumps(
+        {"name": "knowledge", "arguments": {"action": "search", "query": "late"}}
+    ).encode()
+    auth = f"Authorization: Bearer {sidecar.capability_token}\r\n"
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as client:
+            if late_part == "headers":
+                # A GET has no body read, so the headers are the whole read.
+                client.sendall(f"GET /health HTTP/1.1\r\n{auth}".encode("ascii"))
+                # Deadline set and watchdog armed; the headers are still open.
+                assert clock.wait_for_reads(2)
+                clock.now += identity_sidecar.REQUEST_READ_DEADLINE + 1.0
+                client.sendall(b"\r\n")
+            else:
+                client.sendall(
+                    (
+                        f"POST /v1/tools/call HTTP/1.1\r\n{auth}"
+                        "Content-Type: application/json\r\n"
+                        f"Content-Length: {len(body)}\r\n\r\n"
+                    ).encode("ascii")
+                )
+                # Let the handler accept the headers and re-arm the watchdog
+                # for the body before the clock passes the deadline.
+                assert clock.wait_for_reads(3)
+                time.sleep(0.3)
+                clock.now += identity_sidecar.REQUEST_READ_DEADLINE + 1.0
+                client.sendall(body)
+            reply = _read_reply(client)
+    finally:
+        _stop_server(server, serving)
+    assert reply == b""
+    assert FakeGovernanceHandler.calls == []
 
 
 # --- Slot owner rule: a bound slot keeps its identity -----------------------

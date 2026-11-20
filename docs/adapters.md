@@ -218,8 +218,10 @@ Every operational route, including `/health`, requires
 to the sidecar's configured slot; request headers and bodies cannot switch the
 server to another slot. The unauthenticated `/startup-proof` route returns only
 a challenge-bound HMAC so wrappers can authenticate the listener before sending
-that bearer. Run a separate sidecar with separate secrets for each concurrently
-managed process.
+that bearer. A request that asks for `Connection: keep-alive` gets its proof
+connection held open for one more request, so the wrapper can send the bearer
+on the connection that proved itself. Run a separate sidecar with separate
+secrets for each concurrently managed process.
 
 Phase 1 is a dependency-free sidecar, not a full streamable-MCP/SSE
 implementation. It wraps REST `/v1/tools/call` and minimal JSON-RPC MCP
@@ -299,7 +301,17 @@ The first `--` separates wrapper options from the child command. `u-run` then:
    preserves the child's shell exit status; and
 5. submits one `/turn/stop` check-in from observed wall time and exit status,
    always labeled `epistemic_class="substrate_interpretation"` and with no
-   confidence field.
+   confidence field. If the listener does not prove the startup secret again
+   within 0.5 s, or the check-in fails, the check-in is skipped with a warning
+   and the child's exit status is still returned.
+
+Each request `u-run` sends with the capability (`/health`, `/session/start` and
+`/turn/stop`) goes on the same connection as a fresh startup challenge, so a
+process that takes over the port later does not receive it from `u-run`. The
+child and its tools receive the capability in their environment and send it
+without a challenge. A
+sidecar started by an earlier plugin version closes that connection; restart it
+before reusing it with this `u-run`.
 
 The exit complexity proxy is intentionally small and inspectable: `0.30` base,
 up to `0.35` over the first hour of observed runtime, plus `0.20` for a nonzero

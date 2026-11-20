@@ -84,6 +84,11 @@ DEFAULT_PORT = 8768
 DEFAULT_TIMEOUT = 20.0
 MAX_REQUEST_BYTES = 1024 * 1024
 CLIENT_SOCKET_TIMEOUT = 5.0
+#: Wall-clock bound on reading one request (line, headers, then body); the
+#: per-recv socket timeout alone lets a client trickle bytes indefinitely.
+REQUEST_READ_DEADLINE = 10.0
+#: The clock the request read deadline is measured on (replaceable in tests).
+_read_clock = time.monotonic
 MAX_REQUEST_WORKERS = 32
 
 
@@ -240,17 +245,20 @@ def _json_response(
     payload: Any,
     *,
     sanitize: bool = True,
+    keep_alive: bool = False,
 ) -> None:
     visible = sanitize_model_visible_payload(payload) if sanitize else payload
     body = (json.dumps(visible, indent=2, sort_keys=True) + "\n").encode("utf-8")
     handler.send_response(status)
     handler.send_header("Content-Type", "application/json")
     handler.send_header("Content-Length", str(len(body)))
+    if keep_alive:
+        handler.send_header("Connection", "keep-alive")
     handler.end_headers()
     handler.wfile.write(body)
 
 
-def _read_request_json(handler: BaseHTTPRequestHandler) -> Any:
+def _read_request_body(handler: BaseHTTPRequestHandler) -> bytes:
     raw_len = handler.headers.get("Content-Length")
     if raw_len is None:
         raise RequestBodyError(411, "Content-Length required")
@@ -268,6 +276,10 @@ def _read_request_json(handler: BaseHTTPRequestHandler) -> Any:
         raise RequestBodyError(408, "request body timed out") from None
     if len(raw) != length:
         raise RequestBodyError(400, "incomplete request body")
+    return raw
+
+
+def _decode_request_json(raw: bytes) -> Any:
     if not raw:
         return {}
     try:
@@ -1116,12 +1128,75 @@ def make_handler(sidecar: IdentitySidecar) -> type[BaseHTTPRequestHandler]:
         def setup(self) -> None:
             super().setup()
             self.connection.settimeout(CLIENT_SOCKET_TIMEOUT)
+            self._read_lock = threading.Lock()
+            self._read_timer: threading.Timer | None = None
+            self._read_deadline_hit = False
+            self._request_read_deadline = 0.0
+            self._proof_kept_connection = False
+
+        def _arm_read_deadline(self) -> None:
+            """Arm the current request's read deadline for its remaining time."""
+            self._disarm_read_deadline()
+
+            def expire() -> None:
+                with self._read_lock:
+                    if self._read_timer is not timer:
+                        return
+                    self._read_timer = None
+                    self._read_deadline_hit = True
+                self.close_connection = True
+                try:
+                    self.connection.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+
+            remaining = max(0.0, self._request_read_deadline - _read_clock())
+            timer = threading.Timer(remaining, expire)
+            timer.daemon = True
+            with self._read_lock:
+                self._read_timer = timer
+            timer.start()
+
+        def _disarm_read_deadline(self) -> bool:
+            """Stop the read deadline; False when it has passed.
+
+            The watchdog can run late, so an armed deadline is also checked on
+            the clock: a read that finished after it is refused and the
+            connection closed, as if the watchdog had cut it.
+            """
+            with self._read_lock:
+                timer, self._read_timer = self._read_timer, None
+                if timer is not None:
+                    timer.cancel()
+                    if _read_clock() >= self._request_read_deadline:
+                        self._read_deadline_hit = True
+                hit = self._read_deadline_hit
+            if hit:
+                self.close_connection = True
+            return not hit
+
+        def handle_one_request(self) -> None:
+            # One wall-clock budget per request: the request line, headers and
+            # any POST body all draw on it.
+            self._request_read_deadline = _read_clock() + REQUEST_READ_DEADLINE
+            self._arm_read_deadline()
+            try:
+                super().handle_one_request()
+            except OSError:
+                if not self._read_deadline_hit:
+                    raise
+                # The deadline already closed this socket; a reply cannot be sent.
+                self.close_connection = True
+            finally:
+                self._disarm_read_deadline()
 
         def log_message(self, fmt: str, *args: Any) -> None:  # keep stdout clean for agents
             if os.environ.get("UNITARES_SIDECAR_ACCESS_LOG", "off").lower() in {"1", "on", "true"}:
                 super().log_message(fmt, *args)
 
         def do_GET(self) -> None:  # noqa: N802
+            if not self._disarm_read_deadline():
+                return
             parsed = urllib.parse.urlparse(self.path)
             query = urllib.parse.parse_qs(parsed.query)
             path = parsed.path
@@ -1130,8 +1205,21 @@ def make_handler(sidecar: IdentitySidecar) -> type[BaseHTTPRequestHandler]:
                 proof = sidecar.startup_proof(challenge)
                 if not challenge or proof is None:
                     _json_response(self, 404, {"success": False, "error": "not found"})
-                else:
-                    _json_response(self, 200, {"success": True, "proof": proof})
+                    return
+                # A wrapper sends its capability on the same connection that
+                # proved the listener, so a process that takes the port later
+                # never receives it. Keep the connection open for one more
+                # request when asked, once per connection.
+                keep_alive = (
+                    not self._proof_kept_connection
+                    and self.headers.get("Connection", "").strip().lower() == "keep-alive"
+                )
+                _json_response(
+                    self, 200, {"success": True, "proof": proof}, keep_alive=keep_alive
+                )
+                if keep_alive:
+                    self._proof_kept_connection = True
+                    self.close_connection = False
                 return
             if not sidecar.authorized(self.headers):
                 _json_response(self, 401, {"success": False, "error": "unauthorized"})
@@ -1184,11 +1272,23 @@ def make_handler(sidecar: IdentitySidecar) -> type[BaseHTTPRequestHandler]:
             _json_response(self, 404, {"success": False, "error": "not found"})
 
         def do_POST(self) -> None:  # noqa: N802
+            if not self._disarm_read_deadline():
+                return
             if not sidecar.authorized(self.headers):
                 _json_response(self, 401, {"success": False, "error": "unauthorized"})
                 return
+            self._arm_read_deadline()
             try:
-                body = _read_request_json(self)
+                raw = _read_request_body(self)
+            except RequestBodyError as exc:
+                if self._disarm_read_deadline():
+                    _json_response(self, exc.status, {"success": False, "error": str(exc)})
+                return
+            # The deadline bounds reading the request, not handling it.
+            if not self._disarm_read_deadline():
+                return
+            try:
+                body = _decode_request_json(raw)
             except RequestBodyError as exc:
                 _json_response(self, exc.status, {"success": False, "error": str(exc)})
                 return

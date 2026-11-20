@@ -6,27 +6,24 @@ from __future__ import annotations
 import argparse
 import hashlib
 import hmac
+import http.client
 import ipaddress
 import json
 import os
 import secrets
 import signal
+import socket
 import subprocess
 import sys
+import threading
 import time
-import urllib.error
 import urllib.parse
-import urllib.request
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
 
-from _http_auth import (
-    ResponseTooLargeError,
-    authorization_safe_urlopen,
-    read_limited_response,
-)
+from _http_auth import DEFAULT_MAX_RESPONSE_BYTES, read_limited_response
 
 
 DEFAULT_SERVER_URL = "http://localhost:8767"
@@ -34,6 +31,17 @@ DEFAULT_SIDECAR_URL = "http://127.0.0.1:8768"
 DEFAULT_MODEL_TYPE = "u-run"
 STARTUP_TIMEOUT = 10.0
 HTTP_TIMEOUT = 25.0
+#: Wall-clock budget for the unauthenticated startup challenge.
+PROOF_TIMEOUT = 0.5
+PROOF_MAX_BYTES = 4096
+#: Wall-clock budget for the local /health read on a proven connection.
+HEALTH_TIMEOUT = 2.0
+#: Statuses that carry no body under HTTP; never a valid answer from these
+#: JSON endpoints, and ``http.client`` treats their length as zero.
+_BODYLESS_STATUSES = frozenset({204, 304})
+
+#: The clock every exchange deadline is measured on (replaceable in tests).
+_monotonic = time.monotonic
 
 
 class URunError(RuntimeError):
@@ -41,7 +49,11 @@ class URunError(RuntimeError):
 
 
 class SidecarUnavailable(URunError):
-    """The configured sidecar did not accept a local HTTP request."""
+    """Nothing on the sidecar port answered the startup challenge in time."""
+
+
+class ListenerNotProven(URunError):
+    """A listener answered on the sidecar port without proving the startup secret."""
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -98,52 +110,6 @@ def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
     return args, command
 
 
-def _http_json(
-    url: str,
-    *,
-    payload: dict[str, Any] | None = None,
-    slot: str = "",
-    capability: str | None,
-    timeout: float = HTTP_TIMEOUT,
-) -> dict[str, Any]:
-    data = json.dumps(payload).encode("utf-8") if payload is not None else None
-    request = urllib.request.Request(
-        url,
-        data=data,
-        method="POST" if payload is not None else "GET",
-        headers={"Accept": "application/json"},
-    )
-    if payload is not None:
-        request.add_header("Content-Type", "application/json")
-    if capability:
-        request.add_header("Authorization", f"Bearer {capability}")
-    if slot:
-        request.add_header("X-UNITARES-Slot", slot)
-    try:
-        with authorization_safe_urlopen(request, timeout=timeout) as response:
-            raw = read_limited_response(response)
-    except urllib.error.HTTPError as exc:
-        try:
-            detail = read_limited_response(exc, max_bytes=4096).decode(
-                "utf-8", errors="replace"
-            )[:300]
-        except ResponseTooLargeError:
-            detail = "response body exceeded 4096 bytes"
-        raise URunError(f"{url} returned HTTP {exc.code}: {detail}") from exc
-    except ResponseTooLargeError as exc:
-        raise URunError(f"{url} returned an oversized response: {exc}") from exc
-    except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as exc:
-        detail = getattr(exc, "reason", exc)
-        raise SidecarUnavailable(f"{url} is unavailable: {detail}") from exc
-    try:
-        decoded = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise URunError(f"{url} returned invalid JSON") from exc
-    if not isinstance(decoded, dict):
-        raise URunError(f"{url} returned a non-object JSON response")
-    return decoded
-
-
 def _sidecar_bind(sidecar_url: str) -> tuple[str, int, str]:
     base = sidecar_url.rstrip("/")
     parsed = urllib.parse.urlsplit(base)
@@ -180,40 +146,199 @@ def _sidecar_bind(sidecar_url: str) -> tuple[str, int, str]:
     return bind_host, port, base
 
 
-def _probe_health(sidecar_url: str, capability: str) -> dict[str, Any] | None:
-    try:
-        return _http_json(
-            f"{sidecar_url}/health",
-            capability=capability,
-            timeout=0.5,
+def _require_declared_length(response: http.client.HTTPResponse) -> None:
+    """Refuse a response whose body is not delimited by an explicit length."""
+    if 100 <= response.status < 200 or response.status in _BODYLESS_STATUSES:
+        raise http.client.HTTPException(
+            f"HTTP {response.status} is not a JSON response"
         )
-    except SidecarUnavailable:
-        return None
+    if response.getheader("Transfer-Encoding") is not None:
+        raise http.client.HTTPException("Transfer-Encoding is not accepted")
+    if response.getheader("Content-Length") is None:
+        raise http.client.HTTPException("Content-Length is required")
 
 
-def _probe_startup_proof(
-    sidecar_url: str,
-    startup_secret: str,
-) -> bool | None:
+def _exchange(
+    connection: http.client.HTTPConnection,
+    method: str,
+    path: str,
+    *,
+    headers: dict[str, str],
+    seconds: float,
+    max_bytes: int,
+    body: bytes | None = None,
+) -> tuple[http.client.HTTPResponse, bytes]:
+    """Send one request and read its whole response within ``seconds``.
+
+    The socket timeout bounds each read, not the exchange: a peer that keeps
+    sending a byte at a time would otherwise hold u-run indefinitely, so a
+    watchdog shuts the socket down when the wall clock runs out. That shutdown
+    can end a read early with whatever bytes had arrived, so the response is
+    accepted only if it completed before the deadline (checked on the clock
+    itself, not only by whether the watchdog ran) and the body is exactly an
+    explicit ``Content-Length``: no chunked encoding and no bodyless status.
+    Raises ``TimeoutError`` when the time ran out and ``OSError``,
+    ``http.client.HTTPException`` or ``ValueError`` when the exchange failed
+    or the response was malformed or incomplete.
+    """
+    deadline = _monotonic() + max(0.0, seconds)
+    expired = threading.Event()
+    sock = connection.sock
+
+    def expire() -> None:
+        expired.set()
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+
+    timer = threading.Timer(max(0.0, seconds), expire)
+    timer.daemon = True
+    timer.start()
+    try:
+        connection.request(method, path, body=body, headers=headers)
+        response = connection.getresponse()
+        _require_declared_length(response)
+        raw = read_limited_response(response, max_bytes=max_bytes)
+    except (OSError, http.client.HTTPException, ValueError) as exc:
+        if expired.is_set():
+            raise TimeoutError(f"no response within {seconds}s") from exc
+        raise
+    finally:
+        timer.cancel()
+    # A delayed watchdog can lose the race with a late last byte, so the
+    # deadline is also checked here, after the exchange finished.
+    if expired.is_set() or _monotonic() >= deadline:
+        raise TimeoutError(f"no response within {seconds}s")
+    # http.client counts down the declared length as it reads; anything but
+    # zero is a body cut short, or one with no declared length at all.
+    if response.length != 0:
+        raise http.client.IncompleteRead(raw, response.length)
+    return response, raw
+
+
+def _prove_listener(
+    connection: http.client.HTTPConnection, url: str, startup_secret: str
+) -> None:
+    """Challenge the listener and leave the proven connection open."""
     challenge = secrets.token_urlsafe(32)
     query = urllib.parse.urlencode({"challenge": challenge})
     try:
-        response = _http_json(
-            f"{sidecar_url}/startup-proof?{query}",
-            capability=None,
-            timeout=0.5,
+        response, raw = _exchange(
+            connection,
+            "GET",
+            f"/startup-proof?{query}",
+            headers={"Accept": "application/json", "Connection": "keep-alive"},
+            seconds=PROOF_TIMEOUT,
+            max_bytes=PROOF_MAX_BYTES,
         )
-    except SidecarUnavailable:
-        return None
+    except TimeoutError as exc:
+        raise SidecarUnavailable(
+            f"{url} did not answer the startup challenge within {PROOF_TIMEOUT}s"
+        ) from exc
+    except OSError as exc:
+        # Refused, reset or closed before any answer.
+        raise SidecarUnavailable(f"{url} is unavailable: {exc}") from exc
+    except (http.client.HTTPException, ValueError) as exc:
+        raise ListenerNotProven(
+            f"{url} returned a malformed startup-proof response: "
+            f"{type(exc).__name__}"
+        ) from exc
+    if response.status != 200:
+        raise ListenerNotProven(
+            f"{url} answered the startup challenge with HTTP {response.status}"
+        )
+    try:
+        decoded = json.loads(raw.decode("utf-8"))
+    except ValueError as exc:
+        raise ListenerNotProven(f"{url} returned an invalid startup proof") from exc
+    proof = decoded.get("proof") if isinstance(decoded, dict) else None
     expected = hmac.new(
         startup_secret.encode("utf-8"),
         challenge.encode("utf-8"),
         hashlib.sha256,
     ).hexdigest()
-    return response.get("success") is True and hmac.compare_digest(
-        str(response.get("proof") or ""),
-        expected,
-    )
+    if not (
+        isinstance(decoded, dict)
+        and decoded.get("success") is True
+        and isinstance(proof, str)
+        and proof.isascii()
+        and hmac.compare_digest(proof, expected)
+    ):
+        raise ListenerNotProven(f"{url} did not prove the startup secret")
+    if response.will_close or connection.sock is None:
+        raise ListenerNotProven(
+            f"{url} proved the startup secret but closed the connection; "
+            "a sidecar started before this u-run version must be restarted"
+        )
+
+
+def _proven_exchange(
+    sidecar_url: str,
+    startup_secret: str,
+    *,
+    path: str,
+    capability: str,
+    payload: dict[str, Any] | None = None,
+    slot: str = "",
+    timeout: float = HTTP_TIMEOUT,
+) -> dict[str, Any]:
+    """Prove the listener, then send one capability request on that connection.
+
+    A connection stays with the process that accepted it, so a process that
+    binds the port after the proof never receives the capability. Raises
+    ``SidecarUnavailable`` when nothing answered the challenge,
+    ``ListenerNotProven`` when a listener answered without proving the startup
+    secret, and ``URunError`` when the proven request itself fails.
+    """
+    host, port, base = _sidecar_bind(sidecar_url)
+    url = f"{base}{path}"
+    connection = http.client.HTTPConnection(host, port, timeout=PROOF_TIMEOUT)
+    try:
+        try:
+            connection.connect()
+        except OSError as exc:
+            raise SidecarUnavailable(f"{url} is unavailable: {exc}") from exc
+        # Never reconnect: a fresh connection would reach whatever holds the
+        # port now, not the listener that just proved itself.
+        connection.auto_open = 0
+        _prove_listener(connection, url, startup_secret)
+        headers = {
+            "Accept": "application/json",
+            "Authorization": f"Bearer {capability}",
+            "Connection": "close",
+        }
+        if slot:
+            headers["X-UNITARES-Slot"] = slot
+        body = None
+        if payload is not None:
+            body = json.dumps(payload).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+        try:
+            connection.sock.settimeout(timeout)
+            response, raw = _exchange(
+                connection,
+                "POST" if payload is not None else "GET",
+                path,
+                headers=headers,
+                body=body,
+                seconds=timeout,
+                max_bytes=DEFAULT_MAX_RESPONSE_BYTES,
+            )
+        except (OSError, http.client.HTTPException, ValueError) as exc:
+            raise URunError(f"{url} failed: {exc}") from exc
+    finally:
+        connection.close()
+    if not 200 <= response.status < 300:
+        detail = raw[:300].decode("utf-8", errors="replace")
+        raise URunError(f"{url} returned HTTP {response.status}: {detail}")
+    try:
+        decoded = json.loads(raw.decode("utf-8"))
+    except ValueError as exc:
+        raise URunError(f"{url} returned invalid JSON") from exc
+    if not isinstance(decoded, dict):
+        raise URunError(f"{url} returned a non-object JSON response")
+    return decoded
 
 
 def _validate_health(
@@ -227,9 +352,11 @@ def _validate_health(
     if health.get("success") is not True:
         raise URunError("sidecar health response did not report success")
     expected_capability_id = hashlib.sha256(capability.encode("utf-8")).hexdigest()
-    if not secrets.compare_digest(
-        str(health.get("capability_id") or ""),
-        expected_capability_id,
+    capability_id = health.get("capability_id")
+    if not (
+        isinstance(capability_id, str)
+        and capability_id.isascii()
+        and secrets.compare_digest(capability_id, expected_capability_id)
     ):
         raise URunError("sidecar health response did not prove the configured capability")
     reported_server = str(health.get("server_url") or "").rstrip("/")
@@ -275,6 +402,24 @@ def _stop_process(process: subprocess.Popen[Any] | None) -> None:
         process.wait(timeout=5)
 
 
+def _proven_health(
+    sidecar_url: str, startup_secret: str, capability: str
+) -> dict[str, Any] | None:
+    """Return /health from a proven listener, or None when nothing answered."""
+    try:
+        return _proven_exchange(
+            sidecar_url,
+            startup_secret,
+            path="/health",
+            capability=capability,
+            timeout=HEALTH_TIMEOUT,
+        )
+    except SidecarUnavailable:
+        return None
+    except ListenerNotProven as exc:
+        raise URunError(f"sidecar listener failed startup authentication: {exc}") from exc
+
+
 def ensure_sidecar(
     *,
     sidecar_url: str,
@@ -288,13 +433,8 @@ def ensure_sidecar(
 ) -> subprocess.Popen[Any] | None:
     host, port, sidecar_url = _sidecar_bind(sidecar_url)
     if reuse_existing:
-        authenticated = _probe_startup_proof(sidecar_url, startup_secret)
-        if authenticated is False:
-            raise URunError("existing sidecar did not prove the configured startup secret")
-        if authenticated is True:
-            health = _probe_health(sidecar_url, capability)
-            if health is None:
-                raise URunError("authenticated sidecar became unavailable during health check")
+        health = _proven_health(sidecar_url, startup_secret, capability)
+        if health is not None:
             _validate_health(
                 health,
                 server_url=server_url,
@@ -339,13 +479,8 @@ def ensure_sidecar(
     deadline = time.monotonic() + STARTUP_TIMEOUT
     try:
         while time.monotonic() < deadline:
-            authenticated = _probe_startup_proof(sidecar_url, startup_secret)
-            if authenticated is False:
-                raise URunError("sidecar listener failed startup authentication")
-            if authenticated is True:
-                health = _probe_health(sidecar_url, capability)
-                if health is None:
-                    raise URunError("authenticated sidecar became unavailable during health check")
+            health = _proven_health(sidecar_url, startup_secret, capability)
+            if health is not None:
                 _validate_health(
                     health,
                     server_url=server_url,
@@ -369,10 +504,17 @@ def ensure_sidecar(
 
 
 def _start_session(
-    *, sidecar_url: str, slot: str, model_type: str, capability: str
+    *,
+    sidecar_url: str,
+    startup_secret: str,
+    slot: str,
+    model_type: str,
+    capability: str,
 ) -> None:
-    response = _http_json(
-        f"{sidecar_url}/session/start",
+    response = _proven_exchange(
+        sidecar_url,
+        startup_secret,
+        path="/session/start",
         payload={"slot": slot, "model_type": model_type},
         slot=slot,
         capability=capability,
@@ -406,14 +548,19 @@ def _exit_summary(return_code: int, exit_code: int, wall_seconds: float) -> str:
 def _submit_exit_checkin(
     *,
     sidecar_url: str,
+    startup_secret: str,
     slot: str,
     return_code: int,
     exit_code: int,
     wall_seconds: float,
     capability: str,
 ) -> None:
-    response = _http_json(
-        f"{sidecar_url}/turn/stop",
+    # The child may run for hours and the listener may have changed hands;
+    # the check-in travels on a connection that has just proved itself.
+    response = _proven_exchange(
+        sidecar_url,
+        startup_secret,
+        path="/turn/stop",
         payload={
             "slot": slot,
             "event": "u_run_exit",
@@ -505,6 +652,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         _start_session(
             sidecar_url=sidecar_url,
+            startup_secret=startup_secret,
             slot=slot,
             model_type=model_type,
             capability=capability,
@@ -523,16 +671,18 @@ def main(argv: list[str] | None = None) -> int:
         try:
             _submit_exit_checkin(
                 sidecar_url=sidecar_url,
+                startup_secret=startup_secret,
                 slot=slot,
                 return_code=return_code,
                 exit_code=exit_code,
                 wall_seconds=wall_seconds,
                 capability=capability,
             )
-        except URunError as exc:
+        except Exception as exc:
             # Lifecycle telemetry must not replace the wrapped command's exit
-            # status. The warning remains visible to the operator.
-            print(f"u-run: warning: {exc}", file=sys.stderr)
+            # status, whatever the listener sent back. The warning remains
+            # visible to the operator.
+            print(f"u-run: warning: exit check-in skipped: {exc}", file=sys.stderr)
         return exit_code
     except URunError as exc:
         print(f"u-run: {exc}", file=sys.stderr)
