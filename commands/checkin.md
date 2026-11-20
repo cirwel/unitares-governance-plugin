@@ -100,18 +100,8 @@ owns the instrument's inputs, interpretations, and evidence limits.
 Do not stamp the cache or reset a milestone by hand after the call. Claude and
 Codex both register the `pre-governance-call` hook, which snapshots the current
 host slot's cache and milestone before the check-in, and the `post-checkin`
-hook, which acts on that snapshot afterwards. `post-checkin` stamps the slot
-only when all of these hold:
-
-- the server reported the check-in as successful;
-- the slot holds a protected binding for this process, and the call named that
-  binding's `client_session_id` or none (a call that named none is credited to
-  the slot's binding);
-- the snapshot for this same call exists, and the slot's cache was not written
-  again while the call was in flight.
-
-After stamping, it resets the slot's milestone only if the milestone's revision
-still equals the one in the snapshot. Every recorded edit advances that
-revision, so an edit that lands while the call is in flight keeps the milestone
-pending for the next check-in. Without lifecycle hooks there is no milestone
-accumulator to reset.
+hook, which acts on that snapshot afterwards. After a check-in the server
+reports as successful, `post-checkin` stamps the slot and resets its milestone
+only when its own pre-call snapshot is still current, so an overlapping check-in
+or edit can leave the milestone unreset until a later check-in. Without
+lifecycle hooks there is no milestone accumulator to reset.

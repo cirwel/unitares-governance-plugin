@@ -71,9 +71,9 @@ codex mcp add unitares-governance \
 Connect to a running UNITARES governance server, preserve continuity cleanly,
 and check in when there is meaningful agent state to report — usually zero or
 one `sync_state()` call per assistant turn. A new user message is not a new
-process identity: call `start_session(force_new=true)` once per fresh process,
-then continue with `client_session_id`-backed check-ins. The automatic Stop
-summary is a non-agent-authored substrate interpretation, not a replacement
+process identity: bind once per fresh process (step 1 of the raw tool flow
+below), then continue with `client_session_id`-backed check-ins. The automatic
+Stop summary is a non-agent-authored substrate interpretation, not a replacement
 agent report. Avoid per-tool or per-edit check-in noise.
 
 Codex's `SessionStart` event with `source: "compact"` continues the current
@@ -149,7 +149,7 @@ debugging the underlying protocol.
 
 ## Recommended Flow
 
-1. Follow the bundled `unitares-governance:governance-lifecycle` skill and call `start_session(force_new=true)` (in an anchored conversation, `start_session()` with no arguments: see step 1 of the raw tool flow below)
+1. Bind as step 1 of the raw tool flow below says; the bundled `unitares-governance:governance-lifecycle` skill covers the rest of the lifecycle
 2. Keep continuity in slot-scoped `.unitares/session-<slot>.json` caches
 3. Do real work
 4. Call `sync_state(...)` when there is meaningful agent state to report (usually at most once per assistant turn)
@@ -166,7 +166,7 @@ those custom slash commands.
 
 The raw tool flow is:
 
-1. First run of a fresh process: `start_session(force_new=true)` (`onboard(...)` is the canonical equivalent). In an anchored conversation (the session-start note says `anchored session`), call `start_session()` with no arguments instead: the hooks attach the conversation's anchor to that call, and `force_new=true` would mint a second identity for the conversation
+1. No known binding: make the first governance call a bare `start_session()` with no `force_new`, and let the hook or sidecar supply any anchor or existing binding. Sessions launched through `u-run` or the sidecar already have a binding the agent does not see and must not replace, so they skip `start_session`. `force_new=true` is only for a deliberate, operator-intended fresh identity
 2. Fresh process deliberately continuing an exited process's work: `start_session(force_new=true, parent_agent_id=<saved uuid>, spawn_reason="explicit")`. A saved uuid alone is co-location, not lineage
 3. Same still-running process: do **not** call `start_session` again; use `sync_state(..., client_session_id=<current session id>)`
 4. `sync_state()` when meaningful, usually at most once per assistant turn (`process_agent_update(...)` is the canonical equivalent)
@@ -223,9 +223,7 @@ process can write them. Proof of the current session is only the
 this process: its exact host slot's binding, or the conversation anchor of an
 anchored conversation. Never copy a `client_session_id` out of a slot cache
 read, another slot, or the inventory. When this process has no known binding,
-bind as step 1 of the raw tool flow above says: `start_session()` with no
-arguments in an anchored conversation, otherwise `start_session(force_new=true)`,
-adding `parent_agent_id` only for a verified handoff from an exited process.
+bind as step 1 of the raw tool flow above says.
 
 Do not persist `continuity_token` in this cache. v2 slot caches are lineage and
 transport-continuity hints only; a token belongs only to the live response that
