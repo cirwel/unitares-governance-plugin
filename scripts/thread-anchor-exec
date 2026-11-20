@@ -1,0 +1,59 @@
+#!/bin/sh
+# thread-anchor-exec: launch one agent CLI turn bound to a conversation's
+# governance identity.
+#
+#   scripts/thread-anchor-exec <thread-id> -- <cli> [args...]
+#
+# A chat bridge or orchestrator that starts a new CLI process for every turn
+# gets a new UNITARES identity for every turn. This launcher declares the three
+# variables the plugin's hooks require before they resume one identity for the
+# whole conversation instead:
+#
+#   UNITARES_CLIENT_SESSION_ID       agent:/thread-<thread-id>
+#   UNITARES_ORCHESTRATED            1
+#   UNITARES_ORCHESTRATED_OWNER_PID  the PID of the CLI itself
+#
+# The third is why this is a script and not two lines of configuration. The
+# hooks honor an anchor only in the process it was provisioned for, and they
+# identify that process by PID. This shell is replaced by the CLI (`exec`), so
+# its own PID is the CLI's. A CLI started any other way, including one this CLI
+# starts later, has a different PID and is refused the anchor.
+#
+# Guide: docs/orchestrators.md
+set -eu
+
+usage() {
+    printf '%s\n' \
+        'usage: thread-anchor-exec <thread-id> -- <cli> [args...]' \
+        '  <thread-id>  stable id of the conversation: letters, digits, . _ -' \
+        '               and at most 128 characters' >&2
+    exit 64
+}
+
+[ "$#" -ge 3 ] || usage
+thread_id=$1
+[ "$2" = "--" ] || usage
+shift 2
+
+case "$thread_id" in
+    ''|*[!A-Za-z0-9._-]*) usage ;;
+esac
+[ "${#thread_id}" -le 128 ] || usage
+
+# Resolve now so a missing CLI is reported here rather than by `exec`.
+cli=$(command -v -- "$1") || {
+    printf 'thread-anchor-exec: command not found: %s\n' "$1" >&2
+    exit 127
+}
+shift
+
+UNITARES_CLIENT_SESSION_ID="agent:/thread-$thread_id"
+UNITARES_ORCHESTRATED=1
+UNITARES_ORCHESTRATED_OWNER_PID=$$
+export UNITARES_CLIENT_SESSION_ID UNITARES_ORCHESTRATED UNITARES_ORCHESTRATED_OWNER_PID
+
+# An anchored turn resumes its conversation's identity. Lineage inherited from
+# the bridge's own environment would describe some other process.
+unset UNITARES_PARENT_AGENT_ID UNITARES_SPAWN_REASON
+
+exec "$cli" "$@"
