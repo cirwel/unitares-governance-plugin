@@ -62,7 +62,7 @@ including `0` and `off` kill switches:
 | `UNITARES_SESSION_CACHE` | set by SessionStart (Claude) | Exported through `CLAUDE_ENV_FILE`: the absolute path of this session's slot cache. `unitares-github` reads the `uuid` there when it stamps the PR ownership footer (`UNITARES agent: <uuid>`), so a later mint is followed and a child session does not stamp its parent. Not a credential |
 | `UNITARES_HOOK_FUNDAMENTALS_EXCERPT` | `off` | SessionStart points both hosts at the `governance-fundamentals` and `governance-lifecycle` skills; `on` inlines the ~4 KB Fundamentals excerpt instead, for a host build that does not load plugin skills |
 | `UNITARES_FILE_LEASES_ENABLED` | `1` | Enable host edit leases (Claude Edit/Write/MultiEdit; Codex apply_patch) |
-| `UNITARES_FILE_LEASES_REQUIRED` | `0` | Block edits when lease infrastructure is missing/unreachable; truthy values take precedence over `UNITARES_FILE_LEASES_ENABLED=0` |
+| `UNITARES_FILE_LEASES_REQUIRED` | `0` | Block edits when lease infrastructure is missing/unreachable, or when an edit target's git repository/worktree namespace cannot be verified (a target outside every git repository still proceeds); truthy values take precedence over `UNITARES_FILE_LEASES_ENABLED=0` |
 | `UNITARES_ALLOW_INSECURE_LOOPBACK_LEASE_HTTP` | `0` | Development-only opt-in to send a configured lease bearer over cleartext loopback HTTP; use HTTPS or authenticated local IPC for enforced deployments |
 | `UNITARES_FILE_LEASE_TTL_S` | `30` | Crash/failure backstop for a lease not released by PostToolUse |
 | `UNITARES_FILE_LEASE_BATCH_TIMEOUT_S` | `3.5` | Total bounded lease work per edit hook (clamped to four seconds) |
