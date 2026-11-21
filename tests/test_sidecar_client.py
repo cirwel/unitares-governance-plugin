@@ -336,6 +336,47 @@ def test_startup_proof_503_maps_to_sidecar_unavailable() -> None:
         _stop_server(server, thread)
 
 
+def test_uds_health_503_maps_to_sidecar_unavailable() -> None:
+    if not hasattr(socket, "AF_UNIX") or not hasattr(socketserver, "UnixStreamServer"):
+        pytest.skip("AF_UNIX not supported on this platform")
+
+    import u_run
+
+    class BusyUnixHandler(BaseHTTPRequestHandler):
+        def log_message(self, _fmt, *_args):  # pragma: no cover
+            return
+
+        def address_string(self):
+            return "unix"
+
+        def do_GET(self):  # noqa: N802
+            _respond(self, {"success": False, "error": "busy"}, status=503)
+
+    with tempfile.TemporaryDirectory(prefix="u-sc-") as tmpdir:
+        os.chmod(tmpdir, 0o700)
+        sock_path = Path(tmpdir) / "busy.sock"
+        srv = identity_sidecar.BoundedThreadingUnixHTTPServer(sock_path, BusyUnixHandler)
+        thread = threading.Thread(target=srv.serve_forever, daemon=True)
+        thread.start()
+        try:
+            client = sidecar_client.SidecarClient(
+                capability=CAPABILITY,
+                sidecar_socket=str(sock_path),
+            )
+            with pytest.raises(sidecar_client.SidecarUnavailable, match="503"):
+                client.health()
+            # u_run._proven_health treats 503 as transient unavailability (None),
+            # so startup polling retries instead of aborting.
+            assert (
+                u_run._proven_health(
+                    "", None, CAPABILITY, sidecar_socket=str(sock_path)
+                )
+                is None
+            )
+        finally:
+            _stop_server(srv, thread)
+
+
 def test_cli_call_post_and_get_over_tcp_and_uds(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],

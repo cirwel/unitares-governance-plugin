@@ -483,6 +483,9 @@ def proven_exchange(
             raise SidecarClientError(f"{url} failed: {exc}") from exc
     finally:
         connection.close()
+    if response.status == 503:
+        detail = raw[:300].decode("utf-8", errors="replace")
+        raise SidecarUnavailable(f"{url} returned HTTP 503: {detail}")
     if not 200 <= response.status < 300:
         detail = raw[:300].decode("utf-8", errors="replace")
         raise SidecarClientError(f"{url} returned HTTP {response.status}: {detail}")

@@ -2910,6 +2910,86 @@ def test_unix_socket_refuses_relative_path_and_permissive_existing_parent_withou
         # Pre-existing directory permissions MUST NOT be mutated.
         assert stat.S_IMODE(os.lstat(permissive_dir).st_mode) == 0o755
 
+        # A 0700 parent inside a group/world-writable non-sticky ancestor is refused.
+        writable_ancestor = Path(tmpdir) / "gw"
+        writable_ancestor.mkdir()
+        os.chmod(writable_ancestor, 0o775)
+        private_child = writable_ancestor / "priv"
+        private_child.mkdir(mode=0o700)
+        os.chmod(private_child, 0o700)
+        try:
+            with pytest.raises(PermissionError, match="sticky"):
+                identity_sidecar.BoundedThreadingUnixHTTPServer(
+                    private_child / "sc.sock", make_handler(sidecar)
+                )
+        finally:
+            os.chmod(writable_ancestor, 0o700)
+
+
+def test_unix_socket_flock_serializes_concurrent_stale_startup_race(
+    tmp_path: Path,
+    fake_server: str,
+) -> None:
+    import tempfile
+
+    if not hasattr(socket, "AF_UNIX"):
+        pytest.skip("AF_UNIX not supported on this platform")
+
+    import sidecar_client
+
+    sidecar = _sidecar(tmp_path, fake_server)
+    with tempfile.TemporaryDirectory(prefix="u-sc-") as tmpdir:
+        sock_path = Path(tmpdir) / "race.sock"
+        stale = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        stale.bind(str(sock_path))
+        stale.close()
+
+        barrier = threading.Barrier(2)
+        winners: list[identity_sidecar.BoundedThreadingUnixHTTPServer] = []
+        errors: list[BaseException] = []
+        lock = threading.Lock()
+
+        def attempt_start() -> None:
+            barrier.wait(timeout=5)
+            try:
+                srv = identity_sidecar.BoundedThreadingUnixHTTPServer(
+                    sock_path, make_handler(sidecar)
+                )
+            except BaseException as exc:
+                with lock:
+                    errors.append(exc)
+            else:
+                with lock:
+                    winners.append(srv)
+
+        threads = [threading.Thread(target=attempt_start) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=5)
+
+        assert len(winners) == 1
+        assert len(errors) == 1
+        assert isinstance(errors[0], OSError)
+        assert "already in use" in str(errors[0])
+
+        winner = winners[0]
+        serving = threading.Thread(target=winner.serve_forever, daemon=True)
+        serving.start()
+        try:
+            client = sidecar_client.SidecarClient(
+                capability=sidecar.capability_token,
+                sidecar_socket=str(sock_path),
+            )
+            assert client.health()["success"] is True
+        finally:
+            winner.shutdown()
+            serving.join(timeout=2)
+            winner.server_close()
+
+        assert not sock_path.exists()
+        assert not (sock_path.parent / f".{sock_path.name}.lock").exists()
+
 
 def test_unix_socket_cleans_stale_socket_and_enforces_worker_cap_503(
     tmp_path: Path,
