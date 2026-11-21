@@ -333,6 +333,8 @@ STOP_DOES_NOT_BIND = "The Stop hook will not bind this conversation's anchor"
 @pytest.mark.parametrize("env", [
     {},
     {"UNITARES_AUTO_ONBOARD": "true"},
+    # The opt-in scoped to the owner of an anchor, which this session is.
+    {"UNITARES_AUTO_ONBOARD": "anchored"},
     {"UNITARES_AUTO_ONBOARD": "anything-not-an-off-word"},
     {"UNITARES_DISABLE_AUTO_ONBOARD": "0"},
     # Spellings the Stop hook does not read as "off".
@@ -374,6 +376,13 @@ def test_anchored_variant_does_not_promise_a_stop_bind_without_a_session_slot(tm
     assert STOP_DOES_NOT_BIND in rendered
     assert "the host gave no session id" in rendered
     assert STOP_BINDS not in rendered
+
+
+def test_anchored_mode_reads_as_off_to_a_session_that_owns_no_anchor(tmp_path):
+    rendered = _render(tmp_path, extra_env={"UNITARES_AUTO_ONBOARD": "anchored"})
+    assert "this session owns no thread anchor" in rendered
+    assert "the Stop hook will lazily create" not in rendered
+    assert "anchored session" not in rendered
 
 
 def test_golden_anchored_auto_onboard_off(tmp_path):

@@ -147,7 +147,12 @@ fi
 
 ORCHESTRATED_MODE="$(printf '%s' "${UNITARES_ORCHESTRATED:-0}" | tr '[:upper:]' '[:lower:]')"
 ANCHOR_RESUME_ENABLED=0
-if [[ -n "${UNITARES_CLIENT_SESSION_ID:-}" \
+# An anchor with no letter or digit in it is no anchor. The server refuses
+# one, and the onboarding helper strips whitespace of every kind and would
+# then mint an ordinary slot identity. The characters are listed one by one
+# because a range or a class follows the locale.
+ANCHOR_VALUE="${UNITARES_CLIENT_SESSION_ID:-}"
+if [[ "${ANCHOR_VALUE}" == *[abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789]* \
       && ( "${ORCHESTRATED_MODE}" == "1" \
            || "${ORCHESTRATED_MODE}" == "true" \
            || "${ORCHESTRATED_MODE}" == "yes" \
@@ -276,6 +281,27 @@ fi
 CHECKINS_MODE="$(printf '%s' "${UNITARES_CHECKINS:-on}" | tr '[:upper:]' '[:lower:]')"
 AUTO_ONBOARD_MODE="$(printf '%s' "${UNITARES_AUTO_ONBOARD:-off}" | tr '[:upper:]' '[:lower:]')"
 DISABLE_AUTO_ONBOARD="$(printf '%s' "${UNITARES_DISABLE_AUTO_ONBOARD:-0}" | tr '[:upper:]' '[:lower:]')"
+# `anchored` opts in for one process only: the one that owns an orchestrated
+# thread anchor. Everything else, including a CLI that process starts and that
+# inherits this variable, is treated as off. `on` would mint an identity for
+# each of those children.
+# Any word this hook does not know counts as on, so `anchored` is recognised
+# with space around it too; no other value is read differently than before.
+AUTO_ONBOARD_WORD="${AUTO_ONBOARD_MODE#"${AUTO_ONBOARD_MODE%%[![:space:]]*}"}"
+AUTO_ONBOARD_WORD="${AUTO_ONBOARD_WORD%"${AUTO_ONBOARD_WORD##*[![:space:]]}"}"
+if [[ "${AUTO_ONBOARD_WORD}" == "anchored" ]]; then
+  if [[ "${ANCHOR_RESUME_ENABLED:-0}" == "1" ]]; then
+    AUTO_ONBOARD_MODE="on"
+  else
+    AUTO_ONBOARD_MODE="off"
+  fi
+fi
+ANCHOR_REPORT="${PLUGIN_ROOT}/scripts/anchor_bind_report.py"
+ANCHOR_BIND_TRIED=0
+ANCHOR_UNBOUND_WHY="auto-onboarding is off"
+if [[ "${CHECKINS_MODE}" == "off" ]]; then
+  ANCHOR_UNBOUND_WHY="check-ins are off"
+fi
 if [[ -z "${CSID:-}" && -n "${RAW_SLOT:-}" \
       && ( "${HOOK_MODE}" != "session_start" || "${ANCHOR_RESUME_ENABLED}" == "1" ) \
       && "${CHECKINS_MODE}" != "off" \
@@ -287,6 +313,7 @@ if [[ -z "${CSID:-}" && -n "${RAW_SLOT:-}" \
       && "${DISABLE_AUTO_ONBOARD}" != "true" \
       && "${DISABLE_AUTO_ONBOARD}" != "on" ]]; then
   ONBOARD_HELPER="${PLUGIN_ROOT}/scripts/onboard_helper.py"
+  ANCHOR_UNBOUND_WHY="the onboarding helper is missing from this install"
   if [[ -f "${ONBOARD_HELPER}" ]]; then
     # Name the session after the directory it was started in. $PWD is wherever
     # the shell happens to be at the first Stop, which can be anywhere.
@@ -314,7 +341,7 @@ if [[ -z "${CSID:-}" && -n "${RAW_SLOT:-}" \
     # fail-closed marker lets headless orchestrated turn-children resume one
     # identity across turns while a leaked bare anchor in an interactive shell
     # falls back to normal fresh-mint behavior.
-    python3 "${ONBOARD_HELPER}" \
+    ONBOARD_RESULT=$(python3 "${ONBOARD_HELPER}" \
       --server-url "${SERVER_URL}" \
       --name "${AGENT_NAME}" \
       --model-type "${MODEL_TYPE}" \
@@ -325,8 +352,9 @@ if [[ -z "${CSID:-}" && -n "${RAW_SLOT:-}" \
       --host-session-id "${STOP_HOST_SESSION_ID:-}" \
       --host-session-dir "${WORKSPACE_DIR}" \
       --timeout "${ONBOARD_TIMEOUT}" \
-      >/dev/null 2>&1 || true
+      2>/dev/null) || true
     eval "$(printf '%s' "${PAYLOAD}" | python3 "${SESSION_LOOKUP}" --workspace "${LOOKUP_WORKSPACE}")"
+    ANCHOR_BIND_TRIED=1
   fi
 fi
 
@@ -354,6 +382,36 @@ if [[ -n "${CSID:-}" && -f "${PLUGIN_ROOT}/scripts/binding_activity.py" ]]; then
   if [[ "${MARK_STATUS}" != "0" || "${CSID}" != "${MARKED_CSID}" || "${UUID}" != "${MARKED_UUID}" ]]; then
     CSID=""
     UUID=""
+  fi
+fi
+
+# Say what happened to an owned thread anchor, now that CSID is what this turn
+# will actually check in under. Reported here and not where the bind is made:
+# the activity check above can still withdraw a binding, and then the turn is
+# identity-free whatever the bind returned.
+#   - a bind was attempted: resumed, minted, bound or failed. A pre-bind at
+#     session start reports a success and leaves a failure to the Stop that
+#     retries it.
+#   - no bind was attempted and nothing is bound: unbound, with why. Until
+#     this line nobody was told.
+if [[ "${ANCHOR_RESUME_ENABLED:-0}" == "1" && -n "${RAW_SLOT:-}" && -f "${ANCHOR_REPORT}" ]]; then
+  if [[ "${ANCHOR_BIND_TRIED}" == "1" ]]; then
+    ANCHOR_REPORT_ARGS=("--slot=${RAW_SLOT}" "--bound-csid=${CSID:-}")
+    if [[ "${HOOK_MODE:-}" == "session_start" ]]; then
+      ANCHOR_REPORT_ARGS+=(--successes-only)
+    fi
+    printf '%s' "${ONBOARD_RESULT:-}" | python3 "${ANCHOR_REPORT}" \
+      "${ANCHOR_REPORT_ARGS[@]}" >/dev/null || true
+  elif [[ "${HOOK_MODE:-}" != "session_start" && -z "${CSID:-}" ]]; then
+    ANCHOR_REPORT_ARGS=("--slot=${RAW_SLOT}")
+    if [[ -n "${MARKED_CSID:-}" ]]; then
+      # The slot looked bound, so no bind was attempted, and the activity
+      # check then withdrew that binding. Turning binding on is not the fix.
+      ANCHOR_UNBOUND_WHY="the session's cached binding was not usable for this turn"
+      ANCHOR_REPORT_ARGS+=(--withdrawn)
+    fi
+    python3 "${ANCHOR_REPORT}" "${ANCHOR_REPORT_ARGS[@]}" \
+      "--unbound-reason=${ANCHOR_UNBOUND_WHY}" </dev/null >/dev/null || true
   fi
 fi
 
