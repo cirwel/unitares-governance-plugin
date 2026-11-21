@@ -86,7 +86,8 @@ needs check-ins enabled and a session id from the host, and
 The Stop hook reports what happened to an owned anchor. Every outcome below
 is a line in the check-in log (`~/.unitares/checkins.log`,
 `event=anchor_bind`), and the two that leave the turn without an identity,
-`anchor_bind_fail` and `anchor_unbound`, are also written to standard error:
+`anchor_bind_fail` and `anchor_unbound`, are also written to standard error
+(without the anchor's value):
 
 | Status | Meaning |
 |---|---|

@@ -89,7 +89,6 @@ def classify(raw: str, bound_csid: str = "") -> tuple[str, str, str]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--slot", required=True)
-    parser.add_argument("--anchor", default="")
     parser.add_argument("--bound-csid", default="")
     parser.add_argument(
         "--successes-only",
@@ -126,16 +125,17 @@ def main(argv: list[str] | None = None) -> int:
         pass
     # A log that could not be written must not also cost the warning.
     try:
-        anchor = args.anchor or "the thread anchor"
+        # The anchor itself is not printed: a host may capture this stream,
+        # and the value is what a later turn presents to resume the identity.
         if status == "anchor_unbound":
             print(
-                f"[UNITARES] this turn ended with no identity for {anchor} "
-                f"({error}): {UNBOUND_HELP}",
+                "[UNITARES] this turn ended with no identity for its thread "
+                f"anchor ({error}): {UNBOUND_HELP}",
                 file=sys.stderr,
             )
         elif status == "anchor_bind_fail":
             print(
-                f"[UNITARES] could not bind {anchor}: {error}. "
+                f"[UNITARES] could not bind this turn's thread anchor: {error}. "
                 "This turn has no identity.",
                 file=sys.stderr,
             )

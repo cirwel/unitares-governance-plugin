@@ -348,32 +348,8 @@ if [[ -z "${CSID:-}" && -n "${RAW_SLOT:-}" \
       --timeout "${ONBOARD_TIMEOUT}" \
       2>/dev/null) || true
     eval "$(printf '%s' "${PAYLOAD}" | python3 "${SESSION_LOOKUP}" --workspace "${LOOKUP_WORKSPACE}")"
-    # For an owned anchor, say whether the bind resumed, minted or failed.
-    # CSID is what the slot holds now: another hook may have bound it while
-    # the request was in flight, and then the turn has an identity whatever
-    # this request returned. A pre-bind at session start reports a success
-    # and leaves a failure to the Stop that retries it.
     ANCHOR_BIND_TRIED=1
-    if [[ "${ANCHOR_RESUME_ENABLED:-0}" == "1" && -f "${ANCHOR_REPORT}" ]]; then
-      ANCHOR_REPORT_ARGS=("--slot=${RAW_SLOT}" "--anchor=${ANCHOR_VALUE}" "--bound-csid=${CSID:-}")
-      if [[ "${HOOK_MODE:-}" == "session_start" ]]; then
-        ANCHOR_REPORT_ARGS+=(--successes-only)
-      fi
-      printf '%s' "${ONBOARD_RESULT}" | python3 "${ANCHOR_REPORT}" \
-        "${ANCHOR_REPORT_ARGS[@]}" >/dev/null || true
-    fi
   fi
-fi
-
-# An owned anchor that reaches the end of a turn with nothing bound to it and
-# no bind attempted: the conversation is identity-free and, until this line,
-# nobody was told. Only at a real Stop, with a slot to report against.
-if [[ "${HOOK_MODE:-}" != "session_start" && "${ANCHOR_RESUME_ENABLED:-0}" == "1" \
-      && "${ANCHOR_BIND_TRIED}" != "1" && -z "${CSID:-}" && -n "${RAW_SLOT:-}" \
-      && -f "${ANCHOR_REPORT}" ]]; then
-  python3 "${ANCHOR_REPORT}" \
-    "--slot=${RAW_SLOT}" "--anchor=${ANCHOR_VALUE}" \
-    "--unbound-reason=${ANCHOR_UNBOUND_WHY}" </dev/null >/dev/null || true
 fi
 
 # Record that this bound slot is active. A binding idle past the server's
@@ -400,6 +376,32 @@ if [[ -n "${CSID:-}" && -f "${PLUGIN_ROOT}/scripts/binding_activity.py" ]]; then
   if [[ "${MARK_STATUS}" != "0" || "${CSID}" != "${MARKED_CSID}" || "${UUID}" != "${MARKED_UUID}" ]]; then
     CSID=""
     UUID=""
+  fi
+fi
+
+# Say what happened to an owned thread anchor, now that CSID is what this turn
+# will actually check in under. Reported here and not where the bind is made:
+# the activity check above can still withdraw a binding, and then the turn is
+# identity-free whatever the bind returned.
+#   - a bind was attempted: resumed, minted, bound or failed. A pre-bind at
+#     session start reports a success and leaves a failure to the Stop that
+#     retries it.
+#   - no bind was attempted and nothing is bound: unbound, with why. Until
+#     this line nobody was told.
+if [[ "${ANCHOR_RESUME_ENABLED:-0}" == "1" && -n "${RAW_SLOT:-}" && -f "${ANCHOR_REPORT}" ]]; then
+  if [[ "${ANCHOR_BIND_TRIED}" == "1" ]]; then
+    ANCHOR_REPORT_ARGS=("--slot=${RAW_SLOT}" "--bound-csid=${CSID:-}")
+    if [[ "${HOOK_MODE:-}" == "session_start" ]]; then
+      ANCHOR_REPORT_ARGS+=(--successes-only)
+    fi
+    printf '%s' "${ONBOARD_RESULT:-}" | python3 "${ANCHOR_REPORT}" \
+      "${ANCHOR_REPORT_ARGS[@]}" >/dev/null || true
+  elif [[ "${HOOK_MODE:-}" != "session_start" && -z "${CSID:-}" ]]; then
+    if [[ -n "${MARKED_CSID:-}" ]]; then
+      ANCHOR_UNBOUND_WHY="the session's cached binding was not usable for this turn"
+    fi
+    python3 "${ANCHOR_REPORT}" "--slot=${RAW_SLOT}" \
+      "--unbound-reason=${ANCHOR_UNBOUND_WHY}" </dev/null >/dev/null || true
   fi
 fi
 

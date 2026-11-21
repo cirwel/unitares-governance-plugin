@@ -38,15 +38,7 @@ WEAK_SOURCES = (
     "implicit",
     "heuristic",
 )
-FALLBACK_STATUSES = {
-    "floor_sent",
-    "floor_fail",
-    "fail",
-    "error",
-    # An orchestrated thread anchor that ended a turn without an identity.
-    "anchor_bind_fail",
-    "anchor_unbound",
-}
+FALLBACK_STATUSES = {"floor_sent", "floor_fail", "fail", "error"}
 SLOT_RE = re.compile(r"session-(?P<slot>[A-Za-z0-9_-]{1,64})\.json$")
 IDENTITY_RESPONSE_SCHEMA = "s22.identity_response.v1"
 
@@ -282,8 +274,8 @@ def audit_checkin_log(
                 f"check-in log status={status} event={event or '?'}",
             ))
 
-        # Anchor reports for a turn without an identity have no uuid to give;
-        # they are already counted above.
+        # An anchor report says why a turn has no identity. The turn itself is
+        # already counted by its floor line, and the report has no uuid to give.
         if uuid == "?" and not status.startswith("floor") and event != "anchor_bind":
             findings.append(Finding(
                 "warning",

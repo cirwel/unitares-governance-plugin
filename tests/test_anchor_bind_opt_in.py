@@ -177,7 +177,8 @@ def test_an_owned_anchor_nothing_bound_is_reported(tmp_path, env, why):
     assert onboards == []
     assert len(anchor_lines) == 1 and "status=anchor_unbound" in anchor_lines[0]
     assert why in anchor_lines[0]
-    assert "no identity for agent:/thread-4242" in result.stderr
+    assert "no identity for its thread anchor" in result.stderr
+    assert ANCHOR not in result.stderr
     assert "--bind" in result.stderr
 
 
@@ -189,7 +190,8 @@ def test_a_bind_that_fails_is_reported_and_not_called_unbound(tmp_path):
     assert result.returncode == 0
     assert len(onboards) == 1
     assert len(anchor_lines) == 1 and "status=anchor_bind_fail" in anchor_lines[0]
-    assert "could not bind agent:/thread-4242" in result.stderr
+    assert "could not bind this turn's thread anchor" in result.stderr
+    assert ANCHOR not in result.stderr
 
 
 def test_a_bind_that_created_a_new_identity_says_so(tmp_path):
@@ -283,8 +285,8 @@ def test_report_is_silent_on_stdout_and_never_fails(tmp_path):
     log = tmp_path / "checkins.log"
     cases = [
         (["--slot=s", "--unbound-reason=auto-onboarding is off"], ""),
-        (["--slot=s", "--anchor=agent:/thread-1"], "garbage"),
-        (["--slot=-starts-with-a-dash", "--anchor=-x", "--bound-csid=-c"], '{"status": "ok", "uuid": "u"}'),
+        (["--slot=s"], "garbage"),
+        (["--slot=-starts-with-a-dash", "--bound-csid=-c"], '{"status": "ok", "uuid": "u"}'),
         ([], ""),  # missing required argument
     ]
     for args, stdin in cases:
@@ -295,11 +297,11 @@ def test_report_is_silent_on_stdout_and_never_fails(tmp_path):
 
 def test_a_log_that_cannot_be_written_still_gets_the_warning(tmp_path):
     result = _report(
-        "--slot=s", "--anchor=agent:/thread-1", "--unbound-reason=auto-onboarding is off",
+        "--slot=s", "--unbound-reason=auto-onboarding is off",
         log=tmp_path,  # a directory: the append fails
     )
     assert result.returncode == 0
-    assert "no identity for agent:/thread-1" in result.stderr
+    assert "no identity for its thread anchor" in result.stderr
 
 
 def test_a_failed_pre_bind_at_session_start_is_left_to_the_stop(tmp_path):
@@ -313,13 +315,13 @@ def test_a_failed_pre_bind_at_session_start_is_left_to_the_stop(tmp_path):
     assert "could not bind" in loud.stderr and "status=anchor_bind_fail" in log.read_text()
 
 
-def test_audit_counts_an_unbound_anchor_once(tmp_path):
+def test_audit_does_not_count_an_anchor_report_beside_its_floor_line(tmp_path):
     from audit_identity_contract import audit_checkin_log  # noqa: E402
 
     log = tmp_path / "checkins.log"
     _report("--slot=s", "--unbound-reason=auto-onboarding is off", log=log)
     codes = [finding.code for finding in audit_checkin_log(log)]
-    assert codes == ["checkin_fallback_status"]
+    assert codes == []
 
 
 @pytest.mark.parametrize("value", [" on ", "o f f", "yes please"])
@@ -335,3 +337,16 @@ def test_padded_anchored_still_binds_the_owner(tmp_path):
         onboard_result=_identity(is_new=False),
     )
     assert len(onboards) == 1 and "status=anchor_resumed" in anchor_lines[0]
+
+
+def test_an_idle_binding_the_stop_withdraws_is_reported_unbound(tmp_path):
+    """A slot whose cached binding the activity check rejects ends the turn
+    identity-free; with `on` no bind is attempted because the slot looked bound."""
+    _write_binding(tmp_path)
+    cache = tmp_path / ".unitares" / _slot_filename(SLOT)
+    data = json.loads(cache.read_text())
+    data["prior_process"] = True
+    cache.write_text(json.dumps(data))
+    result, onboards, anchor_lines = _stop(tmp_path, env={**OWNED, "UNITARES_AUTO_ONBOARD": "off"})
+    assert result.returncode == 0
+    assert len(anchor_lines) == 1 and "status=anchor_unbound" in anchor_lines[0]
