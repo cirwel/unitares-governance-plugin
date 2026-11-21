@@ -89,7 +89,8 @@ including `0` and `off` kill switches:
 | `UNITARES_HOOK_FUNDAMENTALS_EXCERPT` | `off` | SessionStart points both hosts at the `governance-fundamentals` and `governance-lifecycle` skills; `on` inlines the ~4 KB Fundamentals excerpt instead, for a host build that does not load plugin skills |
 | `UNITARES_FILE_LEASES_ENABLED` | `1` | Enable host edit leases (Claude Edit/Write/MultiEdit; Codex apply_patch) |
 | `UNITARES_FILE_LEASES_REQUIRED` | `0` | Block edits when lease infrastructure is missing/unreachable, or when an edit target's git repository/worktree namespace cannot be verified (a target outside every git repository still proceeds); truthy values take precedence over `UNITARES_FILE_LEASES_ENABLED=0` |
-| `UNITARES_ALLOW_INSECURE_LOOPBACK_LEASE_HTTP` | `0` | Development-only opt-in to send a configured lease bearer over cleartext loopback HTTP; use HTTPS or authenticated local IPC for enforced deployments |
+| `UNITARES_ALLOW_INSECURE_LOOPBACK_LEASE_HTTP` | `0` | Development-only opt-in to send a configured lease bearer over cleartext loopback HTTP; use HTTPS or a verified Unix domain socket (`UNITARES_LEASE_PLANE_UNIX_SOCKET` / `unix:///path`) for enforced deployments |
+| `UNITARES_LEASE_PLANE_UNIX_SOCKET` | unset | Absolute path to an owner-only (`0600`) Unix domain socket for the BEAM lease plane (takes precedence over `LEASE_PLANE_BASE_URL` / `UNITARES_LEASE_PLANE_URL`). Validated fail-closed (`os.lstat`: absolute non-symlink `S_ISSOCK`, current UID, `st_mode & 0o077 == 0`, parent directory not group/world-writable without sticky bit, and post-connect peer UID verification via `LOCAL_PEERCRED` / `SO_PEERCRED`); treated as secure transport like HTTPS so configured bearers work without `UNITARES_ALLOW_INSECURE_LOOPBACK_LEASE_HTTP=1` |
 | `UNITARES_FILE_LEASE_TTL_S` | `30` | Crash/failure backstop for a lease not released by PostToolUse |
 | `UNITARES_FILE_LEASE_BATCH_TIMEOUT_S` | `3.5` | Total bounded lease work per edit hook (clamped to four seconds) |
 | `UNITARES_MILESTONE_LOCK_TIMEOUT_S` | `2.0` | Maximum wait for the cross-process milestone lock (clamped to four seconds) |
@@ -102,8 +103,10 @@ including `0` and `off` kill switches:
 | `UNITARES_CODEX_RUNTIME_OBSERVATIONS` | `on` | Emit bounded completed-tool rollups to the legacy runtime-named audit sink |
 | `UNITARES_CODEX_HOST_HEARTBEATS` | `off` | Opt in to hook-parent PID heartbeats; a shared host PID never proves per-agent runtime |
 | `UNITARES_CODEX_RUNTIME_IDLE_EXIT_S` | `3600` | Stop a detached slot worker after this many seconds without a completed-tool receipt |
-| `LEASE_PLANE_BASE_URL` | `http://127.0.0.1:8788` | BEAM lease-plane HTTP base URL |
+| `LEASE_PLANE_BASE_URL` | `http://127.0.0.1:8788` | BEAM lease-plane HTTP base URL (or `unix:///absolute/path` for local UDS; `UNITARES_LEASE_PLANE_URL` is accepted as an alias, and `UNITARES_LEASE_PLANE_UNIX_SOCKET` takes precedence when set) |
 | `LEASE_PLANE_BEARER_TOKEN` | unset | Bearer used for lease-plane acquire, heartbeat, and release calls. Read from the environment, then `UNITARES_SECRETS_ENV`, `~/.config/unitares/secrets.env`, or the older `~/.config/cirwel/secrets.env`. When none is set and the lease plane is on loopback, the hook tries the UNITARES Docker Compose default (`unitares-local-lease-plane`), except in required mode. SessionStart says when leases are enabled but would not work |
+| `UNITARES_SIDECAR_SOCKET` | unset | Optional absolute path to an owner-only (`0600`) Unix domain socket for `scripts/identity_sidecar.py` (`--unix-socket`), `scripts/u-run` (`--sidecar-socket`), and `scripts/sidecar_client.py`; pre-existing parent directories must already be `0700` owner-only (never silently `chmod`ed), providing full local isolation instead of loopback TCP |
+| `UNITARES_SIDECAR_CLIENT` | set by `u-run` | Exported to `u-run` child processes: absolute path to `scripts/sidecar_client.py`, which performs the `/startup-proof` HMAC challenge over TCP (`UNITARES_SIDECAR_STARTUP_SECRET`) or validates `UNITARES_SIDECAR_SOCKET` before presenting `UNITARES_SIDECAR_CAPABILITY` |
 
 See [adapter behavior](./adapters.md) for host-specific hooks and
 [check-in diagnostics](./check-ins.md) for triggers, logs, and upgrade steps.

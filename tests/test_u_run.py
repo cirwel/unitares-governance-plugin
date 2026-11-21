@@ -947,3 +947,249 @@ def test_response_without_an_explicit_content_length_is_refused(
         assert type(raised.value) is u_run.ListenerNotProven
     else:
         assert type(raised.value) is u_run.URunError
+
+
+def test_tcp_mode_exports_startup_secret_and_sidecar_client_usable_by_child(
+    tmp_path: Path,
+) -> None:
+    _GovernanceHandler.calls = []
+    server, thread, governance_url = _serve(_GovernanceHandler)
+    sidecar_url = _unused_sidecar_url()
+    output = tmp_path / "child-tcp.json"
+    child = (
+        "import json, os, pathlib, subprocess, sys; "
+        "client = os.environ['UNITARES_SIDECAR_CLIENT']; "
+        "proc = subprocess.run([sys.executable, client, 'call', 'knowledge', "
+        "'--arguments', json.dumps({'action': 'search', 'query': 'from-child'})], "
+        "capture_output=True, text=True, check=True); "
+        "pathlib.Path(sys.argv[1]).write_text(json.dumps({"
+        "'startup_secret_set': bool(os.environ.get('UNITARES_SIDECAR_STARTUP_SECRET')), "
+        "'client': client, "
+        "'socket': os.environ.get('UNITARES_SIDECAR_SOCKET'), "
+        "'tool_reply': json.loads(proc.stdout)}))"
+    )
+    try:
+        result = u_run.main(
+            [
+                "--server-url",
+                governance_url,
+                "--sidecar-url",
+                sidecar_url,
+                "--workspace",
+                str(tmp_path),
+                "--",
+                sys.executable,
+                "-c",
+                child,
+                str(output),
+            ]
+        )
+    finally:
+        _stop_server(server, thread)
+
+    assert result == 0
+    observed = json.loads(output.read_text(encoding="utf-8"))
+    assert observed["startup_secret_set"] is True
+    assert Path(observed["client"]).resolve() == (SCRIPTS / "sidecar_client.py").resolve()
+    assert observed["socket"] is None
+    assert observed["tool_reply"]["result"]["success"] is True
+    assert [call["name"] for call in _GovernanceHandler.calls] == [
+        "onboard",
+        "knowledge",
+        "process_agent_update",
+    ]
+
+
+@pytest.mark.parametrize("via_env", [False, True])
+def test_unix_socket_mode_starts_sidecar_runs_child_client_and_cleans_up(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    via_env: bool,
+) -> None:
+    import stat
+    import tempfile
+
+    if not hasattr(socket, "AF_UNIX"):
+        pytest.skip("AF_UNIX not supported on this platform")
+
+    _GovernanceHandler.calls = []
+    server, thread, governance_url = _serve(_GovernanceHandler)
+    output = tmp_path / "child-uds.json"
+    child = (
+        "import json, os, pathlib, stat, subprocess, sys; "
+        "sock = os.environ['UNITARES_SIDECAR_SOCKET']; "
+        "info = os.lstat(sock); "
+        "client = os.environ['UNITARES_SIDECAR_CLIENT']; "
+        "proc = subprocess.run([sys.executable, client, 'call', 'knowledge', "
+        "'--arguments', json.dumps({'action': 'search', 'query': 'from-uds'})], "
+        "capture_output=True, text=True, check=True); "
+        "pathlib.Path(sys.argv[1]).write_text(json.dumps({"
+        "'socket': sock, "
+        "'socket_mode': stat.S_IMODE(info.st_mode), "
+        "'url': os.environ.get('UNITARES_SIDECAR_URL'), "
+        "'startup_secret': os.environ.get('UNITARES_SIDECAR_STARTUP_SECRET'), "
+        "'client': client, "
+        "'tool_reply': json.loads(proc.stdout)}))"
+    )
+    with tempfile.TemporaryDirectory(prefix="u-ur-") as tmpdir:
+        sock_path = Path(tmpdir) / "run" / "sc.sock"
+        argv = [
+            "--server-url",
+            governance_url,
+            "--workspace",
+            str(tmp_path),
+            "--slot",
+            "uds-slot",
+        ]
+        if via_env:
+            monkeypatch.setenv("UNITARES_SIDECAR_SOCKET", str(sock_path))
+        else:
+            argv.extend(["--sidecar-socket", str(sock_path)])
+        argv.extend(["--", sys.executable, "-c", child, str(output)])
+
+        try:
+            result = u_run.main(argv)
+        finally:
+            _stop_server(server, thread)
+
+        assert result == 0
+        observed = json.loads(output.read_text(encoding="utf-8"))
+        assert observed["socket"] == str(sock_path)
+        assert observed["socket_mode"] & 0o077 == 0
+        assert observed["url"] is None
+        assert observed["startup_secret"] is None
+        assert Path(observed["client"]).resolve() == (SCRIPTS / "sidecar_client.py").resolve()
+        assert observed["tool_reply"]["result"]["success"] is True
+        assert [call["name"] for call in _GovernanceHandler.calls] == [
+            "onboard",
+            "knowledge",
+            "process_agent_update",
+        ]
+        # Sidecar terminated cleanly on SIGTERM and unlinked its socket.
+        assert not sock_path.exists()
+        assert stat.S_IMODE(os.lstat(sock_path.parent).st_mode) & 0o077 == 0
+
+
+def test_unix_socket_mode_refuses_insecure_existing_socket(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import socketserver
+    import tempfile
+
+    if not hasattr(socket, "AF_UNIX") or not hasattr(socketserver, "UnixStreamServer"):
+        pytest.skip("AF_UNIX not supported on this platform")
+
+    seen_auth: list[str | None] = []
+
+    class Lookalike(BaseHTTPRequestHandler):
+        def log_message(self, _fmt, *_args):  # pragma: no cover
+            return
+
+        def address_string(self):
+            return "unix"
+
+        def do_GET(self):  # noqa: N802
+            seen_auth.append(self.headers.get("Authorization"))
+            _respond(self, {"success": True})
+
+    with tempfile.TemporaryDirectory(prefix="u-ur-") as tmpdir:
+        sock_path = Path(tmpdir) / "bad.sock"
+        srv = socketserver.UnixStreamServer(str(sock_path), Lookalike)
+        os.chmod(sock_path, 0o666)
+        thread = threading.Thread(target=srv.serve_forever, daemon=True)
+        thread.start()
+        monkeypatch.setenv("UNITARES_SIDECAR_CAPABILITY", CAPABILITY)
+        try:
+            result = u_run.main(
+                [
+                    "--server-url",
+                    SERVER_URL,
+                    "--sidecar-socket",
+                    str(sock_path),
+                    "--workspace",
+                    str(tmp_path),
+                    "--slot",
+                    "uds-bad",
+                    "--",
+                    sys.executable,
+                    "-c",
+                    "raise SystemExit(0)",
+                ]
+            )
+        finally:
+            srv.shutdown()
+            thread.join(timeout=2)
+            srv.server_close()
+
+    assert result == 125
+    assert seen_auth == []
+    assert "u-run:" in capsys.readouterr().err
+
+
+def test_relative_sidecar_socket_is_refused(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    result = u_run.main(
+        [
+            "--server-url",
+            SERVER_URL,
+            "--sidecar-socket",
+            "relative/sidecar.sock",
+            "--workspace",
+            str(tmp_path),
+            "--",
+            sys.executable,
+            "-c",
+            "raise SystemExit(0)",
+        ]
+    )
+    assert result == 125
+    assert "absolute path" in capsys.readouterr().err
+
+
+def test_explicit_cli_sidecar_url_overrides_env_sidecar_socket(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("UNITARES_SIDECAR_SOCKET", "/nonexistent/ignored.sock")
+    monkeypatch.setenv("UNITARES_SIDECAR_CAPABILITY", CAPABILITY)
+    monkeypatch.setenv("UNITARES_SIDECAR_STARTUP_SECRET", STARTUP_SECRET)
+    calls: list[tuple[str, dict[str, Any]]] = []
+    server, thread, sidecar_url = _serve(_sidecar_handler(tmp_path, calls))
+    output = tmp_path / "override-env.json"
+    child = (
+        "import json, os, pathlib, sys; "
+        "pathlib.Path(sys.argv[1]).write_text(json.dumps({"
+        "'url': os.environ.get('UNITARES_SIDECAR_URL'), "
+        "'socket': os.environ.get('UNITARES_SIDECAR_SOCKET')}))"
+    )
+    try:
+        result = u_run.main(
+            [
+                "--server-url",
+                SERVER_URL,
+                "--sidecar-url",
+                sidecar_url,
+                "--workspace",
+                str(tmp_path),
+                "--slot",
+                "plain-cli",
+                "--",
+                sys.executable,
+                "-c",
+                child,
+                str(output),
+            ]
+        )
+    finally:
+        _stop_server(server, thread)
+
+    assert result == 0
+    assert json.loads(output.read_text(encoding="utf-8")) == {
+        "url": sidecar_url,
+        "socket": None,
+    }
+    assert [path for path, _body in calls] == ["/session/start", "/turn/stop"]

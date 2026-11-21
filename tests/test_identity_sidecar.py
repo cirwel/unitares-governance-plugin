@@ -1416,6 +1416,9 @@ def _read_reply(client: socket.socket, *, within: float = 3.0) -> bytes:
             received += chunk
     except socket.timeout:
         pass
+    except ConnectionResetError:
+        if not received:
+            raise
     return received
 
 
@@ -2566,3 +2569,565 @@ def test_a_batch_that_will_be_refused_does_not_onboard_first(
     assert payload["id"] == 2
     assert FakeGovernanceHandler.calls == []
     assert sidecar.read_session("slot-a") == {}
+
+
+# --- Unix domain socket transport & TCP pre-auth hardening (Findings 17 & 29)
+
+
+def test_preauth_semaphore_default_cap_formula() -> None:
+    for workers, expected_preauth in [(1, 1), (4, 1), (8, 2), (16, 4), (32, 8), (64, 8)]:
+        server = BoundedThreadingHTTPServer(
+            ("127.0.0.1", 0), BaseHTTPRequestHandler, max_workers=workers
+        )
+        try:
+            assert server.max_workers == workers
+            assert server.max_preauth == expected_preauth
+        finally:
+            server.server_close()
+
+
+def test_tcp_preauth_header_deadline_is_tight_and_escalates_only_after_auth(
+    tmp_path: Path,
+    fake_server: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(identity_sidecar, "AUTH_HEADER_DEADLINE", 0.85)
+    monkeypatch.setattr(identity_sidecar, "REQUEST_READ_DEADLINE", 4.5)
+    sidecar = _sidecar(tmp_path, fake_server)
+    server = BoundedThreadingHTTPServer(
+        ("127.0.0.1", 0), make_handler(sidecar), max_workers=4
+    )
+    serving = threading.Thread(target=server.serve_forever, daemon=True)
+    serving.start()
+    port = server.server_address[1]
+    try:
+        # 1. Slow unauthenticated headers are terminated at AUTH_HEADER_DEADLINE
+        #    (~0.85s), well before REQUEST_READ_DEADLINE (4.5s).
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as slow_unauth:
+            started = time.monotonic()
+            slow_unauth.sendall(b"GET /health HTTP/1.1\r\nX-Slow: ")
+            assert _trickle_until_closed(slow_unauth, budget=2.5)
+            elapsed = time.monotonic() - started
+        assert elapsed < 2.2
+
+        # 2. An authenticated POST whose headers arrive within AUTH_HEADER_DEADLINE
+        #    escalates to REQUEST_READ_DEADLINE, so a body delivered after 1.05s
+        #    (> AUTH_HEADER_DEADLINE 0.85s, < REQUEST_READ_DEADLINE 4.5s) succeeds.
+        body = json.dumps(
+            {"name": "knowledge", "arguments": {"action": "search", "query": "escalated"}}
+        ).encode("utf-8")
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as auth_client:
+            auth_client.sendall(
+                (
+                    "POST /v1/tools/call HTTP/1.1\r\n"
+                    f"Host: 127.0.0.1:{port}\r\n"
+                    f"Authorization: Bearer {sidecar.capability_token}\r\n"
+                    "Content-Type: application/json\r\n"
+                    f"Content-Length: {len(body)}\r\n"
+                    "Connection: close\r\n\r\n"
+                ).encode("ascii")
+            )
+            time.sleep(1.05)
+            auth_client.sendall(body)
+            reply = _read_reply(auth_client, within=4.0)
+        assert b" 200 " in reply
+        assert b"escalated" in reply or FakeGovernanceHandler.calls
+    finally:
+        _stop_server(server, serving)
+
+
+def test_preauth_semaphore_bounds_unauthenticated_clients_and_releases_after_auth(
+    tmp_path: Path,
+    fake_server: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Slow unauthenticated clients saturate only max_preauth (1 of 4 workers),
+    while authenticated requests release their pre-auth slot immediately after
+    capability check so concurrent authenticated work continues up to max_workers."""
+    monkeypatch.setattr(identity_sidecar, "AUTH_HEADER_DEADLINE", 4.0)
+    monkeypatch.setattr(identity_sidecar, "REQUEST_READ_DEADLINE", 6.0)
+    sidecar = _sidecar(tmp_path, fake_server)
+    auth_entered = threading.Event()
+    auth_release = threading.Event()
+    original_tool_call = sidecar.tool_call
+
+    def slow_tool_call(body: dict, headers: object):
+        auth_entered.set()
+        assert auth_release.wait(timeout=5)
+        return original_tool_call(body, headers)
+
+    monkeypatch.setattr(sidecar, "tool_call", slow_tool_call)
+
+    # max_workers=4 -> max_preauth=1
+    server = BoundedThreadingHTTPServer(
+        ("127.0.0.1", 0), make_handler(sidecar), max_workers=4
+    )
+    assert server.max_preauth == 1
+    serving = threading.Thread(target=server.serve_forever, daemon=True)
+    serving.start()
+    port = server.server_address[1]
+    base_url = f"http://127.0.0.1:{port}"
+    auth_results: list[tuple[int, object]] = []
+
+    def run_auth_call() -> None:
+        auth_results.append(
+            _http_post_json(
+                f"{base_url}/v1/tools/call",
+                {"name": "knowledge", "arguments": {"action": "search"}},
+                headers={"Authorization": f"Bearer {sidecar.capability_token}"},
+            )
+        )
+
+    auth_thread = threading.Thread(target=run_auth_call, daemon=True)
+    auth_thread.start()
+    try:
+        # Authenticated request is in-flight in tool_call; it MUST have already
+        # released the sole pre-auth slot so a new authenticated /health succeeds.
+        assert auth_entered.wait(timeout=3)
+        health_status, health_payload = _http_get_json(
+            f"{base_url}/health",
+            headers={"Authorization": f"Bearer {sidecar.capability_token}"},
+        )
+        assert health_status == 200
+        assert isinstance(health_payload, dict) and health_payload["success"] is True
+
+        # Now one slow unauthenticated client occupies max_preauth=1; a second
+        # unauthenticated connection gets 503 immediately while 3 worker slots
+        # remain protected from unauthenticated saturation.
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as slow_unauth:
+            slow_unauth.sendall(b"GET /health HTTP/1.1\r\nX-Slow: ")
+            # Give accept thread a moment to enter handler for slow_unauth.
+            deadline = time.monotonic() + 2.0
+            got_503 = False
+            while time.monotonic() < deadline:
+                try:
+                    _http_get_json(f"{base_url}/health")
+                except urllib.error.HTTPError as exc:
+                    if exc.code == 503:
+                        got_503 = True
+                        break
+                time.sleep(0.02)
+            assert got_503
+        # Closing slow_unauth releases its pre-auth slot; authenticated traffic works.
+        auth_release.set()
+        auth_thread.join(timeout=5)
+        assert len(auth_results) == 1
+        assert auth_results[0][0] == 200
+    finally:
+        auth_release.set()
+        auth_thread.join(timeout=2)
+        _stop_server(server, serving)
+
+
+def test_unix_socket_sidecar_enforces_permissions_serves_requests_and_unlinks(
+    tmp_path: Path,
+    fake_server: str,
+) -> None:
+    import os
+    import stat
+    import tempfile
+
+    if not hasattr(socket, "AF_UNIX"):
+        pytest.skip("AF_UNIX not supported on this platform")
+
+    import sidecar_client
+
+    sidecar = _sidecar(tmp_path, fake_server)
+    with tempfile.TemporaryDirectory(prefix="u-sc-") as tmpdir:
+        sock_dir = Path(tmpdir) / "run"
+        sock_path = sock_dir / "sc.sock"
+        server = identity_sidecar.BoundedThreadingUnixHTTPServer(
+            sock_path, make_handler(sidecar), max_workers=2
+        )
+        serving = threading.Thread(target=server.serve_forever, daemon=True)
+        serving.start()
+        try:
+            dir_stat = os.lstat(sock_dir)
+            assert stat.S_ISDIR(dir_stat.st_mode)
+            assert dir_stat.st_mode & 0o077 == 0
+
+            sock_stat = os.lstat(sock_path)
+            assert not stat.S_ISLNK(sock_stat.st_mode)
+            assert stat.S_ISSOCK(sock_stat.st_mode)
+            assert sock_stat.st_uid == os.getuid()
+            assert sock_stat.st_mode & 0o077 == 0
+
+            client = sidecar_client.SidecarClient(
+                capability=sidecar.capability_token,
+                sidecar_socket=str(sock_path),
+            )
+            health = client.health()
+            assert health["success"] is True
+            assert Path(health["unix_socket"]) == sock_dir.resolve() / sock_path.name
+
+            reply = client.call_tool("knowledge", {"action": "search", "query": "uds"})
+            assert reply["result"]["success"] is True
+            assert [call["name"] for call in FakeGovernanceHandler.calls] == [
+                "onboard",
+                "knowledge",
+            ]
+        finally:
+            server.shutdown()
+            serving.join(timeout=2)
+            server.server_close()
+
+        assert not sock_path.exists()
+
+
+def test_unix_socket_sidecar_refuses_symlinks_non_sockets_and_active_listeners(
+    tmp_path: Path,
+    fake_server: str,
+) -> None:
+    import tempfile
+
+    if not hasattr(socket, "AF_UNIX"):
+        pytest.skip("AF_UNIX not supported on this platform")
+
+    sidecar = _sidecar(tmp_path, fake_server)
+    with tempfile.TemporaryDirectory(prefix="u-sc-") as tmpdir:
+        base = Path(tmpdir)
+        # Refuse symlink at socket path.
+        target = base / "real.sock"
+        symlink_sock = base / "link.sock"
+        symlink_sock.symlink_to(target)
+        with pytest.raises(ValueError, match="symlink"):
+            identity_sidecar.BoundedThreadingUnixHTTPServer(
+                symlink_sock, make_handler(sidecar)
+            )
+
+        # Refuse symlink as parent directory.
+        real_dir = base / "realdir"
+        real_dir.mkdir(mode=0o700)
+        link_dir = base / "linkdir"
+        link_dir.symlink_to(real_dir)
+        with pytest.raises(ValueError, match="symlink"):
+            identity_sidecar.BoundedThreadingUnixHTTPServer(
+                link_dir / "sc.sock", make_handler(sidecar)
+            )
+
+        # Refuse regular file at socket path.
+        regular = base / "plain.txt"
+        regular.write_text("hi", encoding="utf-8")
+        with pytest.raises(ValueError, match="non-socket"):
+            identity_sidecar.BoundedThreadingUnixHTTPServer(
+                regular, make_handler(sidecar)
+            )
+
+        # Refuse overwriting an actively listening socket.
+        active = base / "active.sock"
+        first = identity_sidecar.BoundedThreadingUnixHTTPServer(
+            active, make_handler(sidecar)
+        )
+        serving = threading.Thread(target=first.serve_forever, daemon=True)
+        serving.start()
+        try:
+            with pytest.raises(OSError, match="already in use"):
+                identity_sidecar.BoundedThreadingUnixHTTPServer(
+                    active, make_handler(sidecar)
+                )
+        finally:
+            first.shutdown()
+            serving.join(timeout=2)
+            first.server_close()
+
+
+def test_unix_socket_cli_unlinks_socket_on_sigterm(
+    tmp_path: Path,
+    fake_server: str,
+) -> None:
+    import os
+    import signal
+    import subprocess
+    import tempfile
+
+    if not hasattr(socket, "AF_UNIX") or not hasattr(signal, "SIGTERM"):
+        pytest.skip("POSIX AF_UNIX + SIGTERM required")
+
+    with tempfile.TemporaryDirectory(prefix="u-sc-") as tmpdir:
+        sock_path = Path(tmpdir) / "cli.sock"
+        env = {
+            **os.environ,
+            "UNITARES_SIDECAR_CAPABILITY": "cli-uds-cap",
+        }
+        proc = subprocess.Popen(
+            [
+                sys.executable,
+                str(ROOT / "scripts" / "identity_sidecar.py"),
+                "--unix-socket",
+                str(sock_path),
+                "--server-url",
+                fake_server,
+                "--workspace",
+                str(tmp_path),
+                "--slot",
+                "cli-uds-slot",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+        )
+        try:
+            assert proc.stdout is not None
+            startup_line = proc.stdout.readline()
+            startup = json.loads(startup_line)
+            assert startup["success"] is True
+            assert Path(startup["unix_socket"]) == sock_path.parent.resolve() / sock_path.name
+            assert sock_path.exists()
+            proc.send_signal(signal.SIGTERM)
+            proc.wait(timeout=5)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=2)
+
+        assert proc.returncode == 0
+        assert not sock_path.exists()
+
+
+def test_unix_socket_refuses_relative_path_and_permissive_existing_parent_without_chmod(
+    tmp_path: Path,
+    fake_server: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import os
+    import stat
+    import tempfile
+
+    if not hasattr(socket, "AF_UNIX"):
+        pytest.skip("AF_UNIX not supported on this platform")
+
+    sidecar = _sidecar(tmp_path, fake_server)
+    with pytest.raises(ValueError, match="absolute"):
+        identity_sidecar.BoundedThreadingUnixHTTPServer(
+            "relative/sc.sock", make_handler(sidecar)
+        )
+
+    with tempfile.TemporaryDirectory(prefix="u-sc-") as tmpdir:
+        permissive_dir = Path(tmpdir) / "shared"
+        permissive_dir.mkdir()
+        os.chmod(permissive_dir, 0o755)
+        with pytest.raises(PermissionError, match="0700"):
+            identity_sidecar.BoundedThreadingUnixHTTPServer(
+                permissive_dir / "sc.sock", make_handler(sidecar)
+            )
+        # Pre-existing directory permissions MUST NOT be mutated.
+        assert stat.S_IMODE(os.lstat(permissive_dir).st_mode) == 0o755
+
+        # A 0700 parent inside a group/world-writable non-sticky ancestor is refused.
+        writable_ancestor = Path(tmpdir) / "gw"
+        writable_ancestor.mkdir()
+        os.chmod(writable_ancestor, 0o775)
+        private_child = writable_ancestor / "priv"
+        private_child.mkdir(mode=0o700)
+        os.chmod(private_child, 0o700)
+        try:
+            with pytest.raises(PermissionError, match="sticky"):
+                identity_sidecar.BoundedThreadingUnixHTTPServer(
+                    private_child / "sc.sock", make_handler(sidecar)
+                )
+            # An intermediate user symlink under a writable ancestor is also refused
+            # (unresolved chain check catches it before .resolve() can bypass it).
+            safe_target = Path(tmpdir) / "safe"
+            safe_target.mkdir(mode=0o700)
+            os.chmod(safe_target, 0o700)
+            mid_link = writable_ancestor / "jump"
+            mid_link.symlink_to(safe_target)
+            with pytest.raises((ValueError, PermissionError)):
+                identity_sidecar.BoundedThreadingUnixHTTPServer(
+                    mid_link / "nested" / "sc.sock", make_handler(sidecar)
+                )
+        finally:
+            os.chmod(writable_ancestor, 0o700)
+
+        # Even inside a 0700 parent, an intermediate non-root symlink ancestor is refused.
+        real_root = Path(tmpdir) / "realroot"
+        real_root.mkdir(mode=0o700)
+        os.chmod(real_root, 0o700)
+        user_symlink = Path(tmpdir) / "userlink"
+        user_symlink.symlink_to(real_root)
+        real_lstat = os.lstat
+        if real_lstat(user_symlink).st_uid != 0:
+            with pytest.raises(ValueError, match="symlink"):
+                identity_sidecar.BoundedThreadingUnixHTTPServer(
+                    user_symlink / "leaf" / "sc.sock", make_handler(sidecar)
+                )
+
+        # Also exercise non-root symlink rejection explicitly when pytest runs
+        # as root (where newly created symlinks have st_uid == 0).
+        def _nonroot_symlink_lstat(
+            path: object, *args: object, **kwargs: object
+        ) -> os.stat_result:
+            info = real_lstat(path, *args, **kwargs)  # type: ignore[arg-type]
+            if Path(os.fspath(path)) == user_symlink:  # type: ignore[arg-type]
+                fields = list(info)
+                fields[4] = 1000
+                return os.stat_result(fields)
+            return info
+
+        monkeypatch.setattr(identity_sidecar.os, "lstat", _nonroot_symlink_lstat)
+        with pytest.raises(ValueError, match="symlink"):
+            identity_sidecar.BoundedThreadingUnixHTTPServer(
+                user_symlink / "leaf" / "sc.sock", make_handler(sidecar)
+            )
+
+
+def test_unix_socket_flock_serializes_concurrent_stale_startup_race(
+    tmp_path: Path,
+    fake_server: str,
+) -> None:
+    import tempfile
+
+    if not hasattr(socket, "AF_UNIX"):
+        pytest.skip("AF_UNIX not supported on this platform")
+
+    import sidecar_client
+
+    sidecar = _sidecar(tmp_path, fake_server)
+    with tempfile.TemporaryDirectory(prefix="u-sc-") as tmpdir:
+        sock_path = Path(tmpdir) / "race.sock"
+        stale = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        stale.bind(str(sock_path))
+        stale.close()
+
+        barrier = threading.Barrier(2)
+        winners: list[identity_sidecar.BoundedThreadingUnixHTTPServer] = []
+        errors: list[BaseException] = []
+        lock = threading.Lock()
+
+        def attempt_start() -> None:
+            barrier.wait(timeout=5)
+            try:
+                srv = identity_sidecar.BoundedThreadingUnixHTTPServer(
+                    sock_path, make_handler(sidecar)
+                )
+            except BaseException as exc:
+                with lock:
+                    errors.append(exc)
+            else:
+                with lock:
+                    winners.append(srv)
+
+        threads = [threading.Thread(target=attempt_start) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=5)
+
+        assert len(winners) == 1
+        assert len(errors) == 1
+        assert isinstance(errors[0], OSError)
+        assert "already in use" in str(errors[0])
+
+        winner = winners[0]
+        serving = threading.Thread(target=winner.serve_forever, daemon=True)
+        serving.start()
+        try:
+            client = sidecar_client.SidecarClient(
+                capability=sidecar.capability_token,
+                sidecar_socket=str(sock_path),
+            )
+            assert client.health()["success"] is True
+        finally:
+            winner.shutdown()
+            serving.join(timeout=2)
+            winner.server_close()
+
+        assert not sock_path.exists()
+        assert not (sock_path.parent / f".{sock_path.name}.lock").exists()
+
+
+def test_unix_socket_cleans_stale_socket_and_enforces_worker_cap_503(
+    tmp_path: Path,
+    fake_server: str,
+) -> None:
+    import http.client
+    import tempfile
+
+    if not hasattr(socket, "AF_UNIX"):
+        pytest.skip("AF_UNIX not supported on this platform")
+
+    with tempfile.TemporaryDirectory(prefix="u-sc-") as tmpdir:
+        sock_path = Path(tmpdir) / "stale.sock"
+        # Create a stale (unlistening) socket left behind by a crashed process.
+        stale = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        stale.bind(str(sock_path))
+        stale.close()
+        assert sock_path.exists()
+
+        entered = threading.Event()
+        release = threading.Event()
+
+        class BlockingUnixHandler(BaseHTTPRequestHandler):
+            def log_message(self, _fmt, *_args):  # pragma: no cover
+                return
+
+            def address_string(self):
+                return "unix"
+
+            def do_GET(self):  # noqa: N802
+                entered.set()
+                release.wait(timeout=5)
+                self.send_response(200)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+        # Rebinding over the stale socket succeeds and enforces max_workers=1.
+        server = identity_sidecar.BoundedThreadingUnixHTTPServer(
+            sock_path, BlockingUnixHandler, max_workers=1
+        )
+        serving = threading.Thread(target=server.serve_forever, daemon=True)
+        serving.start()
+
+        def _uds_get(path: str) -> int:
+            class _Conn(http.client.HTTPConnection):
+                def connect(self) -> None:
+                    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                    s.settimeout(5)
+                    s.connect(str(sock_path))
+                    self.sock = s
+
+            conn = _Conn("localhost", timeout=5)
+            try:
+                conn.request("GET", path)
+                resp = conn.getresponse()
+                resp.read()
+                return int(resp.status)
+            finally:
+                conn.close()
+
+        first_status: list[int] = []
+        first = threading.Thread(
+            target=lambda: first_status.append(_uds_get("/hold")), daemon=True
+        )
+        first.start()
+        try:
+            assert entered.wait(timeout=2)
+            # On AF_UNIX the server can write 503 and close before the client
+            # finishes writing its request (yielding BrokenPipeError on sendall
+            # while the 503 response sits in the client's recv buffer).
+            # Exercise both a small overflow request and a >8 KB buffered
+            # overflow request so Linux non-blocking drain handles >4 KB cleanly.
+            for padding in (b"", b"X-Pad: " + b"a" * 10_000 + b"\r\n"):
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as overflow:
+                    overflow.settimeout(5)
+                    overflow.connect(str(sock_path))
+                    try:
+                        overflow.sendall(
+                            b"GET /overflow HTTP/1.1\r\nHost: localhost\r\n"
+                            + padding
+                            + b"Connection: close\r\n\r\n"
+                        )
+                    except (BrokenPipeError, ConnectionResetError):
+                        pass
+                    reply = _read_reply(overflow, within=2.0)
+                assert b" 503 " in reply
+        finally:
+            release.set()
+            first.join(timeout=2)
+            server.shutdown()
+            serving.join(timeout=2)
+            server.server_close()
+
+        assert first_status == [200]
+        assert not sock_path.exists()
