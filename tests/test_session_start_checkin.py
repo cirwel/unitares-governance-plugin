@@ -263,7 +263,13 @@ class TestSessionStartContext:
         assert payload["hookSpecificOutput"]["additionalContext"]
 
     def test_online_context_offers_start_session_with_lazy_onboard_fallback(self, tmp_path):
-        stdout, _ = _serve_and_run(tmp_path)
+        # The Stop hook binds into a session slot, so the promise is made only
+        # to a session whose host gave an id. Eager binding is off here so the
+        # context is the one shown before any identity exists.
+        stdout, _ = _serve_and_run(
+            tmp_path, claude_session_id="lazy-fallback-slot",
+            extra_env={"UNITARES_EAGER_BIND": "off"},
+        )
         ctx = _context(stdout)
         assert "UNITARES Governance: ONLINE" in ctx
         assert "Identity attribution" in ctx
