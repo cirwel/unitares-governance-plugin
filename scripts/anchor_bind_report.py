@@ -66,13 +66,18 @@ def classify(raw: str, bound_csid: str = "") -> tuple[str, str, str]:
     if not isinstance(result, dict):
         result = {"status": "", "error": NO_RESULT}
     uuid = str(result.get("uuid") or "")
+    bound = bool(bound_csid.strip())
+    if result.get("status") == "ok" and uuid and not bound:
+        # The server bound it, and the slot still reads as unbound: the local
+        # cache could not be written, so this turn's check-in has no identity.
+        return "anchor_bind_fail", "", "bound on the server, but the session cache holds no usable binding"
     if result.get("status") == "ok" and uuid:
         if result.get("is_new") is False:
             return "anchor_resumed", uuid, ""
         if result.get("is_new") is True:
             return "anchor_minted", uuid, ""
         return "anchor_bound", uuid, ""
-    if bound_csid.strip():
+    if bound:
         return "anchor_bound", "", ""
     if result.get("status") == "ok":
         error = "the onboarding helper returned no identity"

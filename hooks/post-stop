@@ -147,11 +147,12 @@ fi
 
 ORCHESTRATED_MODE="$(printf '%s' "${UNITARES_ORCHESTRATED:-0}" | tr '[:upper:]' '[:lower:]')"
 ANCHOR_RESUME_ENABLED=0
-# An anchor of nothing but whitespace is no anchor: the onboarding helper
-# strips it and would mint an ordinary slot identity.
+# An anchor with no letter or digit in it is no anchor. The server refuses
+# one, and the onboarding helper strips whitespace of every kind and would
+# then mint an ordinary slot identity. The characters are listed one by one
+# because a range or a class follows the locale.
 ANCHOR_VALUE="${UNITARES_CLIENT_SESSION_ID:-}"
-ANCHOR_VALUE="${ANCHOR_VALUE//[[:space:]]/}"
-if [[ -n "${ANCHOR_VALUE}" \
+if [[ "${ANCHOR_VALUE}" == *[abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789]* \
       && ( "${ORCHESTRATED_MODE}" == "1" \
            || "${ORCHESTRATED_MODE}" == "true" \
            || "${ORCHESTRATED_MODE}" == "yes" \
@@ -273,14 +274,22 @@ fi
 # force_new=true, per-slot name scoping, lineage via parent_agent_id, no
 # persisted continuity token.
 CHECKINS_MODE="$(printf '%s' "${UNITARES_CHECKINS:-on}" | tr '[:upper:]' '[:lower:]')"
-AUTO_ONBOARD_MODE="$(printf '%s' "${UNITARES_AUTO_ONBOARD:-off}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+AUTO_ONBOARD_MODE="$(printf '%s' "${UNITARES_AUTO_ONBOARD:-off}" | tr '[:upper:]' '[:lower:]')"
 DISABLE_AUTO_ONBOARD="$(printf '%s' "${UNITARES_DISABLE_AUTO_ONBOARD:-0}" | tr '[:upper:]' '[:lower:]')"
 # `anchored` opts in for one process only: the one that owns an orchestrated
 # thread anchor. Everything else, including a CLI that process starts and that
 # inherits this variable, is treated as off. `on` would mint an identity for
 # each of those children.
-if [[ "${AUTO_ONBOARD_MODE}" == "anchored" && "${ANCHOR_RESUME_ENABLED:-0}" != "1" ]]; then
-  AUTO_ONBOARD_MODE="off"
+# Any word this hook does not know counts as on, so `anchored` is recognised
+# with space around it too; no other value is read differently than before.
+AUTO_ONBOARD_WORD="${AUTO_ONBOARD_MODE#"${AUTO_ONBOARD_MODE%%[![:space:]]*}"}"
+AUTO_ONBOARD_WORD="${AUTO_ONBOARD_WORD%"${AUTO_ONBOARD_WORD##*[![:space:]]}"}"
+if [[ "${AUTO_ONBOARD_WORD}" == "anchored" ]]; then
+  if [[ "${ANCHOR_RESUME_ENABLED:-0}" == "1" ]]; then
+    AUTO_ONBOARD_MODE="on"
+  else
+    AUTO_ONBOARD_MODE="off"
+  fi
 fi
 ANCHOR_REPORT="${PLUGIN_ROOT}/scripts/anchor_bind_report.py"
 ANCHOR_BIND_TRIED=0

@@ -634,11 +634,12 @@ printf '[%s] curl exit=%d len=%d url=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${H
 
 ORCHESTRATED_MODE="$(printf '%s' "${UNITARES_ORCHESTRATED:-0}" | tr '[:upper:]' '[:lower:]')"
 ANCHOR_RESUME_ENABLED=0
-# An anchor of nothing but whitespace is no anchor: the onboarding helper
-# strips it and would mint an ordinary slot identity.
+# An anchor with no letter or digit in it is no anchor. The server refuses
+# one, and the onboarding helper strips whitespace of every kind and would
+# then mint an ordinary slot identity. The characters are listed one by one
+# because a range or a class follows the locale.
 ANCHOR_VALUE="${UNITARES_CLIENT_SESSION_ID:-}"
-ANCHOR_VALUE="${ANCHOR_VALUE//[[:space:]]/}"
-if [[ -n "${ANCHOR_VALUE}" \
+if [[ "${ANCHOR_VALUE}" == *[abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789]* \
       && ( "${ORCHESTRATED_MODE}" == "1" \
            || "${ORCHESTRATED_MODE}" == "true" \
            || "${ORCHESTRATED_MODE}" == "yes" \
@@ -853,7 +854,7 @@ esac
 # overridden.
 ANCHOR_STOP_WHY="auto-onboarding or check-ins are off"
 ANCHOR_STOP_BINDS=0
-case "$(printf '%s' "${UNITARES_AUTO_ONBOARD:-off}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')" in
+case "$(printf '%s' "${UNITARES_AUTO_ONBOARD:-off}" | tr '[:upper:]' '[:lower:]')" in
   0|off|false|no) ;;
   *)
     case "$(printf '%s' "${UNITARES_DISABLE_AUTO_ONBOARD:-0}" | tr '[:upper:]' '[:lower:]')" in

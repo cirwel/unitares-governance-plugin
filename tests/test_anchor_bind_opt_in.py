@@ -135,6 +135,8 @@ def test_anchored_mode_binds_the_owner_of_the_anchor(tmp_path):
     # An anchor of nothing but whitespace, which the helper would strip and
     # then mint an ordinary identity for.
     {**OWNED, "UNITARES_CLIENT_SESSION_ID": "   "},
+    {**OWNED, "UNITARES_CLIENT_SESSION_ID": "\u00a0\u00a0", "LC_ALL": "C"},
+    {**OWNED, "UNITARES_CLIENT_SESSION_ID": ":/-_", "LC_ALL": "en_US.UTF-8"},
     # An anchor without the orchestrated marker.
     {"UNITARES_CLIENT_SESSION_ID": ANCHOR, "UNITARES_ORCHESTRATED_OWNER_PID": OWNER},
 ])
@@ -148,7 +150,7 @@ def test_anchored_mode_is_off_for_every_other_process(tmp_path, env):
     assert not (tmp_path / ".unitares" / _slot_filename(SLOT)).exists()
 
 
-@pytest.mark.parametrize("value", [" anchored ", "ANCHORED", "anchored\n"])
+@pytest.mark.parametrize("value", [" anchored ", "ANCHORED", "anchored\n", "\tAnchored  "])
 def test_anchored_is_recognised_however_it_is_spelled(tmp_path, value):
     """An unrecognised word counts as on, so a stray space must not turn the
     scoped opt-in into the unscoped one."""
@@ -209,14 +211,23 @@ def test_a_session_without_an_anchor_is_never_reported(tmp_path):
     ('{"status": "ok", "uuid": "u", "is_new": false}', "anchor_resumed"),
     ('{"status": "ok", "uuid": "u", "is_new": true}', "anchor_minted"),
     ('{"status": "ok", "uuid": "u"}', "anchor_bound"),
-    ('{"status": "ok", "uuid": ""}', "anchor_bind_fail"),
-    ('{"status": "onboard_failed", "error": "nope"}', "anchor_bind_fail"),
-    ("", "anchor_bind_fail"),
-    ("not json", "anchor_bind_fail"),
-    ("[]", "anchor_bind_fail"),
 ])
-def test_classify(raw, status):
-    assert classify(raw)[0] == status
+def test_classify_a_bind_the_slot_now_holds(raw, status):
+    assert classify(raw, bound_csid="agent-u")[0] == status
+
+
+@pytest.mark.parametrize("raw", [
+    '{"status": "ok", "uuid": ""}',
+    '{"status": "onboard_failed", "error": "nope"}',
+    "",
+    "not json",
+    "[]",
+    # Bound on the server, but the slot still reads as unbound.
+    '{"status": "ok", "uuid": "u", "is_new": false}',
+    '{"status": "ok", "uuid": "u", "is_new": true}',
+])
+def test_classify_a_turn_left_without_an_identity(raw):
+    assert classify(raw, bound_csid="")[0] == "anchor_bind_fail"
 
 
 def _write_binding(tmp_path):
@@ -273,7 +284,7 @@ def test_report_is_silent_on_stdout_and_never_fails(tmp_path):
     cases = [
         (["--slot=s", "--unbound-reason=auto-onboarding is off"], ""),
         (["--slot=s", "--anchor=agent:/thread-1"], "garbage"),
-        (["--slot=-starts-with-a-dash", "--anchor=-x"], '{"status": "ok", "uuid": "u"}'),
+        (["--slot=-starts-with-a-dash", "--anchor=-x", "--bound-csid=-c"], '{"status": "ok", "uuid": "u"}'),
         ([], ""),  # missing required argument
     ]
     for args, stdin in cases:
@@ -296,7 +307,7 @@ def test_a_failed_pre_bind_at_session_start_is_left_to_the_stop(tmp_path):
     failed = '{"status": "onboard_failed", "error": "timeout"}'
     quiet = _report("--slot=s", "--successes-only", stdin=failed, log=log)
     assert quiet.stderr == "" and not log.exists()
-    ok = _report("--slot=s", "--successes-only", stdin='{"status": "ok", "uuid": "u", "is_new": false}', log=log)
+    ok = _report("--slot=s", "--successes-only", "--bound-csid=agent-u", stdin='{"status": "ok", "uuid": "u", "is_new": false}', log=log)
     assert ok.stderr == "" and "status=anchor_resumed" in log.read_text()
     loud = _report("--slot=s", stdin=failed, log=log)
     assert "could not bind" in loud.stderr and "status=anchor_bind_fail" in log.read_text()
@@ -309,3 +320,18 @@ def test_audit_counts_an_unbound_anchor_once(tmp_path):
     _report("--slot=s", "--unbound-reason=auto-onboarding is off", log=log)
     codes = [finding.code for finding in audit_checkin_log(log)]
     assert codes == ["checkin_fallback_status"]
+
+
+@pytest.mark.parametrize("value", [" on ", "o f f", "yes please"])
+def test_other_values_are_read_as_they_were_before(tmp_path, value):
+    """Only `anchored` is new. A word this hook does not know still counts as on."""
+    _, onboards, _ = _stop(tmp_path, env={"UNITARES_AUTO_ONBOARD": value})
+    assert len(onboards) == 1
+
+
+def test_padded_anchored_still_binds_the_owner(tmp_path):
+    _, onboards, anchor_lines = _stop(
+        tmp_path, env={**OWNED, "UNITARES_AUTO_ONBOARD": " Anchored "},
+        onboard_result=_identity(is_new=False),
+    )
+    assert len(onboards) == 1 and "status=anchor_resumed" in anchor_lines[0]
