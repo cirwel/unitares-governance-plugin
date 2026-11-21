@@ -96,7 +96,8 @@ python3 scripts/install_agy_hooks.py
 ```
 
 Pass `--auto-onboard` to opt into lazy `Stop` backstop onboarding
-(`UNITARES_AUTO_ONBOARD=on`), or `--check` to verify that
+(`UNITARES_AUTO_ONBOARD=on`), or `--check` (pair with `--check --auto-onboard`
+when installed with `--auto-onboard`) to verify that
 `~/.gemini/config/hooks.json` matches this checkout.
 
 ### ChatGPT

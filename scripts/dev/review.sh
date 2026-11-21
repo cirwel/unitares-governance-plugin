@@ -174,8 +174,17 @@ build_input() {
 case "${REVIEWER}" in
     claude)
         command -v claude >/dev/null 2>&1 || die "claude CLI not found on PATH"
-        # Enforce read-only review posture: plan permission mode + read-only built-in tools.
-        CMD=(claude -p --permission-mode plan --tools Read,Grep,Glob)
+        # Enforce read-only review posture: plan permission mode, read-only
+        # built-in tools, and MCP servers disabled so no write-capable MCP
+        # tools can execute on an untrusted diff.
+        CMD=(
+            claude -p
+            --permission-mode plan
+            --tools Read,Grep,Glob
+            --strict-mcp-config
+            --mcp-config '{"mcpServers":{}}'
+            --disallowedTools 'mcp__*'
+        )
         [[ -n "${MODEL}" ]] && CMD+=(--model "${MODEL}")
         build_input | "${CMD[@]}"
         ;;
@@ -202,10 +211,16 @@ case "${REVIEWER}" in
         ;;
     antigravity|agy)
         command -v agy >/dev/null 2>&1 || die "agy CLI not found on PATH"
-        # Enforce plan mode, terminal sandbox, and no slash-command expansion.
-        CMD=(agy -p --mode plan --sandbox --disable-slash-commands)
-        [[ -n "${MODEL}" ]] && CMD+=(--model "${MODEL}")
-        build_input | "${CMD[@]}"
+        # Fail closed unless this agy binary advertises --mode and --sandbox.
+        AGY_HELP="$(agy --help 2>&1 || true)"
+        if grep -q -- '--mode' <<<"${AGY_HELP}" \
+            && grep -q -- '--sandbox' <<<"${AGY_HELP}"; then
+            CMD=(agy -p --mode plan --sandbox --disable-slash-commands)
+            [[ -n "${MODEL}" ]] && CMD+=(--model "${MODEL}")
+            build_input | "${CMD[@]}"
+        else
+            die "agy CLI does not advertise verified read-only flags (--mode plan + --sandbox); refusing to run unrestricted tools on untrusted diff"
+        fi
         ;;
     *)
         die "unsupported reviewer: ${REVIEWER} (expected claude, codex, gemini, or antigravity)"

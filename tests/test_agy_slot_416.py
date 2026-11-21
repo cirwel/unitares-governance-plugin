@@ -954,38 +954,82 @@ def test_advisory_review_script_help_dry_run_and_cli_invocation(tmp_path):
     claude_argv = argv_file.read_text(encoding="utf-8").splitlines()
     assert "--permission-mode" in claude_argv and "plan" in claude_argv
     assert "--tools" in claude_argv and "Read,Grep,Glob" in claude_argv
+    assert "--strict-mcp-config" in claude_argv
+    assert "--mcp-config" in claude_argv and '{"mcpServers":{}}' in claude_argv
+    assert "--disallowedTools" in claude_argv and "mcp__*" in claude_argv
 
     # Verify codex and agy shims receive read-only enforcement flags
-    for cli_name, reviewer_arg, expected_tokens in (
-        ("codex", "codex", ("exec", "-s", "read-only")),
-        ("agy", "antigravity", ("-p", "--mode", "plan", "--sandbox", "--disable-slash-commands")),
-    ):
-        cli_shim = shim_dir / cli_name
-        cli_argv_file = tmp_path / f"{cli_name}_argv.txt"
-        cli_shim.write_text(
-            f"#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > {str(cli_argv_file)!r}\ncat >/dev/null\necho 'CLEAN'\n",
-            encoding="utf-8",
-        )
-        cli_shim.chmod(0o755)
-        res_cli = subprocess.run(
-            [
-                str(repo / "scripts" / "dev" / "review.sh"),
-                "--reviewer",
-                reviewer_arg,
-                "--base",
-                "master",
-            ],
-            cwd=str(repo),
-            env={"PATH": f"{shim_dir}:/usr/bin:/bin", "HOME": str(tmp_path)},
-            capture_output=True,
-            text=True,
-            timeout=15,
-            check=False,
-        )
-        assert res_cli.returncode == 0
-        got_argv = cli_argv_file.read_text(encoding="utf-8").splitlines()
-        for tok in expected_tokens:
-            assert tok in got_argv, f"{cli_name} missing {tok!r} in {got_argv}"
+    codex_shim = shim_dir / "codex"
+    codex_argv_file = tmp_path / "codex_argv.txt"
+    codex_shim.write_text(
+        f"#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > {str(codex_argv_file)!r}\ncat >/dev/null\necho 'CLEAN'\n",
+        encoding="utf-8",
+    )
+    codex_shim.chmod(0o755)
+    res_codex = subprocess.run(
+        [str(repo / "scripts" / "dev" / "review.sh"), "--reviewer", "codex", "--base", "master"],
+        cwd=str(repo),
+        env={"PATH": f"{shim_dir}:/usr/bin:/bin", "HOME": str(tmp_path)},
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+    assert res_codex.returncode == 0
+    codex_argv = codex_argv_file.read_text(encoding="utf-8").splitlines()
+    for tok in ("exec", "-s", "read-only"):
+        assert tok in codex_argv
+
+    # agy shim lacking --mode/--sandbox in --help fails closed with exit 2
+    agy_shim = shim_dir / "agy"
+    agy_shim.write_text(
+        "#!/usr/bin/env bash\nif [[ \"${1:-}\" == \"--help\" ]]; then echo 'usage: agy -p'; exit 0; fi\necho 'SHOULD_NOT_RUN'\n",
+        encoding="utf-8",
+    )
+    agy_shim.chmod(0o755)
+    res_agy_unsafe = subprocess.run(
+        [
+            str(repo / "scripts" / "dev" / "review.sh"),
+            "--reviewer",
+            "antigravity",
+            "--base",
+            "master",
+        ],
+        cwd=str(repo),
+        env={"PATH": f"{shim_dir}:/usr/bin:/bin", "HOME": str(tmp_path)},
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+    assert res_agy_unsafe.returncode == 2
+    assert "SHOULD_NOT_RUN" not in res_agy_unsafe.stdout
+
+    # agy shim advertising --mode + --sandbox runs with full read-only flags
+    agy_argv_file = tmp_path / "agy_argv.txt"
+    agy_shim.write_text(
+        f"#!/usr/bin/env bash\nif [[ \"${{1:-}}\" == \"--help\" ]]; then echo 'flags: --mode --sandbox'; exit 0; fi\nprintf '%s\\n' \"$@\" > {str(agy_argv_file)!r}\ncat >/dev/null\necho 'CLEAN'\n",
+        encoding="utf-8",
+    )
+    res_agy_safe = subprocess.run(
+        [
+            str(repo / "scripts" / "dev" / "review.sh"),
+            "--reviewer",
+            "antigravity",
+            "--base",
+            "master",
+        ],
+        cwd=str(repo),
+        env={"PATH": f"{shim_dir}:/usr/bin:/bin", "HOME": str(tmp_path)},
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+    assert res_agy_safe.returncode == 0
+    agy_argv = agy_argv_file.read_text(encoding="utf-8").splitlines()
+    for tok in ("-p", "--mode", "plan", "--sandbox", "--disable-slash-commands"):
+        assert tok in agy_argv
 
     # gemini shim lacking read-only flags in --help fails closed with exit 2
     gem_unsafe = shim_dir / "gemini"
@@ -1408,3 +1452,191 @@ def test_install_agy_hooks_merges_into_user_hooks_json_without_claude_collision(
     assert auto_ug["SessionStart"][0]["command"].startswith("UNITARES_AUTO_ONBOARD=on ")
     assert auto_ug["Stop"][0]["command"].startswith("UNITARES_AUTO_ONBOARD=on ")
     assert "UNITARES_AUTO_ONBOARD=" not in auto_ug["PreToolUse"][0]["hooks"][0]["command"]
+
+    # Symlink target is preserved (updates referent in place) and file mode is preserved.
+    real_file = tmp_path / "real-hooks.json"
+    real_file.write_text("{}\n", encoding="utf-8")
+    real_file.chmod(0o640)
+    link_file = tmp_path / "link-hooks.json"
+    link_file.symlink_to(real_file)
+    res_link = subprocess.run(
+        [sys.executable, str(installer), "--target", str(link_file)],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    assert res_link.returncode == 0
+    assert link_file.is_symlink()
+    assert (real_file.stat().st_mode & 0o777) == 0o640
+    assert "unitares-governance" in json.loads(real_file.read_text(encoding="utf-8"))
+
+
+# ---------------------------------------------------------------------------
+# 7. Claude review hardening regressions (PR #434)
+# ---------------------------------------------------------------------------
+
+
+def test_failed_first_mint_allows_retry_in_same_turn_without_marker_lockout(
+    tmp_path, monkeypatch
+):
+    """If the first start_session fails on the server, a retry with a new toolCall.id
+    in the same turn must be allowed once the transcript records the failed attempt."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+
+    slot = "slot-retry-after-fail"
+    tx_path = tmp_path / "retry_turn.jsonl"
+    _write_transcript(tx_path, [{"step_index": 0, "type": "USER_INPUT", "content": "start"}])
+
+    call1 = _agy_pre_tool_payload(
+        slot,
+        args={
+            "ServerName": "unitares-governance",
+            "ToolName": "start_session",
+            "Arguments": {"force_new": True},
+        },
+    )
+    call1["toolCall"]["id"] = "toolu_attempt_1"
+    call1["transcriptPath"] = str(tx_path)
+
+    # First attempt passes and claims the turn marker.
+    assert _run_inject_agy(call1, home_dir=fake_home) == {"decision": "allow"}
+
+    # While call 1 is still in flight (no failure recorded yet), a parallel duplicate is denied.
+    call_dup = _agy_pre_tool_payload(
+        slot,
+        args={
+            "ServerName": "unitares-governance",
+            "ToolName": "start_session",
+            "Arguments": {"force_new": True},
+        },
+    )
+    call_dup["toolCall"]["id"] = "toolu_parallel_dup"
+    call_dup["transcriptPath"] = str(tx_path)
+    assert _run_inject_agy(call_dup, home_dir=fake_home)["decision"] == "deny"
+
+    # Now record call 1 finishing with a server error (no valid uuid/csid).
+    _write_transcript(
+        tx_path,
+        [
+            {"step_index": 0, "type": "USER_INPUT", "content": "start"},
+            {
+                "step_index": 1,
+                "type": "PLANNER_RESPONSE",
+                "status": "DONE",
+                "tool_calls": [
+                    {
+                        "id": "toolu_attempt_1",
+                        "name": "call_mcp_tool",
+                        "args": {
+                            "ServerName": '"unitares-governance"',
+                            "ToolName": '"start_session"',
+                            "Arguments": json.dumps({"force_new": True}),
+                        },
+                    }
+                ],
+            },
+            {
+                "step_index": 2,
+                "type": "GENERIC",
+                "status": "ERROR",
+                "content": json.dumps({"success": False, "error": "connection timeout"}),
+            },
+        ],
+    )
+
+    # Retry with a new toolCall.id is allowed because attempt 1 failed without binding.
+    call_retry = _agy_pre_tool_payload(
+        slot,
+        args={
+            "ServerName": "unitares-governance",
+            "ToolName": "start_session",
+            "Arguments": {"force_new": True},
+        },
+    )
+    call_retry["toolCall"]["id"] = "toolu_attempt_2"
+    call_retry["transcriptPath"] = str(tx_path)
+    assert _run_inject_agy(call_retry, home_dir=fake_home) == {"decision": "allow"}
+
+    # A third call while attempt 2 is in flight is blocked again.
+    call3 = _agy_pre_tool_payload(
+        slot,
+        args={
+            "ServerName": "unitares-governance",
+            "ToolName": "start_session",
+            "Arguments": {"force_new": True},
+        },
+    )
+    call3["toolCall"]["id"] = "toolu_attempt_3"
+    call3["transcriptPath"] = str(tx_path)
+    assert _run_inject_agy(call3, home_dir=fake_home)["decision"] == "deny"
+
+
+def test_live_slot_denies_mismatched_parent_agent_id_and_non_session_proof_and_longest_alias(
+    tmp_path,
+):
+    """Verify P2-2, P3-4, and P3-6 hardenings on governance_call_inject --host agy."""
+    home_dir = tmp_path / "home"
+    conv_id = "slot-live-parent-check"
+    _write_slot_cache(home_dir, conv_id, uuid=UUID_A, csid=CSID_A)
+
+    # Mismatched parent_agent_id != active UUID_A is denied even with spawn_reason="explicit".
+    out_mismatch = _run_inject_agy(
+        _agy_pre_tool_payload(
+            conv_id,
+            args={
+                "ServerName": "unitares-governance",
+                "ToolName": "start_session",
+                "Arguments": {
+                    "force_new": True,
+                    "parent_agent_id": UUID_B,
+                    "spawn_reason": "explicit",
+                },
+            },
+        ),
+        home_dir=home_dir,
+    )
+    assert out_mismatch["decision"] == "deny"
+    assert UUID_A in out_mismatch["reason"]
+    assert CSID_A in out_mismatch["reason"]
+    assert 'spawn_reason="explicit"' not in out_mismatch["reason"]
+    assert 'spawn_reason="subagent"' in out_mismatch["reason"]
+
+    # P3-6: agent_id / agent_uuid alone (without client_session_id/continuity_token)
+    # does NOT bypass bare-mint denial on a live bound slot.
+    for weak_args in (
+        {"agent_id": "some-label"},
+        {"agent_uuid": UUID_A},
+    ):
+        out_weak = _run_inject_agy(
+            _agy_pre_tool_payload(
+                conv_id,
+                args={
+                    "ServerName": "unitares-governance",
+                    "ToolName": "start_session",
+                    "Arguments": weak_args,
+                },
+            ),
+            home_dir=home_dir,
+        )
+        assert out_weak["decision"] == "deny", f"expected deny for {weak_args}"
+        assert 'spawn_reason="explicit"' not in out_weak["reason"]
+
+    # P3-4: longest-first alias matching resolves mcp_unitares_governance_sync_state -> sync_state
+    # (never shadowed by the shorter "unitares" alias returning "governance_sync_state").
+    assert (
+        governance_call_inject._agy_direct_mcp_suffix("mcp_unitares_governance_sync_state")
+        == "sync_state"
+    )
+    out_direct = _run_inject_agy(
+        _agy_pre_tool_payload(
+            conv_id,
+            tool_name="mcp_unitares_governance_sync_state",
+            args={"response_text": "check", "complexity": 0.2},
+        ),
+        home_dir=home_dir,
+    )
+    assert out_direct["decision"] == "allow"
+    assert out_direct["overwrite"]["client_session_id"] == CSID_A

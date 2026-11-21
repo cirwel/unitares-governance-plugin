@@ -534,7 +534,7 @@ def _agy_driver_onboard_call_meta(entry: Mapping[str, Any]) -> dict[int, dict[st
             for prefix in ("mcp__", "mcp_"):
                 if lowered.startswith(prefix):
                     rest = lowered[len(prefix):]
-                    for server in _AGY_GOVERNANCE_SERVERS:
+                    for server in sorted(_AGY_GOVERNANCE_SERVERS, key=len, reverse=True):
                         for sep in ("__", "_"):
                             tag = f"{server}{sep}"
                             if rest.startswith(tag) and rest[len(tag):] in _AGY_ONBOARD_TOOLS:
@@ -542,6 +542,9 @@ def _agy_driver_onboard_call_meta(entry: Mapping[str, Any]) -> dict[int, dict[st
                                 tool_args = {
                                     k: _unwrap_agy_arg_string(v) for k, v in args.items()
                                 }
+                                break
+                        if matched_tool:
+                            break
         if not matched_tool:
             continue
         if matched_tool == "identity" and not (
@@ -554,10 +557,12 @@ def _agy_driver_onboard_call_meta(entry: Mapping[str, Any]) -> dict[int, dict[st
         if spawn_reason == "subagent":
             continue
         parent_agent_id = str(tool_args.get("parent_agent_id") or "").strip()
+        call_id = str(call.get("id") or "").strip()
         matched[idx] = {
             "tool": matched_tool,
             "parent_agent_id": parent_agent_id,
             "spawn_reason": spawn_reason,
+            "call_id": call_id,
         }
     return matched
 
@@ -713,10 +718,14 @@ def clear_agy_turn_mint_marker(slot: str) -> None:
         pass
 
 
-def find_current_turn_agy_onboards(
+def inspect_current_turn_agy_onboards(
     payload: Mapping[str, Any],
-) -> tuple[list[tuple[dict[str, Any], dict[str, str]]], int | None]:
-    """Return chronological ``(candidates, turn_boundary_step)`` for the current agy turn."""
+) -> tuple[
+    list[tuple[dict[str, Any], dict[str, str]]],
+    list[dict[str, Any]],
+    int | None,
+]:
+    """Return ``(succeeded_candidates, failed_attempts, turn_boundary_step)`` for the current agy turn."""
     session_id = str(payload.get("conversationId") or payload.get("session_id") or "").strip()
     window = _AGY_TRANSCRIPT_TAIL_BYTES
     turn_entries_reversed: list[dict[str, Any]] = []
@@ -761,9 +770,10 @@ def find_current_turn_agy_onboards(
         break
 
     if not turn_entries_reversed:
-        return [], turn_boundary_step
+        return [], [], turn_boundary_step
 
     candidates: list[tuple[dict[str, Any], dict[str, str]]] = []
+    failed_attempts: list[dict[str, Any]] = []
     pending_meta: dict[int, dict[str, str]] = {}
     generic_idx = 0
     for entry in reversed(turn_entries_reversed):
@@ -779,8 +789,24 @@ def find_current_turn_agy_onboards(
                 )
                 if candidate is not None:
                     candidates.append((candidate, call_meta))
+                else:
+                    failed_attempts.append(
+                        {
+                            "call_id": call_meta.get("call_id", ""),
+                            "tool": call_meta.get("tool", ""),
+                            "step_index": entry.get("step_index"),
+                        }
+                    )
             generic_idx += 1
 
+    return candidates, failed_attempts, turn_boundary_step
+
+
+def find_current_turn_agy_onboards(
+    payload: Mapping[str, Any],
+) -> tuple[list[tuple[dict[str, Any], dict[str, str]]], int | None]:
+    """Return chronological ``(candidates, turn_boundary_step)`` for the current agy turn."""
+    candidates, _failed, turn_boundary_step = inspect_current_turn_agy_onboards(payload)
     return candidates, turn_boundary_step
 
 

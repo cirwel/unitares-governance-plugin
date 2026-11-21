@@ -17,12 +17,15 @@ from __future__ import annotations
 
 import argparse
 import copy
+import fcntl
 import json
 import os
+import stat
 import sys
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 HOOK_GROUP_KEY = "unitares-governance"
 DEFAULT_TARGET = Path.home() / ".gemini" / "config" / "hooks.json"
@@ -43,10 +46,7 @@ def _render_command(
             "${PLUGIN_ROOT}", root_str
         )
     if auto_onboard and is_lifecycle_event and "UNITARES_AUTO_ONBOARD=" not in rendered:
-        if rendered.startswith("exec "):
-            rendered = "UNITARES_AUTO_ONBOARD=on " + rendered
-        else:
-            rendered = "UNITARES_AUTO_ONBOARD=on " + rendered
+        rendered = "UNITARES_AUTO_ONBOARD=on " + rendered
     return rendered
 
 
@@ -127,8 +127,40 @@ def _load_target(target: Path) -> dict[str, Any]:
     return data
 
 
+def _resolve_write_target(target: Path) -> Path:
+    """Resolve a symlink target so atomic replace updates the linked file instead of clobbering the symlink."""
+    if target.is_symlink():
+        return target.resolve()
+    return target
+
+
+@contextmanager
+def _target_lock(target: Path) -> Iterator[None]:
+    """Serialize read-modify-write updates to ``target`` via a sibling advisory flock."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = target.parent / f".{target.name}.lock"
+    fd = os.open(
+        str(lock_path),
+        os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+    )
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
 def _atomic_write_json(target: Path, data: dict[str, Any]) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
+    existing_mode: int | None = None
+    try:
+        existing_mode = stat.S_IMODE(target.stat().st_mode)
+    except OSError:
+        existing_mode = None
     rendered = json.dumps(data, indent=2) + "\n"
     fd, tmp_path = tempfile.mkstemp(
         dir=str(target.parent), prefix=f".{target.name}.", suffix=".tmp"
@@ -136,6 +168,8 @@ def _atomic_write_json(target: Path, data: dict[str, Any]) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(rendered)
+        if existing_mode is not None:
+            os.chmod(tmp_path, existing_mode)
         os.replace(tmp_path, target)
     except BaseException:
         try:
@@ -186,38 +220,47 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     target = args.target.expanduser()
+    write_target = _resolve_write_target(target)
     plugin_root = args.plugin_root.expanduser().resolve()
 
-    try:
-        existing = _load_target(target)
-        merged = merge_agy_hooks(
-            existing,
-            plugin_root=plugin_root,
-            keep_plugin_root_var=args.keep_plugin_root_var,
-            auto_onboard=args.auto_onboard,
-        )
-    except Exception as exc:
-        print(f"install_agy_hooks.py: {exc}", file=sys.stderr)
-        return 2
+    if args.check or args.dry_run:
+        try:
+            existing = _load_target(write_target)
+            merged = merge_agy_hooks(
+                existing,
+                plugin_root=plugin_root,
+                keep_plugin_root_var=args.keep_plugin_root_var,
+                auto_onboard=args.auto_onboard,
+            )
+        except Exception as exc:
+            print(f"install_agy_hooks.py: {exc}", file=sys.stderr)
+            return 2
 
-    if args.check:
-        if existing.get(HOOK_GROUP_KEY) == merged[HOOK_GROUP_KEY]:
-            print(f"[agy-hooks] OK — {target} matches {plugin_root / 'hooks' / 'agy-hooks.json'}")
-            return 0
-        print(
-            f"[agy-hooks] drift — {target} does not match rendered {plugin_root / 'hooks' / 'agy-hooks.json'}",
-            file=sys.stderr,
-        )
-        return 1
+        if args.check:
+            if existing.get(HOOK_GROUP_KEY) == merged[HOOK_GROUP_KEY]:
+                print(f"[agy-hooks] OK — {target} matches {plugin_root / 'hooks' / 'agy-hooks.json'}")
+                return 0
+            print(
+                f"[agy-hooks] drift — {target} does not match rendered {plugin_root / 'hooks' / 'agy-hooks.json'}",
+                file=sys.stderr,
+            )
+            return 1
 
-    if args.dry_run:
         print(json.dumps(merged, indent=2))
         return 0
 
     try:
-        _atomic_write_json(target, merged)
-    except OSError as exc:
-        print(f"install_agy_hooks.py: write failed: {exc}", file=sys.stderr)
+        with _target_lock(write_target):
+            existing = _load_target(write_target)
+            merged = merge_agy_hooks(
+                existing,
+                plugin_root=plugin_root,
+                keep_plugin_root_var=args.keep_plugin_root_var,
+                auto_onboard=args.auto_onboard,
+            )
+            _atomic_write_json(write_target, merged)
+    except Exception as exc:
+        print(f"install_agy_hooks.py: {exc}", file=sys.stderr)
         return 2
 
     print(f"[agy-hooks] installed {HOOK_GROUP_KEY} hooks into {target}")

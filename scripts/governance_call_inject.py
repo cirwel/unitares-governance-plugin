@@ -334,7 +334,7 @@ def _agy_direct_mcp_suffix(tool_name: str) -> str | None:
     lowered = tool_name.strip().casefold()
     if lowered.startswith("mcp_"):
         rest = lowered[4:]
-        for server in governance_server_aliases("agy"):
+        for server in sorted(governance_server_aliases("agy"), key=len, reverse=True):
             prefix = f"{server}_"
             if rest.startswith(prefix) and len(rest) > len(prefix):
                 return rest[len(prefix):]
@@ -383,23 +383,40 @@ def _extract_agy_call(
 _AGY_TURN_MINT_TTL_S = 1800.0
 
 
+def _has_slot_bound_proof(tool_input: dict) -> bool:
+    """True if the caller supplied a real session proof (client_session_id/continuity_token)."""
+    for field in SLOT_BOUND_PROOF_FIELDS:
+        value = tool_input.get(field)
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        return True
+    return False
+
+
 def _agy_claim_turn_mint_guard(
     data: dict, raw: str, *, kind: str
 ) -> str:
     """Block a second unparented start_session/onboard mint within the same unbound turn.
 
     Checks both the current turn's transcript (catching completed in-turn mints
-    before Stop writes the slot cache) and a per-slot flock-guarded turn marker
-    (catching parallel or pre-flush double mints).
+    before Stop writes the slot cache, and allowing retries when an earlier
+    marked attempt already finished without returning a usable binding) and a
+    per-slot flock-guarded turn marker (catching parallel or pre-flush double
+    mints).
     """
     turn_boundary_step: int | None = None
+    failed_attempts: list[dict] = []
     try:
         from stop_hook_event import (
             _agy_turn_mint_marker_path,
-            find_current_turn_agy_onboards,
+            inspect_current_turn_agy_onboards,
         )
 
-        candidates, turn_boundary_step = find_current_turn_agy_onboards(data)
+        candidates, failed_attempts, turn_boundary_step = inspect_current_turn_agy_onboards(
+            data
+        )
         if candidates:
             first_cand, _ = candidates[0]
             first_uuid = str(first_cand.get("uuid") or "").strip()
@@ -409,8 +426,9 @@ def _agy_claim_turn_mint_guard(
                     f"This Antigravity turn already minted governance identity "
                     f"agent_uuid {first_uuid} (client_session_id={first_csid}). "
                     f"A second {kind} mint in the same turn would create a duplicate "
-                    f"identity. Reuse client_session_id={first_csid}, or switch "
-                    'lineage explicitly with both parent_agent_id and spawn_reason="explicit".'
+                    f"identity. Reuse client_session_id={first_csid} on governance "
+                    'calls, or pass spawn_reason="subagent" only when spawning a '
+                    "separate subagent."
                 )
     except Exception:
         _agy_turn_mint_marker_path = None  # type: ignore[assignment]
@@ -455,6 +473,7 @@ def _agy_claim_turn_mint_guard(
         fcntl.flock(fd, fcntl.LOCK_EX)
         os.lseek(fd, 0, os.SEEK_SET)
         raw_existing = os.read(fd, 8192).decode("utf-8", errors="replace").strip()
+        next_attempt_count = 1
         if raw_existing:
             try:
                 existing = json.loads(raw_existing)
@@ -471,19 +490,39 @@ def _agy_claim_turn_mint_guard(
                 )
                 prev_call_id = str(existing.get("tool_call_id") or "").strip()
                 same_call = bool(call_id and prev_call_id and call_id == prev_call_id)
-                if fresh and not new_turn and not same_call:
+                prev_attempts = existing.get("attempt_count")
+                if not isinstance(prev_attempts, int) or prev_attempts < 1:
+                    prev_attempts = 1
+                failed_ids = {
+                    str(item.get("call_id") or "").strip()
+                    for item in failed_attempts
+                    if item.get("call_id")
+                }
+                prior_failed = bool(
+                    failed_attempts
+                    and (
+                        (prev_call_id and prev_call_id in failed_ids)
+                        or len(failed_attempts) >= prev_attempts
+                    )
+                )
+                if fresh and not new_turn and not same_call and not prior_failed:
                     return (
                         "An unparented start_session/onboard mint is already in progress "
                         f"in this Antigravity turn. A second {kind} mint would create a "
                         "duplicate identity before Stop caches the first. Reuse the first "
-                        "call's client_session_id, or switch lineage explicitly with both "
-                        'parent_agent_id and spawn_reason="explicit".'
+                        "call's client_session_id, or pass spawn_reason=\"subagent\" only "
+                        "when spawning a separate subagent."
+                    )
+                if fresh and not new_turn:
+                    next_attempt_count = (
+                        prev_attempts if same_call else prev_attempts + 1
                     )
         record = json.dumps(
             {
                 "tool_call_id": call_id,
                 "step_idx": step_idx,
                 "turn_boundary_step": turn_boundary_step,
+                "attempt_count": next_attempt_count,
                 "ts": now,
             },
             separators=(",", ":"),
@@ -508,37 +547,52 @@ def _agy_duplicate_mint_reason(
     reason = str(tool_input.get("spawn_reason") or "").strip().lower()
     if reason == "subagent":
         return ""
-    parent = tool_input.get("parent_agent_id")
-    has_parent = isinstance(parent, str) and bool(parent.strip())
+    parent_raw = tool_input.get("parent_agent_id")
+    parent = parent_raw.strip() if isinstance(parent_raw, str) else ""
+    has_parent = bool(parent)
     has_deliberate_reason = reason in DELIBERATE_SPAWN_REASONS
-    if has_parent and has_deliberate_reason:
-        return ""
     is_force_new = _truthy(tool_input.get("force_new"))
-    has_proof = _has_proof_field(tool_input)
+    # On start_session/onboard, only client_session_id or continuity_token
+    # proves session resume; agent_id/agent_uuid alone still mints/name-claims.
+    has_session_proof = _has_slot_bound_proof(tool_input)
     is_anchor_resume = bool(
         anchor
         and not is_force_new
-        and not has_proof
+        and not _has_proof_field(tool_input)
         and not has_parent
         and not reason
         and "orchestrated" not in tool_input
         and "resume" not in tool_input
     )
-    if not is_force_new and (has_proof or is_anchor_resume):
-        return ""
     kind = "force_new" if is_force_new else "bare start_session/onboard"
     sess = _current_slot_binding(raw, idle_is_inherited=True)
     uuid = str(sess.get("uuid") or "").strip()
     csid = str(sess.get("client_session_id") or "").strip()
     if uuid and csid:
         origin = str(sess.get("onboard_origin") or "").strip() or "unknown"
+        if has_parent and parent != uuid:
+            return (
+                f"This Antigravity slot is already bound to governance as agent_uuid {uuid} "
+                f"(onboard_origin={origin}), so parent_agent_id={parent} does not match "
+                f"the active slot owner. Reuse client_session_id={csid} on governance calls "
+                '(or omit it so the hook injects it). Pass spawn_reason="subagent" only '
+                "when spawning a separate subagent."
+            )
+        if has_parent and parent == uuid and has_deliberate_reason:
+            return ""
+        if not is_force_new and (has_session_proof or is_anchor_resume):
+            return ""
         return (
             f"This Antigravity slot is already bound to governance as agent_uuid {uuid} "
             f"(onboard_origin={origin}). A {kind} mint would create a second identity for "
             f"the same conversation. Reuse client_session_id={csid} (or omit it and let "
-            "the hook inject it on governance calls). To deliberately switch lineage, "
-            'call again with both parent_agent_id and spawn_reason="explicit".'
+            "the hook inject it on governance calls). Only pass "
+            'spawn_reason="subagent" when spawning a separate subagent.'
         )
+    if has_parent and has_deliberate_reason:
+        return ""
+    if not is_force_new and (has_session_proof or is_anchor_resume):
+        return ""
     return _agy_claim_turn_mint_guard(data, raw, kind=kind)
 
 
