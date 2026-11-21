@@ -2885,6 +2885,7 @@ def test_unix_socket_cli_unlinks_socket_on_sigterm(
 def test_unix_socket_refuses_relative_path_and_permissive_existing_parent_without_chmod(
     tmp_path: Path,
     fake_server: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import os
     import stat
@@ -2942,6 +2943,26 @@ def test_unix_socket_refuses_relative_path_and_permissive_existing_parent_withou
         os.chmod(real_root, 0o700)
         user_symlink = Path(tmpdir) / "userlink"
         user_symlink.symlink_to(real_root)
+        real_lstat = os.lstat
+        if real_lstat(user_symlink).st_uid != 0:
+            with pytest.raises(ValueError, match="symlink"):
+                identity_sidecar.BoundedThreadingUnixHTTPServer(
+                    user_symlink / "leaf" / "sc.sock", make_handler(sidecar)
+                )
+
+        # Also exercise non-root symlink rejection explicitly when pytest runs
+        # as root (where newly created symlinks have st_uid == 0).
+        def _nonroot_symlink_lstat(
+            path: object, *args: object, **kwargs: object
+        ) -> os.stat_result:
+            info = real_lstat(path, *args, **kwargs)  # type: ignore[arg-type]
+            if Path(os.fspath(path)) == user_symlink:  # type: ignore[arg-type]
+                fields = list(info)
+                fields[4] = 1000
+                return os.stat_result(fields)
+            return info
+
+        monkeypatch.setattr(identity_sidecar.os, "lstat", _nonroot_symlink_lstat)
         with pytest.raises(ValueError, match="symlink"):
             identity_sidecar.BoundedThreadingUnixHTTPServer(
                 user_symlink / "leaf" / "sc.sock", make_handler(sidecar)
