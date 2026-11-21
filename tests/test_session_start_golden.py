@@ -338,7 +338,7 @@ STOP_DOES_NOT_BIND = "The Stop hook will not bind this conversation's anchor"
     {"UNITARES_AUTO_ONBOARD": "anything-not-an-off-word"},
     {"UNITARES_DISABLE_AUTO_ONBOARD": "0"},
     # Spellings the Stop hook does not read as "off".
-    {"UNITARES_DISABLE_AUTO_ONBOARD": "yes"},
+    {"UNITARES_AUTO_ONBOARD": ""},  # unset or empty is the default: auto, a local server
     {"UNITARES_CHECKINS": "0"},
 ])
 def test_anchored_variant_promises_a_stop_bind_only_when_stop_will_bind(tmp_path, env):
@@ -349,7 +349,7 @@ def test_anchored_variant_promises_a_stop_bind_only_when_stop_will_bind(tmp_path
 
 @pytest.mark.parametrize("env", [
     {"UNITARES_AUTO_ONBOARD": "off"},
-    {"UNITARES_AUTO_ONBOARD": ""},  # unset or empty is the shipped default
+    {"UNITARES_DISABLE_AUTO_ONBOARD": "yes"},
     {"UNITARES_AUTO_ONBOARD": "0"},
     {"UNITARES_AUTO_ONBOARD": "FALSE"},
     {"UNITARES_AUTO_ONBOARD": "no"},

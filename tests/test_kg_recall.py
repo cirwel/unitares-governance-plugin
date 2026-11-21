@@ -151,6 +151,9 @@ def _run_session_start(
         "UNITARES_SERVER_URL": server_url,
         "UNITARES_HOOK_SKIP_WORKSPACE_BRIEFING": "1",
         "UNITARES_SESSION_START_LOG": str(tmp_path / "session-start.log"),
+        # These tests count the calls recall makes; keep the hooks' own
+        # onboarding call out of that count.
+        "UNITARES_AUTO_ONBOARD": "off",
     }
     if extra_env:
         env.update(extra_env)

@@ -369,6 +369,36 @@ def _identity_fingerprint(payload: dict[str, Any]) -> tuple[str, ...]:
 _HOST_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 
 
+HARNESS_ONBOARDING_DECLINED = "harness_onboarding_declined"
+SPAWNED_UNDER_ENV = "UNITARES_SPAWNED_UNDER"
+_SPAWNED_UNDER_RE = re.compile(r"agent:[/_]thread-[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+
+
+def is_harness_onboarding_declined(parsed: Any) -> bool:
+    """True when the server answered that it creates identities only for
+    agents that claim one. A policy answer from the server's operator, not a
+    failure: nothing is retried and nothing is cached."""
+    return (
+        isinstance(parsed, dict)
+        and parsed.get("refused") is True
+        and parsed.get("status") == HARNESS_ONBOARDING_DECLINED
+    )
+
+
+def _spawned_under(value: str | None = None) -> dict[str, str] | None:
+    """The ``spawned_under`` declaration for a fresh mint, or None.
+
+    ``hooks/run-hook.cmd`` sets ``UNITARES_SPAWNED_UNDER`` when it strips a
+    thread anchor this process inherited and does not own: the conversation
+    this process was started inside. It is declared as context. It is not
+    lineage and is never sent as ``parent_agent_id``.
+    """
+    anchor = (value if value is not None else os.environ.get(SPAWNED_UNDER_ENV, "")).strip()
+    if not anchor or not _SPAWNED_UNDER_RE.fullmatch(anchor):
+        return None
+    return {"anchor": anchor}
+
+
 def _host_session(
     harness: str | None, session_id: str | None, session_dir: Path | None
 ) -> dict[str, str] | None:
@@ -467,6 +497,10 @@ def run_onboard(
             "client_session_id": anchor,
             "orchestrated": True,
             "onboard_origin": ORCHESTRATED_RESUME_ORIGIN,
+            # A harness is asking. The server's operator decides whether it
+            # creates identities for one; resuming an existing identity is
+            # not affected.
+            "harness_request": True,
         }
     else:
         # Scope the name by slot so the server's name-claim lookup doesn't bind
@@ -479,6 +513,7 @@ def run_onboard(
             "model_type": model_type,
             "force_new": True,
             "onboard_origin": HARNESS_BACKSTOP_ORIGIN,
+            "harness_request": True,
         }
 
         # Optional genesis anchor (OFF by default — see BOOTSTRAP_* above; it is
@@ -495,9 +530,18 @@ def run_onboard(
         host_session = _host_session(host_harness, host_session_id, host_session_dir)
         if host_session:
             arguments["host_session"] = host_session
+        spawned_under = _spawned_under()
+        if spawned_under:
+            arguments["spawned_under"] = spawned_under
 
     raw = post_json(url, {"name": "onboard", "arguments": arguments}, timeout, auth_token)
     parsed = unwrap_tool_response(raw)
+
+    if is_harness_onboarding_declined(parsed):
+        return {
+            "status": "harness_declined",
+            "error": "the server creates identities only for agents that claim one",
+        }
 
     if not is_successful_onboard(parsed):
         # Per 718ccd3: never auto-retry with a weaker/different identity

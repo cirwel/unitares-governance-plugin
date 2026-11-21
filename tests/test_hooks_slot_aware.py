@@ -125,13 +125,29 @@ def _onboard_args(calls: list[dict]) -> dict:
     return onboard_calls[0]["arguments"]
 
 
-def test_post_stop_does_not_onboard_by_default(tmp_path):
-    """Lazy onboarding is opt-in: a fresh install must not mint identities."""
+def test_post_stop_asks_a_local_server_by_default(tmp_path):
+    """The default asks the server on this machine, and marks the call as a
+    harness request so the server's operator has the say."""
     calls = _run_hook_with_mock_server(
         "post-stop",
         tmp_path,
-        "turn-slot-default-off",
+        "turn-slot-default-auto",
         extra_env={"UNITARES_AUTO_ONBOARD": None},
+        return_all=True,
+    )
+
+    onboards = [c for c in calls if c.get("name") == "onboard"]
+    assert len(onboards) == 1, calls
+    assert onboards[0]["arguments"]["harness_request"] is True
+    assert onboards[0]["arguments"]["onboard_origin"] == "harness_backstop"
+
+
+def test_post_stop_does_not_onboard_when_off(tmp_path):
+    calls = _run_hook_with_mock_server(
+        "post-stop",
+        tmp_path,
+        "turn-slot-off",
+        extra_env={"UNITARES_AUTO_ONBOARD": "off"},
         return_all=True,
     )
 

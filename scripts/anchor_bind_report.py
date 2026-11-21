@@ -18,6 +18,8 @@ One line goes to the check-in diagnostic log (docs/check-ins.md):
                       something else bound it while the hooks were trying
     anchor_bind_fail  the hooks tried to bind the anchor, could not, and the
                       slot holds no identity
+    anchor_declined   the server creates identities only for agents that claim
+                      one, and this conversation has none yet
     anchor_unbound    the turn ended with nothing bound and no bind attempted
 
 The last two also go to standard error, because they mean the conversation has
@@ -79,6 +81,8 @@ def classify(raw: str, bound_csid: str = "") -> tuple[str, str, str]:
         return "anchor_bound", uuid, ""
     if bound:
         return "anchor_bound", "", ""
+    if result.get("status") == "harness_declined":
+        return "anchor_declined", "", "the server creates identities only for agents that claim one"
     if result.get("status") == "ok":
         error = "the onboarding helper returned no identity"
     else:
@@ -116,7 +120,7 @@ def main(argv: list[str] | None = None) -> int:
             status, uuid, error = classify(sys.stdin.read(), args.bound_csid)
     except Exception:
         return 0
-    if args.successes_only and status == "anchor_bind_fail":
+    if args.successes_only and status in ("anchor_bind_fail", "anchor_declined"):
         return 0
     try:
         _append_log(
@@ -142,6 +146,15 @@ def main(argv: list[str] | None = None) -> int:
             print(
                 "[UNITARES] this turn ended with no identity for its thread "
                 f"anchor ({error}): {UNBOUND_HELP}",
+                file=sys.stderr,
+            )
+        elif status == "anchor_declined":
+            print(
+                "[UNITARES] this server creates identities only for agents that "
+                "claim one, and this conversation has none. Have the agent call "
+                "start_session() with no arguments; the hooks keep it from then "
+                "on. The server's operator can accept harness-made identities "
+                "with UNITARES_HARNESS_ONBOARDING=welcome.",
                 file=sys.stderr,
             )
         elif status == "anchor_bind_fail":

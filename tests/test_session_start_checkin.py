@@ -272,11 +272,11 @@ class TestSessionStartContext:
         assert "onboard(" in ctx
         assert "Stop hook will lazily create a slot-scoped identity" in ctx
 
-    def test_default_does_not_promise_lazy_onboarding(self, tmp_path):
-        # UNITARES_AUTO_ONBOARD unset: the shipped default is off, so the note
-        # must not tell the agent an identity will appear at turn stop.
+    def test_off_does_not_promise_lazy_onboarding(self, tmp_path):
+        # With onboarding by the hooks off, the note must not tell the agent
+        # an identity will appear at turn stop.
         stdout, _ = _serve_and_run(
-            tmp_path, extra_env={"UNITARES_AUTO_ONBOARD": None}
+            tmp_path, extra_env={"UNITARES_AUTO_ONBOARD": "off"}
         )
         ctx = _context(stdout)
         assert "lazily create" not in ctx

@@ -47,39 +47,42 @@ exists but is not an executable file exits 126.
 
 ### What binds the identity
 
-By default the launcher only says which conversation the process belongs to.
-It does not create or bind an identity. The agent does that by calling
-`start_session()` with no arguments, which the session-start hook tells it to
-do before the first tool that needs an identity. The first such call for a
-thread id creates the identity, and the same call in a later turn resumes it.
+The launcher says which conversation the process belongs to. It does not
+create or bind an identity. Two things can:
 
-A headless agent often never makes that call, and then the conversation has no
-identity. To have the hooks bind it at the end of any turn the agent left
-unbound, add `--bind`:
+- **The agent.** It calls `start_session()` with no arguments, which the
+  session-start hook tells it to do before the first tool that needs an
+  identity. The first such call for a thread id creates the identity, and the
+  same call in a later turn resumes it.
+- **The hooks.** At the end of a turn the agent left unbound, the Stop hook
+  asks the server to bind the anchor. By default (`UNITARES_AUTO_ONBOARD=auto`)
+  it asks a server on this machine or one reached over HTTPS, and does not ask
+  a plain-HTTP server elsewhere.
+
+A bind made by the hooks is recorded as made by the harness (`onboard_origin`
+is `orchestrated_resume`), not as the agent's own claim. The request is marked
+`harness_request`, and the server's operator decides whether to accept it:
+with `UNITARES_HARNESS_ONBOARDING=agent_only` on the server, the hooks cannot
+create the conversation's identity. They can still resume one the agent
+created, so on such a server the agent must make the first call.
+
+`--bind` narrows the hooks to this conversation:
 
 ```bash
 scripts/thread-anchor-exec --bind <thread-id> -- <cli> [args...]
 ```
 
-`--bind` sets `UNITARES_AUTO_ONBOARD=anchored`. A bridge that sets the
-variables itself can set that too. The hooks honor it only in the process that
-owns the anchor. A CLI the agent starts later inherits the variable, is
-refused the anchor, and is left alone.
+It sets `UNITARES_AUTO_ONBOARD=anchored`, which a bridge that sets the
+variables itself can set too. The hooks then ask only in the process that owns
+the anchor, whatever kind of server is configured, and a CLI the agent starts
+is left unbound. It replaces a value the launcher inherited. The hooks must be
+from a plugin version that knows `anchored`; an older one reads any word it
+does not know as `on`.
 
-`--bind` replaces a value the launcher inherited, including `on`, so that
-what applies to the conversation does not also apply to its children. The
-hooks must be from a plugin version that knows `anchored`; an older one reads
-any word it does not know as `on`.
-
-Do not use `UNITARES_AUTO_ONBOARD=on` for this. It applies to every process
-that inherits it, so each CLI the agent starts would get an identity of its
-own, with no link to the conversation.
-
-A bind made by the hooks is recorded as made by the harness
-(`onboard_origin` is `orchestrated_resume`), not as the agent's own claim. It
-needs check-ins enabled and a session id from the host, and
-`UNITARES_DISABLE_AUTO_ONBOARD=1` still turns it off. See the
-[configuration reference](./configuration.md).
+Without `--bind`, a CLI the agent starts is asked for too, under the same
+default, and gets an identity of its own. It needs check-ins enabled and a
+session id from the host, and `UNITARES_DISABLE_AUTO_ONBOARD=1` turns all of it
+off. See the [configuration reference](./configuration.md).
 
 ### When nothing binds it
 
@@ -95,6 +98,7 @@ is a line in the check-in log (`~/.unitares/checkins.log`,
 | `anchor_minted` | The hooks bound the anchor and the server created a new identity. Expected on a conversation's first turn. |
 | `anchor_bound` | The session holds an identity, and the report cannot say more: the server did not say whether it was new, or something else bound the session while the hooks were trying. |
 | `anchor_bind_fail` | The hooks tried to bind the anchor, could not, and nothing else bound the session. The turn has no identity. |
+| `anchor_declined` | The server creates identities only for agents that claim one, and this conversation has none yet. Also written to standard error. |
 | `anchor_unbound` | The turn ended with nothing bound and no bind attempted. |
 
 Read the log, not only standard error: a host may discard what a Stop hook
@@ -181,7 +185,10 @@ running inside the parent's own CLI process, and the hooks do not cache an
 identity created with it.
 
 Without the `env` line above, the inherited anchor and the inherited lineage
-variables are both dropped, so the spawner's declaration is lost. The child's
+variables are both dropped, so the spawner's declaration is lost. If the hooks
+then bind an identity for the child, they declare the anchor it inherited as
+`spawned_under`: where the process ran. The server stores that as context. It
+is not lineage, and it never becomes the child's parent. The child's
 session-start hook may still suggest a parent from identities cached in the
 same workspace; that is a guess from local history, not the spawner's word.
 
@@ -211,9 +218,8 @@ python3 scripts/dev/strict_thread_anchor_contract.py --live \
 
 - It does not share memory or context between turns. That is the CLI's own
   resume feature. This only makes the governance record continuous.
-- The launcher itself never onboards or checks in. Without `--bind` it leaves
-  `UNITARES_AUTO_ONBOARD` as the caller set it, so whatever that says still
-  applies.
+- The launcher itself never onboards or checks in. The hooks do, as described
+  under [what binds the identity](#what-binds-the-identity).
 - It does not cover a CLI with no plugin hooks. For those, see the
   [sidecar and `u-run`](./adapters.md#sidecar).
 - It does not make two conversations one identity, or carry an identity from

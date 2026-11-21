@@ -84,6 +84,13 @@ if { [ -n "${UNITARES_CLIENT_SESSION_ID:-}" ] \
     && [ "$UNITARES_HOOK_HOST_PID" != "${UNITARES_ORCHESTRATED_OWNER_PID:-}" ]; then
     UNITARES_ANCHOR_IGNORED=1
     export UNITARES_ANCHOR_IGNORED
+    # Keep where this process was started as context: the thread anchor it
+    # inherited and does not own. The onboarding helper declares it as
+    # spawned_under. It is not lineage and resumes nothing.
+    if [ -n "${UNITARES_CLIENT_SESSION_ID:-}" ]; then
+        UNITARES_SPAWNED_UNDER="$UNITARES_CLIENT_SESSION_ID"
+        export UNITARES_SPAWNED_UNDER
+    fi
     unset UNITARES_CLIENT_SESSION_ID UNITARES_ORCHESTRATED \
         UNITARES_ORCHESTRATED_OWNER_PID UNITARES_PARENT_AGENT_ID UNITARES_SPAWN_REASON
 fi

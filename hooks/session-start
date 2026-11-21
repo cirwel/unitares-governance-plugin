@@ -684,6 +684,38 @@ fi
 # here is silent: the Stop hook's lazy path stays as the fallback.
 EAGER_BOUND_UUID=""
 EAGER_BOUND_CSID=""
+# Whether a hook should ask the server for an identity, from the one place
+# that decides it (scripts/auto_onboard_decision.py). $1 is 1 for the owner of
+# a thread anchor. Prints `bind` or `skip:<reason>`.
+_auto_onboard_decision() {
+  local explicit=0
+  [[ -n "${UNITARES_SERVER_URL:-}" ]] && explicit=1
+  if [[ ! -f "${PLUGIN_ROOT}/scripts/auto_onboard_decision.py" ]]; then
+    printf 'skip:error'
+    return 0
+  fi
+  python3 "${PLUGIN_ROOT}/scripts/auto_onboard_decision.py" \
+    "--mode=${UNITARES_AUTO_ONBOARD:-}" \
+    "--disable=${UNITARES_DISABLE_AUTO_ONBOARD:-}" \
+    "--checkins=${UNITARES_CHECKINS:-on}" \
+    "--owns-anchor=${1:-0}" \
+    "--server-url=${SERVER_URL}" \
+    "--url-explicit=${explicit}" 2>/dev/null || printf 'skip:error'
+}
+# What the server said about identities a harness asks for (GET /health,
+# onboarding.harness): `welcome`, `agent_only`, or empty when it did not say.
+# A description only; the server enforces it when asked.
+_server_harness_policy() {
+  [[ -n "${HEALTH_STATUS:-}" ]] || return 0
+  printf '%s' "${HEALTH_STATUS}" | python3 -c '
+import json, sys
+try:
+    value = json.load(sys.stdin).get("onboarding", {}).get("harness")
+except Exception:
+    value = None
+print(value if value in ("welcome", "agent_only") else "", end="")
+' 2>/dev/null || true
+}
 _eager_truthy() {
   case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
     on|1|true|yes) return 0 ;;
@@ -765,9 +797,7 @@ elif [[ -n "${HEALTH_STATUS}" \
       && -z "${ENV_PARENT_UUID}" \
       && -n "${HOST_SESSION_ID}" \
       && ( "${EAGER_SOURCE}" == "startup" || "${EAGER_SOURCE}" == "clear" || "${EAGER_SOURCE}" == "fork" ) \
-      && "$(printf '%s' "${UNITARES_CHECKINS:-on}" | tr '[:upper:]' '[:lower:]')" != "off" ]] \
-   && ! _eager_truthy "${UNITARES_DISABLE_AUTO_ONBOARD:-0}" \
-   && _eager_truthy "${UNITARES_AUTO_ONBOARD:-off}" \
+      && "$(_auto_onboard_decision 0)" == "bind" ]] \
    && _eager_truthy "${UNITARES_EAGER_BIND:-on}" \
    && [[ -f "${PLUGIN_ROOT}/scripts/onboard_helper.py" ]]; then
   EAGER_WORKSPACE_DIR="${PWD}"
@@ -827,49 +857,55 @@ PY
   printf 'export UNITARES_SESSION_CACHE=%q\n' "${SESSION_CACHE_POINTER}" >> "${CLAUDE_ENV_FILE}" 2>/dev/null || true
 fi
 
-# Lazy onboarding is opt-in (config/defaults.env). Describe what the Stop hook
-# will actually do so the agent is not told an identity will appear when it
-# will not.
-case "$(printf '%s' "${UNITARES_AUTO_ONBOARD:-off}" | tr '[:upper:]' '[:lower:]')" in
-  on|1|true|yes)
-    if [[ "${UNITARES_DISABLE_AUTO_ONBOARD:-0}" == "1" ]]; then
-      AUTO_ONBOARD_NOTE="If you do not bind manually, this session is recorded identity-free."
-      AUTO_ONBOARD_NUDGE="no identity is bound by turn stop, the session is recorded identity-free."
+# Say what the hooks will actually do, so the agent is not told an identity
+# will appear when it will not. The decision is the Stop hook's own
+# (scripts/auto_onboard_decision.py), and the server may still decline.
+SERVER_HARNESS_POLICY="$(_server_harness_policy)"
+AUTO_ONBOARD_DECISION="$(_auto_onboard_decision 0)"
+case "${AUTO_ONBOARD_DECISION}" in
+  bind)
+    if [[ "${SERVER_HARNESS_POLICY}" == "agent_only" ]]; then
+      AUTO_ONBOARD_NOTE="If you do not bind manually, this session is recorded identity-free: this server creates identities only for agents that claim one."
+      AUTO_ONBOARD_NUDGE="no identity is bound by turn stop, the session is recorded identity-free: this server creates identities only for agents that claim one."
     else
       AUTO_ONBOARD_NOTE="If you do not bind manually, the Stop hook will lazily create a slot-scoped identity before it emits the turn summary."
       AUTO_ONBOARD_NUDGE="the Stop hook will lazily create a slot-scoped governance identity before emitting its substrate summary."
     fi ;;
-  anchored)
-    # Honored only for the owner of an orchestrated thread anchor, which gets
-    # its own wording below; for every other session it means off.
+  skip:disabled|skip:checkins_off|skip:error)
+    AUTO_ONBOARD_NOTE="If you do not bind manually, this session is recorded identity-free."
+    AUTO_ONBOARD_NUDGE="no identity is bound by turn stop, the session is recorded identity-free." ;;
+  skip:not_anchor_owner)
     AUTO_ONBOARD_NOTE="If you do not bind manually, this session is recorded identity-free (UNITARES_AUTO_ONBOARD is anchored, and this session owns no thread anchor)."
     AUTO_ONBOARD_NUDGE="no identity is bound by turn stop, the session is recorded identity-free (UNITARES_AUTO_ONBOARD is anchored, and this session owns no thread anchor)." ;;
+  skip:untrusted_endpoint)
+    AUTO_ONBOARD_NOTE="If you do not bind manually, this session is recorded identity-free (the hooks do not ask a server that is neither on this machine nor reached over HTTPS; UNITARES_AUTO_ONBOARD=on overrides that)."
+    AUTO_ONBOARD_NUDGE="no identity is bound by turn stop, the session is recorded identity-free (the hooks do not ask a server that is neither on this machine nor reached over HTTPS; UNITARES_AUTO_ONBOARD=on overrides that)." ;;
   *)
     AUTO_ONBOARD_NOTE="If you do not bind manually, this session is recorded identity-free (UNITARES_AUTO_ONBOARD is off)."
     AUTO_ONBOARD_NUDGE="no identity is bound by turn stop, the session is recorded identity-free (UNITARES_AUTO_ONBOARD is off)." ;;
 esac
-# The same for an anchored conversation. These are the Stop hook's own
-# conditions for binding an anchor nobody bound during the turn
-# (hooks/post-stop): a session slot, check-ins on, auto-onboarding on and not
-# overridden.
-ANCHOR_STOP_WHY="auto-onboarding or check-ins are off"
+# The same for an anchored conversation: whether the Stop hook will bind an
+# anchor nobody bound during the turn. It also needs a session slot.
 ANCHOR_STOP_BINDS=0
-case "$(printf '%s' "${UNITARES_AUTO_ONBOARD:-off}" | tr '[:upper:]' '[:lower:]')" in
-  0|off|false|no) ;;
+case "$(_auto_onboard_decision 1)" in
+  bind)
+    if [[ -n "${HOST_SESSION_ID}" ]]; then
+      ANCHOR_STOP_BINDS=1
+    else
+      ANCHOR_STOP_WHY="the host gave no session id"
+    fi ;;
+  skip:untrusted_endpoint)
+    ANCHOR_STOP_WHY="the server is neither on this machine nor reached over HTTPS" ;;
   *)
-    case "$(printf '%s' "${UNITARES_DISABLE_AUTO_ONBOARD:-0}" | tr '[:upper:]' '[:lower:]')" in
-      1|true|on) ;;
-      *)
-        if [[ "$(printf '%s' "${UNITARES_CHECKINS:-on}" | tr '[:upper:]' '[:lower:]')" != "off" ]]; then
-          if [[ -n "${HOST_SESSION_ID}" ]]; then
-            ANCHOR_STOP_BINDS=1
-          else
-            ANCHOR_STOP_WHY="the host gave no session id"
-          fi
-        fi ;;
-    esac ;;
+    ANCHOR_STOP_WHY="auto-onboarding or check-ins are off" ;;
 esac
-if [[ "${ANCHOR_STOP_BINDS}" == "1" ]]; then
+if [[ "${ANCHOR_STOP_BINDS}" == "1" && "${SERVER_HARNESS_POLICY}" == "agent_only" ]]; then
+  # The Stop hook will ask, and this server answers a harness only when the
+  # conversation already has an identity to resume.
+  ANCHOR_STOP_NOTE="This server creates identities only for agents that claim one. If this
+conversation has no identity yet, call \`start_session()\` with no arguments to
+bind it; once it has one, the hooks keep it across turns."
+elif [[ "${ANCHOR_STOP_BINDS}" == "1" ]]; then
   ANCHOR_STOP_NOTE="If no tool needs identity yet, the Stop hook binds this conversation's anchor
 after the turn."
 else

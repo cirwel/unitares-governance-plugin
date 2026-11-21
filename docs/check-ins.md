@@ -151,8 +151,8 @@ Statuses: `sent` (accepted by governance), `fail` (POST failed — see `err=...`
 `skip_kill_switch` (suppressed by `UNITARES_CHECKINS=off`), and `error`
 (client-side exception; caller passed garbage values). Lines with
 `event=anchor_bind` say what the Stop hook did with an orchestrated thread
-anchor: `anchor_resumed`, `anchor_minted`, `anchor_bound`, `anchor_bind_fail`
-or `anchor_unbound` ([orchestrators](./orchestrators.md#when-nothing-binds-it)).
+anchor: `anchor_resumed`, `anchor_minted`, `anchor_bound`, `anchor_bind_fail`,
+`anchor_declined` or `anchor_unbound` ([orchestrators](./orchestrators.md#when-nothing-binds-it)).
 
 ## Protective audit
 
