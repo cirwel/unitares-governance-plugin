@@ -293,16 +293,23 @@ def _current_effective_uid() -> int | None:
     return geteuid() if callable(geteuid) else None
 
 
-def _validate_safe_ancestry(existing_ancestor: Path, expected_uid: int | None) -> None:
-    """Verify every existing ancestor directory up to root is safe against hijacking.
+def _validate_safe_ancestry(existing_ancestor: Path, expected_uid: int | None) -> Path:
+    """Verify both unresolved and resolved ancestor chains are safe, returning resolved path.
 
-    Allows root- or self-owned directories and sticky temp directories (e.g.
-    ``/tmp`` ``0o1777``), while refusing any ancestor writable by group/other
-    without the sticky bit or owned by another non-root user.
+    Walks the unresolved ancestor chain first so an attacker-writable directory
+    or non-root user symlink sitting before an intermediate symlink cannot be
+    bypassed by ``.resolve()``. Only root-owned system symlinks (e.g. macOS
+    ``/var -> private/var``, ``/tmp -> private/tmp``) are tolerated in the
+    unresolved chain; every non-root symlink is refused immediately. Then
+    validates every resolved ancestor up to ``/`` for safe ownership (``0`` or
+    ``expected_uid``) and no group/world write bits without the sticky bit.
     """
-    resolved = existing_ancestor.resolve()
-    for ancestor in (resolved, *resolved.parents):
+    for ancestor in (existing_ancestor, *existing_ancestor.parents):
         info = os.lstat(ancestor)
+        if stat.S_ISLNK(info.st_mode):
+            if os.name != "nt" and info.st_uid == 0:
+                continue
+            raise ValueError(f"Unix socket ancestor must not be a symlink: {ancestor}")
         if not stat.S_ISDIR(info.st_mode):
             raise ValueError(f"Unix socket ancestor is not a directory: {ancestor}")
         if os.name != "nt":
@@ -316,15 +323,34 @@ def _validate_safe_ancestry(existing_ancestor: Path, expected_uid: int | None) -
                     f"Unix socket ancestor directory is owned by another user: {ancestor}"
                 )
 
+    resolved = existing_ancestor.resolve()
+    for ancestor in (resolved, *resolved.parents):
+        info = os.lstat(ancestor)
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            raise ValueError(f"Unix socket ancestor is not a real directory: {ancestor}")
+        if os.name != "nt":
+            if (info.st_mode & 0o022) and not (info.st_mode & stat.S_ISVTX):
+                raise PermissionError(
+                    "Unix socket ancestor directory is group- or world-writable "
+                    f"without sticky bit: {ancestor}"
+                )
+            if expected_uid is not None and info.st_uid not in (0, expected_uid):
+                raise PermissionError(
+                    f"Unix socket ancestor directory is owned by another user: {ancestor}"
+                )
+    return resolved
+
 
 def _prepare_unix_socket_parent(raw_path: str) -> Path:
     """Validate and prepare the owner-only parent directory for a Unix socket.
 
-    Requires an absolute path without ``..`` segments and safe ancestor
-    directories. Missing parent directories are created with ``0o700``
-    permissions; pre-existing parent directories are never silently ``chmod``ed
-    and must already be real non-symlink directories owned by the current
-    effective UID with no group or world permission bits.
+    Requires an absolute path without ``..`` segments and safe unresolved +
+    resolved ancestor chains. Missing parent directories are created with
+    ``0o700`` permissions under the resolved safe ancestor; pre-existing parent
+    directories are never silently ``chmod``ed and must already be real
+    non-symlink directories owned by the current effective UID with no group
+    or world permission bits. Returns ``resolved_parent / socket_name`` so
+    locking, binding, lstat, and unlink all operate on one canonical path.
     """
     if not hasattr(socket, "AF_UNIX") or not hasattr(socketserver, "UnixStreamServer"):
         raise OSError("Unix domain sockets are not supported on this platform")
@@ -343,51 +369,57 @@ def _prepare_unix_socket_parent(raw_path: str) -> Path:
     try:
         parent_info = os.lstat(parent)
     except FileNotFoundError:
-        missing: list[Path] = []
+        missing_names: list[str] = []
         cursor = parent
         while True:
             try:
                 os.lstat(cursor)
                 break
             except FileNotFoundError:
-                missing.append(cursor)
+                missing_names.append(cursor.name)
                 if cursor.parent == cursor:
                     break
                 cursor = cursor.parent
-        _validate_safe_ancestry(cursor, expected_uid)
+        resolved_base = _validate_safe_ancestry(cursor, expected_uid)
         open_flags = (
             os.O_RDONLY
             | getattr(os, "O_NOFOLLOW", 0)
             | getattr(os, "O_DIRECTORY", 0)
         )
-        for directory in reversed(missing):
-            os.mkdir(directory, 0o700)
+        current = resolved_base
+        for name in reversed(missing_names):
+            current = current / name
+            os.mkdir(current, 0o700)
             if os.name != "nt":
-                fd = os.open(directory, open_flags)
+                fd = os.open(current, open_flags)
                 try:
                     os.fchmod(fd, 0o700)
                 finally:
                     os.close(fd)
-        parent_info = os.lstat(parent)
+        resolved_parent = current
+        parent_info = os.lstat(resolved_parent)
     else:
         if stat.S_ISLNK(parent_info.st_mode):
             raise ValueError(f"Unix socket parent directory must not be a symlink: {parent}")
         if not stat.S_ISDIR(parent_info.st_mode):
             raise ValueError(f"Unix socket parent is not a directory: {parent}")
-        _validate_safe_ancestry(parent, expected_uid)
+        resolved_parent = _validate_safe_ancestry(parent, expected_uid)
+        parent_info = os.lstat(resolved_parent)
 
     if stat.S_ISLNK(parent_info.st_mode):
-        raise ValueError(f"Unix socket parent directory must not be a symlink: {parent}")
+        raise ValueError(f"Unix socket parent directory must not be a symlink: {resolved_parent}")
     if not stat.S_ISDIR(parent_info.st_mode):
-        raise ValueError(f"Unix socket parent is not a directory: {parent}")
+        raise ValueError(f"Unix socket parent is not a directory: {resolved_parent}")
     if os.name != "nt" and expected_uid is not None and parent_info.st_uid != expected_uid:
-        raise PermissionError(f"Unix socket parent directory must be owned by current user: {parent}")
+        raise PermissionError(
+            f"Unix socket parent directory must be owned by current user: {resolved_parent}"
+        )
     if os.name != "nt" and (parent_info.st_mode & 0o077):
         raise PermissionError(
             "Unix socket parent directory must already have 0700 (owner-only) "
-            f"permissions, got {oct(stat.S_IMODE(parent_info.st_mode))}: {parent}"
+            f"permissions, got {oct(stat.S_IMODE(parent_info.st_mode))}: {resolved_parent}"
         )
-    return sock_path
+    return resolved_parent / sock_path.name
 
 
 def _acquire_unix_socket_lock(sock_path: Path) -> tuple[int, Path, tuple[int, int]]:

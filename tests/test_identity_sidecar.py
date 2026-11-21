@@ -2755,7 +2755,7 @@ def test_unix_socket_sidecar_enforces_permissions_serves_requests_and_unlinks(
             )
             health = client.health()
             assert health["success"] is True
-            assert health["unix_socket"] == str(sock_path)
+            assert Path(health["unix_socket"]) == sock_dir.resolve() / sock_path.name
 
             reply = client.call_tool("knowledge", {"action": "search", "query": "uds"})
             assert reply["result"]["success"] is True
@@ -2869,7 +2869,7 @@ def test_unix_socket_cli_unlinks_socket_on_sigterm(
             startup_line = proc.stdout.readline()
             startup = json.loads(startup_line)
             assert startup["success"] is True
-            assert startup["unix_socket"] == str(sock_path)
+            assert Path(startup["unix_socket"]) == sock_path.parent.resolve() / sock_path.name
             assert sock_path.exists()
             proc.send_signal(signal.SIGTERM)
             proc.wait(timeout=5)
@@ -2922,8 +2922,30 @@ def test_unix_socket_refuses_relative_path_and_permissive_existing_parent_withou
                 identity_sidecar.BoundedThreadingUnixHTTPServer(
                     private_child / "sc.sock", make_handler(sidecar)
                 )
+            # An intermediate user symlink under a writable ancestor is also refused
+            # (unresolved chain check catches it before .resolve() can bypass it).
+            safe_target = Path(tmpdir) / "safe"
+            safe_target.mkdir(mode=0o700)
+            os.chmod(safe_target, 0o700)
+            mid_link = writable_ancestor / "jump"
+            mid_link.symlink_to(safe_target)
+            with pytest.raises((ValueError, PermissionError)):
+                identity_sidecar.BoundedThreadingUnixHTTPServer(
+                    mid_link / "nested" / "sc.sock", make_handler(sidecar)
+                )
         finally:
             os.chmod(writable_ancestor, 0o700)
+
+        # Even inside a 0700 parent, an intermediate non-root symlink ancestor is refused.
+        real_root = Path(tmpdir) / "realroot"
+        real_root.mkdir(mode=0o700)
+        os.chmod(real_root, 0o700)
+        user_symlink = Path(tmpdir) / "userlink"
+        user_symlink.symlink_to(real_root)
+        with pytest.raises(ValueError, match="symlink"):
+            identity_sidecar.BoundedThreadingUnixHTTPServer(
+                user_symlink / "leaf" / "sc.sock", make_handler(sidecar)
+            )
 
 
 def test_unix_socket_flock_serializes_concurrent_stale_startup_race(
@@ -2996,7 +3018,6 @@ def test_unix_socket_cleans_stale_socket_and_enforces_worker_cap_503(
     fake_server: str,
 ) -> None:
     import http.client
-    import os
     import tempfile
 
     if not hasattr(socket, "AF_UNIX"):
