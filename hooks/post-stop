@@ -162,14 +162,19 @@ if [[ "${ANCHOR_VALUE}" == *[abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXY
   ANCHOR_RESUME_ENABLED=1
 fi
 
-# SessionStart mode (--session-start) is strictly for pre-binding orchestrated
-# thread anchors (e.g. dispatch_beam Turn 1) so GitHub writes during Turn 1
-# carry the thread's UNITARES agent UUID before the first Stop. Interactive
-# sessions drain stdin and exit immediately in pure bash without spawning
-# Python or touching the network, preserving explicit Turn-1 start_session().
+# SessionStart mode (--session-start) pre-binds orchestrated thread anchors
+# (e.g. dispatch_beam Turn 1) so GitHub writes during Turn 1 carry the thread's
+# UNITARES agent UUID before the first Stop, and surfaces any already-bound
+# non-idle Antigravity slot binding via Antigravity's SessionStart injectSteps
+# contract so the model reuses client_session_id instead of minting a duplicate.
+# Fresh interactive sessions with no existing slot cache drain stdin and exit
+# immediately in pure bash without spawning Python or touching the network,
+# preserving explicit Turn-1 start_session().
 if [[ "${HOOK_MODE}" == "session_start" && "${ANCHOR_RESUME_ENABLED}" != "1" ]]; then
-  cat >/dev/null 2>&1 || true
-  exit 0
+  if [[ "${HOOK_HOST}" != "agy" ]] || ! compgen -G "${HOME}/.unitares/session-*.json" >/dev/null; then
+    cat >/dev/null 2>&1 || true
+    exit 0
+  fi
 fi
 
 # Read stdin once for host normalization and session-cache lookup.
@@ -298,6 +303,7 @@ if [[ "${CHECKINS_MODE}" == "off" ]]; then
   ANCHOR_UNBOUND_WHY="check-ins are off"
 fi
 if [[ -z "${CSID:-}" && -n "${RAW_SLOT:-}" \
+      && ( "${HOOK_MODE}" != "session_start" || "${ANCHOR_RESUME_ENABLED}" == "1" ) \
       && "${CHECKINS_MODE}" != "off" \
       && "${AUTO_ONBOARD_MODE}" != "0" \
       && "${AUTO_ONBOARD_MODE}" != "off" \
@@ -410,6 +416,15 @@ if [[ "${ANCHOR_RESUME_ENABLED:-0}" == "1" && -n "${RAW_SLOT:-}" && -f "${ANCHOR
 fi
 
 if [[ "${HOOK_MODE}" == "session_start" ]]; then
+  _AGY_UUID_RE='^[0-9a-fA-F-]{36}$'
+  _AGY_CSID_RE='^[A-Za-z0-9:/._-]{1,200}$'
+  if [[ "${HOOK_HOST}" == "agy" \
+        && "${UUID:-}" =~ $_AGY_UUID_RE \
+        && "${CSID:-}" =~ $_AGY_CSID_RE ]]; then
+    trap - EXIT
+    printf '{"injectSteps":[{"systemMessage":{"systemMessage":"UNITARES governance session is already bound for this slot (uuid=%s, client_session_id=%s). Reuse client_session_id=%s on governance calls and do NOT call start_session(force_new=true) unless explicitly switching lineage with parent_agent_id and spawn_reason."}}]}\n' \
+      "${UUID}" "${CSID}" "${CSID}"
+  fi
   exit 0
 fi
 

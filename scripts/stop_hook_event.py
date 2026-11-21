@@ -35,6 +35,7 @@ _UUID_RE = re.compile(
 )
 _AGY_ONBOARD_TOOLS = frozenset({"onboard", "start_session", "identity", "bind_session"})
 _AGY_GOVERNANCE_SERVERS = frozenset({"unitares-governance", "unitares_governance", "governance", "unitares"})
+_AGY_DELIBERATE_SWITCH_REASONS = frozenset({"explicit", "compaction", "dispatch", "dialectic_reviewer"})
 _SPILLED_FILE_RE = re.compile(r"file://(/[^\s\"'<>]+)")
 _GIT_OVERRIDE_ENV_VARS = frozenset({
     "GIT_DIR",
@@ -493,12 +494,12 @@ def _unwrap_agy_arg_string(value: Any) -> Any:
     return value
 
 
-def _agy_driver_onboard_call_offsets(entry: Mapping[str, Any]) -> set[int]:
-    """Return 0-based tool_calls offsets in a PLANNER_RESPONSE that invoke driver onboarding."""
+def _agy_driver_onboard_call_meta(entry: Mapping[str, Any]) -> dict[int, dict[str, str]]:
+    """Return 0-based tool_calls offsets mapped to call metadata for driver onboarding."""
     raw_calls = entry.get("tool_calls")
     if not isinstance(raw_calls, list):
-        return set()
-    offsets: set[int] = set()
+        return {}
+    matched: dict[int, dict[str, str]] = {}
     for idx, call in enumerate(raw_calls):
         if not isinstance(call, dict):
             continue
@@ -533,7 +534,7 @@ def _agy_driver_onboard_call_offsets(entry: Mapping[str, Any]) -> set[int]:
             for prefix in ("mcp__", "mcp_"):
                 if lowered.startswith(prefix):
                     rest = lowered[len(prefix):]
-                    for server in _AGY_GOVERNANCE_SERVERS:
+                    for server in sorted(_AGY_GOVERNANCE_SERVERS, key=len, reverse=True):
                         for sep in ("__", "_"):
                             tag = f"{server}{sep}"
                             if rest.startswith(tag) and rest[len(tag):] in _AGY_ONBOARD_TOOLS:
@@ -541,6 +542,9 @@ def _agy_driver_onboard_call_offsets(entry: Mapping[str, Any]) -> set[int]:
                                 tool_args = {
                                     k: _unwrap_agy_arg_string(v) for k, v in args.items()
                                 }
+                                break
+                        if matched_tool:
+                            break
         if not matched_tool:
             continue
         if matched_tool == "identity" and not (
@@ -552,8 +556,20 @@ def _agy_driver_onboard_call_offsets(entry: Mapping[str, Any]) -> set[int]:
         spawn_reason = str(tool_args.get("spawn_reason") or "").strip().casefold()
         if spawn_reason == "subagent":
             continue
-        offsets.add(idx)
-    return offsets
+        parent_agent_id = str(tool_args.get("parent_agent_id") or "").strip()
+        call_id = str(call.get("id") or "").strip()
+        matched[idx] = {
+            "tool": matched_tool,
+            "parent_agent_id": parent_agent_id,
+            "spawn_reason": spawn_reason,
+            "call_id": call_id,
+        }
+    return matched
+
+
+def _agy_driver_onboard_call_offsets(entry: Mapping[str, Any]) -> set[int]:
+    """Return 0-based tool_calls offsets in a PLANNER_RESPONSE that invoke driver onboarding."""
+    return set(_agy_driver_onboard_call_meta(entry))
 
 
 def _parse_onboard_json_lines(text: str) -> dict[str, Any] | None:
@@ -596,6 +612,30 @@ def _parse_onboard_json_lines(text: str) -> dict[str, Any] | None:
             if isinstance(canonical.get("state_summary"), dict)
             else {}
         )
+        is_new_val = resp.get("is_new") if "is_new" in resp else canonical.get("is_new")
+        lineage_state = str(
+            resp.get("lineage_state")
+            or canonical.get("lineage_state")
+            or summary.get("lineage_state")
+            or canon_summary.get("lineage_state")
+            or resp.get("lineage_disposition")
+            or canonical.get("lineage_disposition")
+            or ""
+        ).strip().lower()
+        lineage_rejected = (
+            lineage_state.startswith("rejected")
+            or lineage_state in ("denied", "invalid", "failed", "error")
+            or bool(resp.get("lineage_rejected") or canonical.get("lineage_rejected"))
+            or bool(
+                str(
+                    resp.get("error")
+                    or canonical.get("error")
+                    or resp.get("lineage_error")
+                    or canonical.get("lineage_error")
+                    or ""
+                ).strip()
+            )
+        )
         return {
             "uuid": uuid_val,
             "agent_id": str(resp.get("agent_id") or canonical.get("agent_id") or "").strip(),
@@ -620,6 +660,9 @@ def _parse_onboard_json_lines(text: str) -> dict[str, Any] | None:
                 or resp.get("onboard_origin_basis")
                 or ""
             ).strip(),
+            "_is_new": is_new_val,
+            "_lineage_state": lineage_state,
+            "_lineage_rejected": lineage_rejected,
         }
     return None
 
@@ -659,22 +702,36 @@ def _extract_onboard_response_from_generic(
     return None
 
 
-def recover_agy_identity_from_transcript(
-    raw: str | Mapping[str, Any],
-    *,
-    workspace: str | Path,
-    slot: str,
-) -> bool:
-    """Recover an agent-minted start_session/onboard binding from the current agy turn."""
+def _agy_turn_mint_marker_path(slot: str) -> Path:
+    safe = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in slot)[:64]
+    return Path.home() / ".unitares" / f".agy-turn-mint-{safe}.json"
+
+
+def clear_agy_turn_mint_marker(slot: str) -> None:
+    """Remove any in-turn pending-mint marker for ``slot`` once a turn ends."""
     slot_clean = (slot or "").strip()
     if not slot_clean:
-        return False
-    payload = _decode_payload(raw)
-    session_id = str(payload.get("conversationId") or payload.get("session_id") or "").strip()
+        return
+    try:
+        _agy_turn_mint_marker_path(slot_clean).unlink(missing_ok=True)
+    except OSError:
+        pass
 
+
+def inspect_current_turn_agy_onboards(
+    payload: Mapping[str, Any],
+) -> tuple[
+    list[tuple[dict[str, Any], dict[str, str]]],
+    list[dict[str, Any]],
+    int | None,
+]:
+    """Return ``(succeeded_candidates, failed_attempts, turn_boundary_step)`` for the current agy turn."""
+    session_id = str(payload.get("conversationId") or payload.get("session_id") or "").strip()
     window = _AGY_TRANSCRIPT_TAIL_BYTES
     turn_entries_reversed: list[dict[str, Any]] = []
     transcript_path_used = ""
+    turn_boundary_step: int | None = None
+
     for path in _agy_transcript_candidates(payload, session_id):
         fd = _open_regular_transcript_fd(path)
         if fd is None:
@@ -704,33 +761,69 @@ def recover_agy_identity_from_transcript(
             if not isinstance(item, dict):
                 continue
             if item.get("type") in ("USER_INPUT", "SYSTEM_MESSAGE"):
+                raw_step = item.get("step_index")
+                if isinstance(raw_step, int) and not isinstance(raw_step, bool):
+                    turn_boundary_step = raw_step
                 break
             turn_entries_reversed.append(item)
         transcript_path_used = path
         break
 
     if not turn_entries_reversed:
-        return False
+        return [], [], turn_boundary_step
 
-    recovered: dict[str, Any] | None = None
-    pending_offsets: set[int] = set()
+    candidates: list[tuple[dict[str, Any], dict[str, str]]] = []
+    failed_attempts: list[dict[str, Any]] = []
+    pending_meta: dict[int, dict[str, str]] = {}
     generic_idx = 0
     for entry in reversed(turn_entries_reversed):
         step_type = entry.get("type")
         if step_type == "PLANNER_RESPONSE":
-            pending_offsets = _agy_driver_onboard_call_offsets(entry)
+            pending_meta = _agy_driver_onboard_call_meta(entry)
             generic_idx = 0
         elif step_type == "GENERIC":
-            if generic_idx in pending_offsets:
+            call_meta = pending_meta.pop(generic_idx, None)
+            if call_meta is not None:
                 candidate = _extract_onboard_response_from_generic(
                     entry, transcript_path_used
                 )
                 if candidate is not None:
-                    recovered = candidate
-                pending_offsets.discard(generic_idx)
+                    candidates.append((candidate, call_meta))
+                else:
+                    failed_attempts.append(
+                        {
+                            "call_id": call_meta.get("call_id", ""),
+                            "tool": call_meta.get("tool", ""),
+                            "step_index": entry.get("step_index"),
+                        }
+                    )
             generic_idx += 1
 
-    if recovered is None:
+    return candidates, failed_attempts, turn_boundary_step
+
+
+def find_current_turn_agy_onboards(
+    payload: Mapping[str, Any],
+) -> tuple[list[tuple[dict[str, Any], dict[str, str]]], int | None]:
+    """Return chronological ``(candidates, turn_boundary_step)`` for the current agy turn."""
+    candidates, _failed, turn_boundary_step = inspect_current_turn_agy_onboards(payload)
+    return candidates, turn_boundary_step
+
+
+def recover_agy_identity_from_transcript(
+    raw: str | Mapping[str, Any],
+    *,
+    workspace: str | Path,
+    slot: str,
+) -> bool:
+    """Recover an agent-minted start_session/onboard binding from the current agy turn."""
+    slot_clean = (slot or "").strip()
+    if not slot_clean:
+        return False
+    clear_agy_turn_mint_marker(slot_clean)
+    payload = _decode_payload(raw)
+    candidates, _turn_boundary_step = find_current_turn_agy_onboards(payload)
+    if not candidates:
         return False
 
     try:
@@ -738,24 +831,89 @@ def recover_agy_identity_from_transcript(
     except ModuleNotFoundError:
         from scripts.onboard_helper import _update_cache_transaction
 
-    new_cache = {
-        **recovered,
-        "continuity_token": "",
-        "prior_process": False,
-        "schema_version": 2,
-        "slot": slot_clean,
-    }
+    chosen: dict[str, Any] | None = None
+    matched_existing = False
+
+    def _is_live_binding_idle(cur_uuid: str, cur_csid: str) -> bool:
+        try:
+            from _session_lookup import resolve_proof_session_file
+            from binding_activity import is_idle
+        except ModuleNotFoundError:
+            from scripts._session_lookup import resolve_proof_session_file
+            from scripts.binding_activity import is_idle
+        try:
+            proof_path = resolve_proof_session_file(slot_clean)
+            if proof_path is not None and is_idle(proof_path, slot_clean, cur_uuid, cur_csid):
+                return True
+        except Exception:
+            return False
+        return False
 
     def _commit_if_eligible(current: dict[str, Any]) -> dict[str, Any] | None:
-        cur_uuid = str(current.get("uuid") or "").strip()
-        cur_csid = str(current.get("client_session_id") or "").strip()
-        if (
-            not cur_uuid
-            or not cur_csid
-            or current.get("prior_process")
-            or (recovered["uuid"], recovered["client_session_id"]) != (cur_uuid, cur_csid)
-        ):
-            return {**current, **new_cache}
+        nonlocal chosen, matched_existing
+        state = dict(current)
+        state_uuid = str(state.get("uuid") or "").strip()
+        state_csid = str(state.get("client_session_id") or "").strip()
+        state_inherited = bool(state.get("prior_process"))
+        if state_uuid and state_csid and not state_inherited:
+            if _is_live_binding_idle(state_uuid, state_csid):
+                state_inherited = True
+
+        mutated = False
+        # Evaluate candidates in chronological order so that on an unbound/idle
+        # slot the FIRST valid mint binds the slot and any subsequent unparented
+        # duplicate in the same turn is rejected by live-slot protection.
+        for candidate, meta in candidates:
+            cand_uuid = str(candidate.get("uuid") or "").strip()
+            cand_csid = str(candidate.get("client_session_id") or "").strip()
+            is_new = candidate.get("_is_new")
+            lineage_rejected = bool(candidate.get("_lineage_rejected"))
+            public_fields = {k: v for k, v in candidate.items() if not k.startswith("_")}
+            entry_cache = {
+                **public_fields,
+                "continuity_token": "",
+                "prior_process": False,
+                "schema_version": 2,
+                "slot": slot_clean,
+            }
+            if not state_uuid or not state_csid or state_inherited:
+                state = {**state, **entry_cache}
+                state_uuid = cand_uuid
+                state_csid = cand_csid
+                state_inherited = False
+                mutated = True
+                continue
+            if cand_uuid == state_uuid:
+                if cand_csid == state_csid:
+                    matched_existing = True
+                    continue
+                if meta.get("tool") in ("identity", "bind_session") or is_new is False:
+                    if state.get("onboard_origin"):
+                        entry_cache["onboard_origin"] = state["onboard_origin"]
+                    if state.get("onboard_origin_basis"):
+                        entry_cache["onboard_origin_basis"] = state["onboard_origin_basis"]
+                state = {**state, **entry_cache}
+                state_csid = cand_csid
+                mutated = True
+                continue
+            # Protect a live, non-idle slot binding against silent overwrites by
+            # unparented duplicate mints, mismatched parent_agent_id, rejected
+            # server lineage dispositions (e.g. rejected_coincidental), or
+            # foreign identity/bind_session resumes (#416).
+            declared_switch = (
+                meta.get("tool") in ("onboard", "start_session")
+                and meta.get("parent_agent_id") == state_uuid
+                and meta.get("spawn_reason") in _AGY_DELIBERATE_SWITCH_REASONS
+                and not lineage_rejected
+            )
+            if declared_switch:
+                state = {**state, **entry_cache}
+                state_uuid = cand_uuid
+                state_csid = cand_csid
+                mutated = True
+        if mutated:
+            chosen = state
+            return state
         return None
 
     _auth, committed = _update_cache_transaction(
@@ -763,22 +921,15 @@ def recover_agy_identity_from_transcript(
         _commit_if_eligible,
         slot_clean,
     )
-    if committed:
+    if committed and chosen is not None:
         try:
             from binding_activity import touch as _touch_binding_activity
         except ModuleNotFoundError:
             from scripts.binding_activity import touch as _touch_binding_activity
         _touch_binding_activity(
-            slot_clean, recovered["uuid"], recovered["client_session_id"]
+            slot_clean, chosen["uuid"], chosen["client_session_id"]
         )
-    return bool(
-        committed
-        or (
-            _auth.get("uuid")
-            and _auth.get("client_session_id")
-            and not _auth.get("prior_process")
-        )
-    )
+    return bool(committed or matched_existing)
 
 
 def normalize_agy(payload: Mapping[str, Any]) -> StopHookEvent:

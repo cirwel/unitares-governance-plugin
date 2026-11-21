@@ -28,12 +28,17 @@ GOVERNANCE_SERVER_ALIASES = frozenset(
 CODEX_GOVERNANCE_SERVER_ALIASES = frozenset(
     {"unitares-governance", "unitares_governance"}
 )
+AGY_GOVERNANCE_SERVER_ALIASES = frozenset(
+    {"unitares-governance", "unitares_governance", "governance", "unitares"}
+)
 
 
 def governance_server_aliases(host: str | None = None) -> frozenset[str]:
     """Return aliases trusted by a host-specific hook boundary."""
     if host == "codex":
         return CODEX_GOVERNANCE_SERVER_ALIASES
+    if host == "agy":
+        return AGY_GOVERNANCE_SERVER_ALIASES
     if host in {None, "claude"}:
         return GOVERNANCE_SERVER_ALIASES
     return frozenset()
