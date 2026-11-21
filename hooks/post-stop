@@ -397,10 +397,14 @@ if [[ "${ANCHOR_RESUME_ENABLED:-0}" == "1" && -n "${RAW_SLOT:-}" && -f "${ANCHOR
     printf '%s' "${ONBOARD_RESULT:-}" | python3 "${ANCHOR_REPORT}" \
       "${ANCHOR_REPORT_ARGS[@]}" >/dev/null || true
   elif [[ "${HOOK_MODE:-}" != "session_start" && -z "${CSID:-}" ]]; then
+    ANCHOR_REPORT_ARGS=("--slot=${RAW_SLOT}")
     if [[ -n "${MARKED_CSID:-}" ]]; then
+      # The slot looked bound, so no bind was attempted, and the activity
+      # check then withdrew that binding. Turning binding on is not the fix.
       ANCHOR_UNBOUND_WHY="the session's cached binding was not usable for this turn"
+      ANCHOR_REPORT_ARGS+=(--withdrawn)
     fi
-    python3 "${ANCHOR_REPORT}" "--slot=${RAW_SLOT}" \
+    python3 "${ANCHOR_REPORT}" "${ANCHOR_REPORT_ARGS[@]}" \
       "--unbound-reason=${ANCHOR_UNBOUND_WHY}" </dev/null >/dev/null || true
   fi
 fi

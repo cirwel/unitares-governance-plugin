@@ -350,3 +350,13 @@ def test_an_idle_binding_the_stop_withdraws_is_reported_unbound(tmp_path):
     result, onboards, anchor_lines = _stop(tmp_path, env={**OWNED, "UNITARES_AUTO_ONBOARD": "off"})
     assert result.returncode == 0
     assert len(anchor_lines) == 1 and "status=anchor_unbound" in anchor_lines[0]
+
+
+def test_a_withdrawn_binding_is_not_answered_with_advice_to_turn_binding_on(tmp_path):
+    result = _report(
+        "--slot=s", "--withdrawn",
+        "--unbound-reason=the session's cached binding was not usable for this turn",
+        log=tmp_path / "checkins.log",
+    )
+    assert "cached binding was not usable" in result.stderr
+    assert "--bind" not in result.stderr and "AUTO_ONBOARD" not in result.stderr

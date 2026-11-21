@@ -96,6 +96,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Say nothing about a failed bind: a later hook retries and reports it.",
     )
     parser.add_argument(
+        "--withdrawn",
+        action="store_true",
+        help="The slot had a binding the Stop hook could not use for this turn.",
+    )
+    parser.add_argument(
         "--unbound-reason",
         default=None,
         help="Report an anchor nothing bound, with why the hooks did not try.",
@@ -127,7 +132,13 @@ def main(argv: list[str] | None = None) -> int:
     try:
         # The anchor itself is not printed: a host may capture this stream,
         # and the value is what a later turn presents to resume the identity.
-        if status == "anchor_unbound":
+        if status == "anchor_unbound" and args.withdrawn:
+            print(
+                "[UNITARES] this turn ended with no identity for its thread "
+                f"anchor: {error}. The next turn binds again.",
+                file=sys.stderr,
+            )
+        elif status == "anchor_unbound":
             print(
                 "[UNITARES] this turn ended with no identity for its thread "
                 f"anchor ({error}): {UNBOUND_HELP}",
