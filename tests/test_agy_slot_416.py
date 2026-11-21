@@ -1,0 +1,952 @@
+"""Regression tests for cirwel/unitares-governance-plugin#416 (Antigravity slot binding).
+
+Covers:
+1. hooks/post-stop --host agy --session-start emitting Antigravity injectSteps
+   on resolved or newly minted valid bindings, and {} otherwise / in Stop mode.
+2. scripts/governance_call_inject.py + hooks/pre-governance-call --host agy
+   for Antigravity PreToolUse (call_mcp_tool dict & JSON-string Arguments,
+   direct MCP tool names, bound-slot duplicate/bare mint deny, overwrite
+   client_session_id injection, fast allow for non-unitares tools/servers).
+3. recover_agy_identity_from_transcript protection against the dbd17d25 flip
+   (unparented force_new, mismatched parent_agent_id, foreign identity, plus
+   legitimate declared lineage switch and >24h idle-binding replacement).
+4. hooks/agy-hooks.json manifest schema and commands.
+5. scripts/dev/review.sh advisory CLI behavior.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+import threading
+import time
+from pathlib import Path
+
+import pytest
+
+PLUGIN_ROOT = Path(__file__).parent.parent
+sys.path.insert(0, str(PLUGIN_ROOT / "scripts"))
+
+from _session_lookup import _slot_filename, load_usable_session_for_hook  # noqa: E402
+from binding_activity import touch as touch_binding_activity  # noqa: E402
+from scripts import governance_call_inject, stop_hook_event  # noqa: E402
+from tests.test_post_stop_hook import LazyOnboardHandler  # noqa: E402
+from tests.test_session_start_checkin import _ReusableTCPServer  # noqa: E402
+
+
+UUID_A = "d02948ef-1111-4222-8333-444444444444"
+CSID_A = "agent-d02948ef-111-backstop"
+UUID_B = "5d79c3c6-f417-4840-a426-259a99b60497"
+CSID_B = "agent-5d79c3c6-f41-fe77lvjluv7f5xtlx2xn"
+UUID_C = "5fc42e7e-2222-4333-8444-555555555555"
+CSID_C = "agent-5fc42e7e-222-backstop2"
+UUID_D = "9ca4805d-e873-4055-8d6e-75349afe15f2"
+CSID_D = "agent-9ca4805d-e87-emxjfz5f7vhfrwca6xux"
+
+
+def _write_slot_cache(
+    home_dir: Path,
+    slot: str,
+    *,
+    uuid: str = UUID_A,
+    csid: str = CSID_A,
+    onboard_origin: str = "harness_backstop",
+    prior_process: bool = False,
+    mtime: float | None = None,
+) -> Path:
+    cache_dir = home_dir / ".unitares"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache = cache_dir / _slot_filename(slot)
+    cache.write_text(
+        json.dumps(
+            {
+                "uuid": uuid,
+                "client_session_id": csid,
+                "onboard_origin": onboard_origin,
+                "prior_process": prior_process,
+                "schema_version": 2,
+                "slot": slot,
+            }
+        ),
+        encoding="utf-8",
+    )
+    cache.chmod(0o600)
+    if mtime is not None:
+        os.utime(cache, (mtime, mtime))
+    return cache
+
+
+def _write_transcript(path: Path, entries: list[dict]) -> str:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "\n".join(json.dumps(entry) for entry in entries) + "\n",
+        encoding="utf-8",
+    )
+    return str(path)
+
+
+def _agy_pre_tool_payload(
+    conv_id: str,
+    *,
+    tool_name: str = "call_mcp_tool",
+    args: dict | None = None,
+    workspace: str = "/tmp/ws",
+) -> dict:
+    return {
+        "conversationId": conv_id,
+        "workspacePaths": [workspace],
+        "hookEventName": "PreToolUse",
+        "stepIdx": 5,
+        "toolCall": {
+            "id": "toolu_agy_01",
+            "name": tool_name,
+            "args": {} if args is None else args,
+        },
+    }
+
+
+def _run_inject_agy(
+    payload: dict | str,
+    *,
+    home_dir: Path,
+    extra_env: dict[str, str] | None = None,
+    via_hook: bool = False,
+) -> dict:
+    raw = payload if isinstance(payload, str) else json.dumps(payload)
+    env = {
+        "PATH": "/usr/bin:/bin:/usr/local/bin",
+        "HOME": str(home_dir),
+        "PLUGIN_ROOT": str(PLUGIN_ROOT),
+        **(extra_env or {}),
+    }
+    cmd = (
+        [str(PLUGIN_ROOT / "hooks" / "pre-governance-call"), "--host", "agy"]
+        if via_hook
+        else [
+            sys.executable,
+            str(PLUGIN_ROOT / "scripts" / "governance_call_inject.py"),
+            "--host",
+            "agy",
+        ]
+    )
+    res = subprocess.run(
+        cmd,
+        input=raw,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+    assert res.returncode == 0, f"stderr={res.stderr!r}"
+    return json.loads(res.stdout)
+
+
+# ---------------------------------------------------------------------------
+# 1. hooks/post-stop --host agy --session-start
+# ---------------------------------------------------------------------------
+
+
+def test_agy_session_start_emits_inject_steps_on_resolved_and_minted_bindings(tmp_path):
+    LazyOnboardHandler.calls = []
+    srv = _ReusableTCPServer(("127.0.0.1", 0), LazyOnboardHandler)
+    port = srv.server_address[1]
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+
+    home_dir = tmp_path / "home"
+    home_dir.mkdir()
+    ws = tmp_path / "ws"
+    ws.mkdir()
+
+    base_env = {
+        "PATH": "/usr/bin:/bin:/usr/local/bin",
+        "HOME": str(home_dir),
+        "UNITARES_SERVER_URL": f"http://127.0.0.1:{port}",
+        "UNITARES_CHECKIN_LOG": str(tmp_path / "checkins.log"),
+        "UNITARES_AUTO_ONBOARD": "on",
+        "PLUGIN_ROOT": str(PLUGIN_ROOT),
+        "PWD": str(ws),
+    }
+
+    try:
+        # (a) Newly minted orchestrated SessionStart emits injectSteps only (no trailing {}).
+        orch_cid = "11111111-aaaa-4bbb-8ccc-000000000001"
+        orch_env = {
+            **base_env,
+            "UNITARES_CLIENT_SESSION_ID": "agent:/thread-416",
+            "UNITARES_ORCHESTRATED": "1",
+            "UNITARES_ORCHESTRATED_OWNER_PID": "91919",
+            "UNITARES_HOOK_HOST_PID": "91919",
+        }
+        res_orch = subprocess.run(
+            [str(PLUGIN_ROOT / "hooks" / "post-stop"), "--host", "agy", "--session-start"],
+            env=orch_env,
+            cwd=str(ws),
+            input=json.dumps({"conversationId": orch_cid, "workspacePaths": [str(ws)]}),
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+        assert res_orch.returncode == 0
+        assert len(res_orch.stdout.strip().splitlines()) == 1
+        orch_json = json.loads(res_orch.stdout)
+        msg = orch_json["injectSteps"][0]["systemMessage"]["systemMessage"]
+        assert "11111111-2222-4333-8444-555555555555" in msg
+        assert "agent-11111111-222" in msg
+        assert "start_session(force_new=true)" in msg
+        assert "parent_agent_id" in msg
+
+        # (b) Already-bound interactive slot resolves existing binding without minting.
+        LazyOnboardHandler.calls = []
+        bound_cid = "22222222-aaaa-4bbb-8ccc-000000000002"
+        _write_slot_cache(home_dir, bound_cid, uuid=UUID_A, csid=CSID_A)
+        res_bound = subprocess.run(
+            [str(PLUGIN_ROOT / "hooks" / "post-stop"), "--host", "agy", "--session-start"],
+            env=base_env,
+            cwd=str(ws),
+            input=json.dumps({"conversationId": bound_cid, "workspacePaths": [str(ws)]}),
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+        assert res_bound.returncode == 0
+        assert LazyOnboardHandler.calls == []
+        bound_json = json.loads(res_bound.stdout)
+        bound_msg = bound_json["injectSteps"][0]["systemMessage"]["systemMessage"]
+        assert UUID_A in bound_msg
+        assert CSID_A in bound_msg
+
+        # (c) Unbound interactive slot (even when another slot's cache exists) stays {}.
+        unbound_cid = "33333333-aaaa-4bbb-8ccc-000000000003"
+        res_unbound = subprocess.run(
+            [str(PLUGIN_ROOT / "hooks" / "post-stop"), "--host", "agy", "--session-start"],
+            env=base_env,
+            cwd=str(ws),
+            input=json.dumps({"conversationId": unbound_cid, "workspacePaths": [str(ws)]}),
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+        assert res_unbound.returncode == 0
+        assert res_unbound.stdout == "{}\n"
+        assert LazyOnboardHandler.calls == []
+
+        # (d) Malformed CSID in cache falls back to {} instead of breaking JSON.
+        bad_cid = "44444444-aaaa-4bbb-8ccc-000000000004"
+        _write_slot_cache(home_dir, bad_cid, uuid=UUID_A, csid='bad "quoted" csid')
+        res_bad = subprocess.run(
+            [str(PLUGIN_ROOT / "hooks" / "post-stop"), "--host", "agy", "--session-start"],
+            env=base_env,
+            cwd=str(ws),
+            input=json.dumps({"conversationId": bad_cid, "workspacePaths": [str(ws)]}),
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+        assert res_bad.returncode == 0
+        assert res_bad.stdout == "{}\n"
+
+        # (e) Idle (>24h) slot at SessionStart is marked prior_process and emits {}.
+        idle_cid = "55555555-aaaa-4bbb-8ccc-000000000005"
+        old_mtime = time.time() - 30 * 3600
+        _write_slot_cache(home_dir, idle_cid, uuid=UUID_A, csid=CSID_A, mtime=old_mtime)
+        res_idle = subprocess.run(
+            [str(PLUGIN_ROOT / "hooks" / "post-stop"), "--host", "agy", "--session-start"],
+            env=base_env,
+            cwd=str(ws),
+            input=json.dumps({"conversationId": idle_cid, "workspacePaths": [str(ws)]}),
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+        assert res_idle.returncode == 0
+        assert res_idle.stdout == "{}\n"
+
+        # (f) Stop mode (no --session-start) ALWAYS emits {} even on a bound slot.
+        res_stop = subprocess.run(
+            [str(PLUGIN_ROOT / "hooks" / "post-stop"), "--host", "agy"],
+            env=base_env,
+            cwd=str(ws),
+            input=json.dumps(
+                {
+                    "conversationId": bound_cid,
+                    "workspacePaths": [str(ws)],
+                    "last_assistant_message": "Finished step.",
+                }
+            ),
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+        assert res_stop.returncode == 0
+        assert res_stop.stdout == "{}\n"
+    finally:
+        srv.shutdown()
+        thread.join(timeout=2)
+
+
+# ---------------------------------------------------------------------------
+# 2. scripts/governance_call_inject.py + hooks/pre-governance-call --host agy
+# ---------------------------------------------------------------------------
+
+
+def test_agy_pre_tool_use_fast_allows_non_unitares_tools_and_servers(tmp_path):
+    home_dir = tmp_path / "home"
+    conv_id = "agy-conv-fast-allow"
+    _write_slot_cache(home_dir, conv_id)
+
+    for payload in (
+        _agy_pre_tool_payload(conv_id, tool_name="run_command", args={"CommandLine": "ls"}),
+        _agy_pre_tool_payload(
+            conv_id,
+            tool_name="call_mcp_tool",
+            args={"ServerName": "anima", "ToolName": "get_state", "Arguments": {}},
+        ),
+        _agy_pre_tool_payload(
+            conv_id,
+            tool_name="call_mcp_tool",
+            args={
+                "ServerName": "unitares-governance-shadow",
+                "ToolName": "start_session",
+                "Arguments": {"force_new": True},
+            },
+        ),
+    ):
+        out = _run_inject_agy(payload, home_dir=home_dir, via_hook=True)
+        assert out == {"decision": "allow"}
+
+
+def test_agy_pre_tool_use_denies_duplicate_and_bare_mints_on_bound_slot(tmp_path):
+    home_dir = tmp_path / "home"
+    conv_id = "agy-conv-bound-deny"
+    _write_slot_cache(home_dir, conv_id, uuid=UUID_A, csid=CSID_A)
+
+    # force_new=true with dict Arguments -> deny
+    out_dict = _run_inject_agy(
+        _agy_pre_tool_payload(
+            conv_id,
+            args={
+                "ServerName": "unitares-governance",
+                "ToolName": "start_session",
+                "Arguments": {"force_new": True, "model_type": "gemini-4-argon"},
+            },
+        ),
+        home_dir=home_dir,
+        via_hook=True,
+    )
+    assert out_dict["decision"] == "deny"
+    assert UUID_A in out_dict["reason"]
+    assert CSID_A in out_dict["reason"]
+
+    # force_new=true with JSON-string Arguments -> deny
+    out_str = _run_inject_agy(
+        _agy_pre_tool_payload(
+            conv_id,
+            args={
+                "ServerName": "unitares-governance",
+                "ToolName": "onboard",
+                "Arguments": json.dumps({"force_new": True}),
+            },
+        ),
+        home_dir=home_dir,
+    )
+    assert out_str["decision"] == "deny"
+
+    # Bare mint (no force_new, no proof) -> deny
+    out_bare = _run_inject_agy(
+        _agy_pre_tool_payload(
+            conv_id,
+            args={
+                "ServerName": "unitares-governance",
+                "ToolName": "start_session",
+                "Arguments": {"client_hint": "antigravity"},
+            },
+        ),
+        home_dir=home_dir,
+    )
+    assert out_bare["decision"] == "deny"
+
+    # Partial lineage (only parent_agent_id OR only spawn_reason) -> deny
+    for partial_args in (
+        {"force_new": True, "parent_agent_id": UUID_A},
+        {"force_new": True, "spawn_reason": "explicit"},
+        {"force_new": True, "parent_agent_id": UUID_A, "spawn_reason": "new_session"},
+    ):
+        out_partial = _run_inject_agy(
+            _agy_pre_tool_payload(
+                conv_id,
+                args={
+                    "ServerName": "unitares-governance",
+                    "ToolName": "start_session",
+                    "Arguments": partial_args,
+                },
+            ),
+            home_dir=home_dir,
+        )
+        assert out_partial["decision"] == "deny", f"expected deny for {partial_args}"
+
+    # use_tool gateway wrapping start_session(force_new=true) -> deny
+    out_gw = _run_inject_agy(
+        _agy_pre_tool_payload(
+            conv_id,
+            args={
+                "ServerName": "unitares-governance",
+                "ToolName": "use_tool",
+                "Arguments": {"tool_name": "start_session", "arguments": {"force_new": True}},
+            },
+        ),
+        home_dir=home_dir,
+    )
+    assert out_gw["decision"] == "deny"
+
+    # Explicit lineage with BOTH parent_agent_id and deliberate spawn_reason -> allow
+    out_lineage = _run_inject_agy(
+        _agy_pre_tool_payload(
+            conv_id,
+            args={
+                "ServerName": "unitares-governance",
+                "ToolName": "start_session",
+                "Arguments": {
+                    "force_new": True,
+                    "parent_agent_id": UUID_A,
+                    "spawn_reason": "explicit",
+                },
+            },
+        ),
+        home_dir=home_dir,
+    )
+    assert out_lineage == {"decision": "allow"}
+
+    # Declared subagent mint -> allow
+    out_sub = _run_inject_agy(
+        _agy_pre_tool_payload(
+            conv_id,
+            args={
+                "ServerName": "unitares-governance",
+                "ToolName": "start_session",
+                "Arguments": {"force_new": True, "spawn_reason": "subagent"},
+            },
+        ),
+        home_dir=home_dir,
+    )
+    assert out_sub == {"decision": "allow"}
+
+
+def test_agy_pre_tool_use_injects_csid_preserving_arguments_type_and_denies_foreign_proof(
+    tmp_path,
+):
+    home_dir = tmp_path / "home"
+    conv_id = "agy-conv-inject"
+    _write_slot_cache(home_dir, conv_id, uuid=UUID_A, csid=CSID_A)
+
+    # Dict Arguments -> overwrite.Arguments is dict with injected client_session_id
+    out_dict = _run_inject_agy(
+        _agy_pre_tool_payload(
+            conv_id,
+            args={
+                "ServerName": "unitares-governance",
+                "ToolName": "sync_state",
+                "Arguments": {"response_text": "Milestone reached.", "complexity": 0.4},
+            },
+        ),
+        home_dir=home_dir,
+        via_hook=True,
+    )
+    assert out_dict["decision"] == "allow"
+    assert isinstance(out_dict["overwrite"]["Arguments"], dict)
+    assert out_dict["overwrite"]["Arguments"]["client_session_id"] == CSID_A
+    assert out_dict["overwrite"]["Arguments"]["response_text"] == "Milestone reached."
+
+    # JSON-string Arguments -> overwrite.Arguments stays a JSON string
+    out_str = _run_inject_agy(
+        _agy_pre_tool_payload(
+            conv_id,
+            args={
+                "ServerName": "unitares-governance",
+                "ToolName": "store_finding",
+                "Arguments": json.dumps({"summary": "Bug fixed", "tags": ["Postgres"]}),
+            },
+        ),
+        home_dir=home_dir,
+    )
+    assert out_str["decision"] == "allow"
+    assert isinstance(out_str["overwrite"]["Arguments"], str)
+    decoded = json.loads(out_str["overwrite"]["Arguments"])
+    assert decoded["client_session_id"] == CSID_A
+    assert decoded["summary"] == "Bug fixed"
+
+    # Direct MCP tool name (mcp__unitares-governance__sync_state & mcp_unitares-governance_sync_state)
+    for direct_name in (
+        "mcp__unitares-governance__sync_state",
+        "mcp_unitares-governance_sync_state",
+    ):
+        out_direct = _run_inject_agy(
+            _agy_pre_tool_payload(
+                conv_id,
+                tool_name=direct_name,
+                args={"response_text": "Direct call", "complexity": 0.3},
+            ),
+            home_dir=home_dir,
+        )
+        assert out_direct["decision"] == "allow"
+        assert out_direct["overwrite"]["client_session_id"] == CSID_A
+        assert out_direct["overwrite"]["response_text"] == "Direct call"
+
+    # Foreign client_session_id conflicting with active slot -> deny
+    out_foreign = _run_inject_agy(
+        _agy_pre_tool_payload(
+            conv_id,
+            args={
+                "ServerName": "unitares-governance",
+                "ToolName": "sync_state",
+                "Arguments": {"client_session_id": CSID_B, "response_text": "stale id"},
+            },
+        ),
+        home_dir=home_dir,
+    )
+    assert out_foreign["decision"] == "deny"
+
+    # Matching client_session_id -> plain allow (no overwrite needed)
+    out_match = _run_inject_agy(
+        _agy_pre_tool_payload(
+            conv_id,
+            args={
+                "ServerName": "unitares-governance",
+                "ToolName": "sync_state",
+                "Arguments": {"client_session_id": CSID_A, "response_text": "ok"},
+            },
+        ),
+        home_dir=home_dir,
+    )
+    assert out_match == {"decision": "allow"}
+
+
+def test_agy_pre_tool_use_allows_mint_on_prior_process_idle_or_unbound_and_fails_open(tmp_path):
+    home_dir = tmp_path / "home"
+    home_dir.mkdir()
+
+    # Unbound slot -> allow start_session(force_new=true)
+    out_unbound = _run_inject_agy(
+        _agy_pre_tool_payload(
+            "slot-unbound",
+            args={
+                "ServerName": "unitares-governance",
+                "ToolName": "start_session",
+                "Arguments": {"force_new": True},
+            },
+        ),
+        home_dir=home_dir,
+    )
+    assert out_unbound == {"decision": "allow"}
+
+    # prior_process=True slot -> allow start_session(force_new=true) and do not inject CSID
+    _write_slot_cache(home_dir, "slot-prior", prior_process=True)
+    assert _run_inject_agy(
+        _agy_pre_tool_payload(
+            "slot-prior",
+            args={
+                "ServerName": "unitares-governance",
+                "ToolName": "start_session",
+                "Arguments": {"force_new": True},
+            },
+        ),
+        home_dir=home_dir,
+    ) == {"decision": "allow"}
+    assert _run_inject_agy(
+        _agy_pre_tool_payload(
+            "slot-prior",
+            args={
+                "ServerName": "unitares-governance",
+                "ToolName": "sync_state",
+                "Arguments": {"response_text": "hi"},
+            },
+        ),
+        home_dir=home_dir,
+    ) == {"decision": "allow"}
+
+    # Idle (>24h) slot -> allow start_session(force_new=true) and do not inject expired CSID
+    _write_slot_cache(home_dir, "slot-idle", mtime=time.time() - 30 * 3600)
+    assert _run_inject_agy(
+        _agy_pre_tool_payload(
+            "slot-idle",
+            args={
+                "ServerName": "unitares-governance",
+                "ToolName": "start_session",
+                "Arguments": {"force_new": True},
+            },
+        ),
+        home_dir=home_dir,
+    ) == {"decision": "allow"}
+    assert _run_inject_agy(
+        _agy_pre_tool_payload(
+            "slot-idle",
+            args={
+                "ServerName": "unitares-governance",
+                "ToolName": "sync_state",
+                "Arguments": {"response_text": "after idle"},
+            },
+        ),
+        home_dir=home_dir,
+    ) == {"decision": "allow"}
+
+    # Malformed / empty stdin through shell hook fails open with valid allow JSON
+    for raw in ("", "not-json", "[]"):
+        assert _run_inject_agy(raw, home_dir=home_dir, via_hook=True) == {"decision": "allow"}
+
+
+# ---------------------------------------------------------------------------
+# 3. dbd17d25 flip regression in recover_agy_identity_from_transcript
+# ---------------------------------------------------------------------------
+
+
+def test_dbd17d25_regression_live_slot_rejects_unparented_and_mismatched_switches(
+    tmp_path, monkeypatch
+):
+    """Reproduces the dbd17d25 flip sequence from issue #416:
+    - Switch 1: live backstop d02948ef must NOT be overwritten by unparented
+      start_session(force_new=true) minting 5d79c3c6.
+    - Switch 3: live backstop 5fc42e7e must NOT be overwritten by a compaction
+      mint naming stale 5d79c3c6 as parent_agent_id instead of active 5fc42e7e.
+    - Legitimate declared lineage switch naming the active UUID as parent DOES commit.
+    - Idle (>24h) slot replacement in the resumed turn DOES commit and refresh activity.
+    """
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+    ws = tmp_path / "ws"
+    ws.mkdir()
+
+    slot = "dbd17d25-2800-46b3-a743-70f06358658b"
+    transcript_path = tmp_path / "transcript.jsonl"
+    payload = {"conversationId": slot, "transcriptPath": str(transcript_path)}
+
+    # Switch 1 scenario: live harness_backstop (UUID_A), turn has unparented start_session -> UUID_B.
+    _write_slot_cache(fake_home, slot, uuid=UUID_A, csid=CSID_A, onboard_origin="harness_backstop")
+    _write_transcript(
+        transcript_path,
+        [
+            {"step_index": 0, "type": "USER_INPUT", "content": "turn 3"},
+            {
+                "step_index": 1,
+                "type": "PLANNER_RESPONSE",
+                "status": "DONE",
+                "tool_calls": [
+                    {
+                        "name": "call_mcp_tool",
+                        "args": {
+                            "ServerName": '"unitares-governance"',
+                            "ToolName": '"start_session"',
+                            "Arguments": json.dumps(
+                                {"force_new": True, "name": "antigravity-crux-brief"}
+                            ),
+                        },
+                    }
+                ],
+            },
+            {
+                "step_index": 2,
+                "type": "GENERIC",
+                "status": "DONE",
+                "content": json.dumps(
+                    {
+                        "success": True,
+                        "tool": "start_session",
+                        "agent_uuid": UUID_B,
+                        "client_session_id": CSID_B,
+                        "is_new": True,
+                    }
+                ),
+            },
+        ],
+    )
+    assert (
+        stop_hook_event.recover_agy_identity_from_transcript(payload, workspace=ws, slot=slot)
+        is False
+    )
+    bound = load_usable_session_for_hook(ws, json.dumps(payload))
+    assert bound["uuid"] == UUID_A
+    assert bound["client_session_id"] == CSID_A
+
+    # Switch 3 scenario: live backstop (UUID_C), compaction mint names stale UUID_B as parent -> UUID_D.
+    _write_slot_cache(fake_home, slot, uuid=UUID_C, csid=CSID_C, onboard_origin="harness_backstop")
+    _write_transcript(
+        transcript_path,
+        [
+            {"step_index": 10, "type": "USER_INPUT", "content": "wrap up"},
+            {
+                "step_index": 11,
+                "type": "PLANNER_RESPONSE",
+                "status": "DONE",
+                "tool_calls": [
+                    {
+                        "name": "call_mcp_tool",
+                        "args": {
+                            "ServerName": '"unitares-governance"',
+                            "ToolName": '"start_session"',
+                            "Arguments": json.dumps(
+                                {
+                                    "force_new": True,
+                                    "parent_agent_id": UUID_B,
+                                    "spawn_reason": "compaction",
+                                }
+                            ),
+                        },
+                    }
+                ],
+            },
+            {
+                "step_index": 12,
+                "type": "GENERIC",
+                "status": "DONE",
+                "content": json.dumps(
+                    {
+                        "success": True,
+                        "tool": "start_session",
+                        "agent_uuid": UUID_D,
+                        "client_session_id": CSID_D,
+                        "is_new": True,
+                    }
+                ),
+            },
+        ],
+    )
+    assert (
+        stop_hook_event.recover_agy_identity_from_transcript(payload, workspace=ws, slot=slot)
+        is False
+    )
+    bound_after_mismatch = load_usable_session_for_hook(ws, json.dumps(payload))
+    assert bound_after_mismatch["uuid"] == UUID_C
+    assert bound_after_mismatch["client_session_id"] == CSID_C
+
+    # Declared lineage switch naming the active slot UUID_C as parent_agent_id -> COMMITS UUID_D.
+    _write_transcript(
+        transcript_path,
+        [
+            {"step_index": 20, "type": "USER_INPUT", "content": "deliberate handoff"},
+            {
+                "step_index": 21,
+                "type": "PLANNER_RESPONSE",
+                "status": "DONE",
+                "tool_calls": [
+                    {
+                        "name": "call_mcp_tool",
+                        "args": {
+                            "ServerName": '"unitares-governance"',
+                            "ToolName": '"start_session"',
+                            "Arguments": json.dumps(
+                                {
+                                    "force_new": True,
+                                    "parent_agent_id": UUID_C,
+                                    "spawn_reason": "explicit",
+                                }
+                            ),
+                        },
+                    }
+                ],
+            },
+            {
+                "step_index": 22,
+                "type": "GENERIC",
+                "status": "DONE",
+                "content": json.dumps(
+                    {
+                        "success": True,
+                        "tool": "start_session",
+                        "agent_uuid": UUID_D,
+                        "client_session_id": CSID_D,
+                        "is_new": True,
+                    }
+                ),
+            },
+        ],
+    )
+    assert (
+        stop_hook_event.recover_agy_identity_from_transcript(payload, workspace=ws, slot=slot)
+        is True
+    )
+    bound_switched = load_usable_session_for_hook(ws, json.dumps(payload))
+    assert bound_switched["uuid"] == UUID_D
+    assert bound_switched["client_session_id"] == CSID_D
+
+    # Idle (>24h) slot not yet marked prior_process=True -> new-turn start_session replaces it cleanly.
+    old_ts = time.time() - 40 * 3600
+    _write_slot_cache(fake_home, slot, uuid=UUID_B, csid=CSID_B, onboard_origin="agent", mtime=old_ts)
+    touch_binding_activity(slot, UUID_B, CSID_B, at=old_ts)
+    _write_transcript(
+        transcript_path,
+        [
+            {"step_index": 30, "type": "USER_INPUT", "content": "resumed after 40h"},
+            {
+                "step_index": 31,
+                "type": "PLANNER_RESPONSE",
+                "status": "DONE",
+                "tool_calls": [
+                    {
+                        "name": "call_mcp_tool",
+                        "args": {
+                            "ServerName": '"unitares-governance"',
+                            "ToolName": '"start_session"',
+                            "Arguments": json.dumps({"force_new": True}),
+                        },
+                    }
+                ],
+            },
+            {
+                "step_index": 32,
+                "type": "GENERIC",
+                "status": "DONE",
+                "content": json.dumps(
+                    {
+                        "success": True,
+                        "tool": "start_session",
+                        "agent_uuid": UUID_D,
+                        "client_session_id": CSID_D,
+                        "is_new": True,
+                    }
+                ),
+            },
+        ],
+    )
+    assert (
+        stop_hook_event.recover_agy_identity_from_transcript(payload, workspace=ws, slot=slot)
+        is True
+    )
+    bound_after_idle = load_usable_session_for_hook(ws, json.dumps(payload))
+    assert bound_after_idle["uuid"] == UUID_D
+    assert bound_after_idle["client_session_id"] == CSID_D
+
+
+# ---------------------------------------------------------------------------
+# 4. hooks/agy-hooks.json contract
+# ---------------------------------------------------------------------------
+
+
+def test_agy_hooks_manifest_matches_antigravity_schema_and_avoids_local_paths():
+    manifest_path = PLUGIN_ROOT / "hooks" / "agy-hooks.json"
+    raw = manifest_path.read_text(encoding="utf-8")
+    assert "/Users/" not in raw
+
+    data = json.loads(raw)
+    assert "unitares-governance" in data
+    entry = data["unitares-governance"]
+
+    # SessionStart is flat list of handler objects
+    assert isinstance(entry["SessionStart"], list) and len(entry["SessionStart"]) == 1
+    assert "post-stop --host agy --session-start" in entry["SessionStart"][0]["command"]
+
+    # PreToolUse is grouped with matcher == "call_mcp_tool"
+    assert isinstance(entry["PreToolUse"], list) and len(entry["PreToolUse"]) == 1
+    pre = entry["PreToolUse"][0]
+    assert pre["matcher"] == "call_mcp_tool"
+    assert "pre-governance-call --host agy" in pre["hooks"][0]["command"]
+
+    # Stop is flat list of handler objects
+    assert isinstance(entry["Stop"], list) and len(entry["Stop"]) == 1
+    assert "post-stop --host agy" in entry["Stop"][0]["command"]
+    assert "--session-start" not in entry["Stop"][0]["command"]
+
+
+# ---------------------------------------------------------------------------
+# 5. scripts/dev/review.sh advisory helper
+# ---------------------------------------------------------------------------
+
+
+def test_advisory_review_script_help_dry_run_and_cli_invocation(tmp_path):
+    script = PLUGIN_ROOT / "scripts" / "dev" / "review.sh"
+    assert script.is_file()
+    assert os.access(script, os.X_OK)
+
+    res_help = subprocess.run(
+        [str(script), "--help"],
+        cwd=str(PLUGIN_ROOT),
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    assert res_help.returncode == 0
+    assert "--reviewer" in res_help.stdout
+
+    res_dry = subprocess.run(
+        [str(script), "--dry-run", "--base", "HEAD", "--reviewer", "claude"],
+        cwd=str(PLUGIN_ROOT),
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    assert res_dry.returncode == 0
+    assert "base: HEAD" in res_dry.stdout
+    assert "reviewer: claude" in res_dry.stdout
+
+    # Missing reviewer exits 2 without invoking any CLI
+    res_no_rev = subprocess.run(
+        [str(script), "--base", "HEAD"],
+        cwd=str(PLUGIN_ROOT),
+        env={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)},
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    assert res_no_rev.returncode == 2
+    assert "no reviewer selected" in res_no_rev.stderr
+
+    # Shim claude CLI in a tiny temp git repo with a real diff against master
+    repo = tmp_path / "repo"
+    (repo / "scripts" / "dev").mkdir(parents=True)
+    (repo / "scripts" / "dev" / "review.sh").write_text(
+        script.read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    (repo / "scripts" / "dev" / "review.sh").chmod(0o755)
+    for git_args in (
+        ["init", "-b", "master"],
+        ["config", "user.name", "Test"],
+        ["config", "user.email", "test@example.com"],
+    ):
+        subprocess.run(["git", "-C", str(repo), *git_args], check=True, capture_output=True)
+    (repo / "hello.txt").write_text("v1\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "commit", "-m", "base"], check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "checkout", "-b", "feat/test"], check=True, capture_output=True
+    )
+    (repo / "hello.txt").write_text("v2\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "-C", str(repo), "commit", "-am", "change"], check=True, capture_output=True
+    )
+
+    shim_dir = tmp_path / "bin"
+    shim_dir.mkdir()
+    capture_file = tmp_path / "captured.txt"
+    shim = shim_dir / "claude"
+    shim.write_text(
+        f"#!/usr/bin/env bash\ncat > {str(capture_file)!r}\necho 'CLEAN'\n",
+        encoding="utf-8",
+    )
+    shim.chmod(0o755)
+
+    res_run = subprocess.run(
+        [str(repo / "scripts" / "dev" / "review.sh"), "--reviewer", "claude", "--base", "master"],
+        cwd=str(repo),
+        env={"PATH": f"{shim_dir}:/usr/bin:/bin", "HOME": str(tmp_path)},
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+    assert res_run.returncode == 0
+    assert "CLEAN" in res_run.stdout
+    captured = capture_file.read_text(encoding="utf-8")
+    assert "+v2" in captured

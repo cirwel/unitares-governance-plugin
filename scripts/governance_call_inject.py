@@ -97,7 +97,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _http_auth import is_secure_governance_url
-from governance_tool_name import governance_tool_suffix
+from governance_tool_name import governance_server_aliases, governance_tool_suffix
 
 # Tag normalization (formatting-only, fail-open) is folded into this single
 # hook on purpose: a second PreToolUse hook emitting its own updatedInput for
@@ -273,7 +273,9 @@ def _proofless_identity_reason(tool_input: dict, raw: str) -> str:
     )
 
 
-def _deny_output(reason: str) -> dict:
+def _deny_output(reason: str, host: str = "claude") -> dict:
+    if host == "agy":
+        return {"decision": "deny", "reason": reason}
     return {"hookSpecificOutput": {
         "hookEventName": "PreToolUse",
         "permissionDecision": "deny",
@@ -281,8 +283,21 @@ def _deny_output(reason: str) -> dict:
     }}
 
 
-def _hook_output(updated: dict, host: str) -> dict:
+def _hook_output(
+    updated: dict,
+    host: str,
+    *,
+    is_call_mcp_tool: bool = False,
+    args_was_str: bool = False,
+) -> dict:
     """Build the host-specific PreToolUse rewrite envelope."""
+    if host == "agy":
+        overwrite: dict[str, object] = (
+            {"Arguments": json.dumps(updated) if args_was_str else updated}
+            if is_call_mcp_tool
+            else updated
+        )
+        return {"decision": "allow", "overwrite": overwrite}
     specific: dict[str, object] = {
         "hookEventName": "PreToolUse",
         "updatedInput": updated,
@@ -291,6 +306,227 @@ def _hook_output(updated: dict, host: str) -> dict:
         # Codex ignores updatedInput unless the hook explicitly allows it.
         specific["permissionDecision"] = "allow"
     return {"hookSpecificOutput": specific}
+
+
+def _unwrap_agy_scalar(value: object) -> str:
+    """Decode plain or JSON-quoted string values in Antigravity toolCall.args."""
+    if not isinstance(value, str):
+        return ""
+    text = value.strip()
+    if len(text) >= 2 and text[0] == '"' and text[-1] == '"':
+        try:
+            decoded = json.loads(text)
+            if isinstance(decoded, str):
+                return decoded
+        except ValueError:
+            return text
+    return text
+
+
+def _agy_direct_mcp_suffix(tool_name: str) -> str | None:
+    """Resolve a direct Antigravity MCP tool name (mcp__ or mcp_ prefix)."""
+    suffix = governance_tool_suffix(tool_name, host="agy")
+    if suffix is not None:
+        return suffix
+    lowered = tool_name.strip().casefold()
+    if lowered.startswith("mcp_"):
+        rest = lowered[4:]
+        for server in governance_server_aliases("agy"):
+            prefix = f"{server}_"
+            if rest.startswith(prefix) and len(rest) > len(prefix):
+                return rest[len(prefix):]
+    return None
+
+
+def _extract_agy_call(
+    data: dict,
+) -> tuple[str | None, dict | None, bool, bool]:
+    """Extract ``(suffix, tool_input, is_call_mcp_tool, args_was_str)`` for agy PreToolUse."""
+    tool_call = data.get("toolCall")
+    if not isinstance(tool_call, dict):
+        return None, None, False, False
+    name = str(tool_call.get("name") or "").strip()
+    raw_args = tool_call.get("args")
+    if raw_args is None:
+        raw_args = {}
+    if not isinstance(raw_args, dict):
+        return None, None, False, False
+    if name == "call_mcp_tool":
+        server = _unwrap_agy_scalar(raw_args.get("ServerName")).strip().casefold()
+        tool = _unwrap_agy_scalar(raw_args.get("ToolName")).strip().casefold()
+        if not server or not tool or server not in governance_server_aliases("agy"):
+            return None, None, True, False
+        raw_inner = raw_args.get("Arguments")
+        if raw_inner is None:
+            return tool, {}, True, False
+        if isinstance(raw_inner, dict):
+            return tool, raw_inner, True, False
+        if isinstance(raw_inner, str):
+            if not raw_inner.strip():
+                return tool, {}, True, True
+            try:
+                parsed = json.loads(raw_inner)
+            except ValueError:
+                return None, None, True, False
+            if isinstance(parsed, dict):
+                return tool, parsed, True, True
+        return None, None, True, False
+    suffix = _agy_direct_mcp_suffix(name)
+    if suffix is None:
+        return None, None, False, False
+    return suffix, dict(raw_args), False, False
+
+
+def _agy_duplicate_mint_reason(tool_input: dict, raw: str, *, anchor: str) -> str:
+    """Why a start_session/onboard mint would split an already-bound agy slot."""
+    reason = str(tool_input.get("spawn_reason") or "").strip().lower()
+    if reason == "subagent":
+        return ""
+    parent = tool_input.get("parent_agent_id")
+    has_parent = isinstance(parent, str) and bool(parent.strip())
+    has_deliberate_reason = reason in DELIBERATE_SPAWN_REASONS
+    if has_parent and has_deliberate_reason:
+        return ""
+    is_force_new = _truthy(tool_input.get("force_new"))
+    has_proof = _has_proof_field(tool_input)
+    is_anchor_resume = bool(
+        anchor
+        and not is_force_new
+        and not has_proof
+        and not has_parent
+        and not reason
+        and "orchestrated" not in tool_input
+        and "resume" not in tool_input
+    )
+    if not is_force_new and (has_proof or is_anchor_resume):
+        return ""
+    sess = _current_slot_binding(raw, idle_is_inherited=True)
+    uuid = str(sess.get("uuid") or "").strip()
+    csid = str(sess.get("client_session_id") or "").strip()
+    if not uuid or not csid:
+        return ""
+    origin = str(sess.get("onboard_origin") or "").strip() or "unknown"
+    kind = "force_new" if is_force_new else "bare start_session/onboard"
+    return (
+        f"This Antigravity slot is already bound to governance as agent_uuid {uuid} "
+        f"(onboard_origin={origin}). A {kind} mint would create a second identity for "
+        f"the same conversation. Reuse client_session_id={csid} (or omit it and let "
+        "the hook inject it on governance calls). To deliberately switch lineage, "
+        'call again with both parent_agent_id and spawn_reason="explicit".'
+    )
+
+
+def _decide_agy(data: dict, raw: str) -> dict:
+    """Return Antigravity PreToolUse JSON output (always includes decision)."""
+    allow = {"decision": "allow"}
+    suffix, tool_input, is_call_mcp_tool, args_was_str = _extract_agy_call(data)
+    if suffix is None or tool_input is None:
+        return allow
+    if (
+        suffix not in INJECT_SUFFIXES
+        and suffix not in ANCHORED_MINT_SUFFIXES
+        and suffix not in IDENTITY_ASSERT_SUFFIXES
+    ):
+        return allow
+
+    if suffix in GATEWAY_SUFFIXES:
+        inner_tool = str(tool_input.get("tool_name") or "").strip().casefold()
+        inner_args = tool_input.get("arguments")
+        if inner_args is None:
+            inner_args = {}
+        if isinstance(inner_args, dict):
+            if inner_tool in ANCHORED_MINT_SUFFIXES:
+                mismatch = _foreign_slot_proof_reason(inner_args, raw)
+                if mismatch:
+                    return _deny_output(mismatch, host="agy")
+                duplicate = _agy_duplicate_mint_reason(
+                    inner_args, raw, anchor=_env_anchor()
+                )
+                if duplicate:
+                    return _deny_output(duplicate, host="agy")
+                return allow
+            if inner_tool in IDENTITY_ASSERT_SUFFIXES:
+                mismatch = _foreign_slot_proof_reason(inner_args, raw)
+                if mismatch:
+                    return _deny_output(mismatch, host="agy")
+                duplicate = _proofless_identity_reason(inner_args, raw)
+                if duplicate:
+                    return _deny_output(duplicate, host="agy")
+                return allow
+        if not _gateway_target_injectable(tool_input):
+            mismatch = (
+                _foreign_slot_proof_reason(inner_args, raw)
+                if isinstance(inner_args, dict)
+                else None
+            )
+            if mismatch:
+                return _deny_output(mismatch, host="agy")
+            return allow
+
+    if suffix in IDENTITY_ASSERT_SUFFIXES:
+        mismatch = _foreign_slot_proof_reason(tool_input, raw)
+        if mismatch:
+            return _deny_output(mismatch, host="agy")
+        duplicate = _proofless_identity_reason(tool_input, raw)
+        if duplicate:
+            return _deny_output(duplicate, host="agy")
+        return allow
+
+    mismatch = _foreign_slot_proof_reason(tool_input, raw)
+    if mismatch:
+        return _deny_output(mismatch, host="agy")
+
+    updated = dict(tool_input)
+    changed = False
+
+    if suffix in ANCHORED_MINT_SUFFIXES:
+        anchor = _env_anchor()
+        duplicate = _agy_duplicate_mint_reason(tool_input, raw, anchor=anchor)
+        if duplicate:
+            return _deny_output(duplicate, host="agy")
+        if (
+            anchor
+            and not _truthy(tool_input.get("force_new"))
+            and not _has_proof_field(tool_input)
+            and not tool_input.get("parent_agent_id")
+            and not tool_input.get("spawn_reason")
+            and "orchestrated" not in tool_input
+            and "resume" not in tool_input
+        ):
+            updated["client_session_id"] = anchor
+            updated["orchestrated"] = True
+            changed = True
+        if not changed:
+            return allow
+        return _hook_output(
+            updated,
+            "agy",
+            is_call_mcp_tool=is_call_mcp_tool,
+            args_was_str=args_was_str,
+        )
+
+    if suffix in TAG_BEARING_SUFFIXES:
+        try:
+            if normalize_call_tags(updated):
+                changed = True
+        except Exception:
+            updated = dict(tool_input)
+
+    if not _has_proof_field(tool_input):
+        sess = _current_slot_binding(raw, idle_is_inherited=True)
+        sid = str(sess.get("client_session_id") or "").strip()
+        if sid:
+            updated["client_session_id"] = sid
+            changed = True
+
+    if not changed:
+        return allow
+    return _hook_output(
+        updated,
+        "agy",
+        is_call_mcp_tool=is_call_mcp_tool,
+        args_was_str=args_was_str,
+    )
 
 
 def _has_proof_field(tool_input: dict) -> bool:
@@ -614,18 +850,31 @@ def _decide(host: str, data: dict, raw: str) -> dict | None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Normalize a governance PreToolUse call")
-    parser.add_argument("--host", choices=("claude", "codex"), default="claude")
+    parser.add_argument("--host", choices=("claude", "codex", "agy"), default="claude")
     args = parser.parse_args(argv)
 
     try:
         raw = sys.stdin.read()
         data = json.loads(raw or "{}")
     except Exception:
+        if args.host == "agy":
+            print(json.dumps({"decision": "allow"}))
+            return 0
         unreadable = _unreadable_call_reason(args.host)
         if unreadable:
             print(json.dumps(_deny_output(unreadable)))
         return 0
     if not isinstance(data, dict):
+        if args.host == "agy":
+            print(json.dumps({"decision": "allow"}))
+        return 0
+
+    if args.host == "agy":
+        try:
+            output = _decide_agy(data, raw)
+        except Exception:
+            output = {"decision": "allow"}
+        print(json.dumps(output))
         return 0
 
     try:

@@ -35,6 +35,7 @@ _UUID_RE = re.compile(
 )
 _AGY_ONBOARD_TOOLS = frozenset({"onboard", "start_session", "identity", "bind_session"})
 _AGY_GOVERNANCE_SERVERS = frozenset({"unitares-governance", "unitares_governance", "governance", "unitares"})
+_AGY_DELIBERATE_SWITCH_REASONS = frozenset({"explicit", "compaction", "dispatch", "dialectic_reviewer"})
 _SPILLED_FILE_RE = re.compile(r"file://(/[^\s\"'<>]+)")
 _GIT_OVERRIDE_ENV_VARS = frozenset({
     "GIT_DIR",
@@ -493,12 +494,12 @@ def _unwrap_agy_arg_string(value: Any) -> Any:
     return value
 
 
-def _agy_driver_onboard_call_offsets(entry: Mapping[str, Any]) -> set[int]:
-    """Return 0-based tool_calls offsets in a PLANNER_RESPONSE that invoke driver onboarding."""
+def _agy_driver_onboard_call_meta(entry: Mapping[str, Any]) -> dict[int, dict[str, str]]:
+    """Return 0-based tool_calls offsets mapped to call metadata for driver onboarding."""
     raw_calls = entry.get("tool_calls")
     if not isinstance(raw_calls, list):
-        return set()
-    offsets: set[int] = set()
+        return {}
+    matched: dict[int, dict[str, str]] = {}
     for idx, call in enumerate(raw_calls):
         if not isinstance(call, dict):
             continue
@@ -552,8 +553,18 @@ def _agy_driver_onboard_call_offsets(entry: Mapping[str, Any]) -> set[int]:
         spawn_reason = str(tool_args.get("spawn_reason") or "").strip().casefold()
         if spawn_reason == "subagent":
             continue
-        offsets.add(idx)
-    return offsets
+        parent_agent_id = str(tool_args.get("parent_agent_id") or "").strip()
+        matched[idx] = {
+            "tool": matched_tool,
+            "parent_agent_id": parent_agent_id,
+            "spawn_reason": spawn_reason,
+        }
+    return matched
+
+
+def _agy_driver_onboard_call_offsets(entry: Mapping[str, Any]) -> set[int]:
+    """Return 0-based tool_calls offsets in a PLANNER_RESPONSE that invoke driver onboarding."""
+    return set(_agy_driver_onboard_call_meta(entry))
 
 
 def _parse_onboard_json_lines(text: str) -> dict[str, Any] | None:
@@ -596,6 +607,7 @@ def _parse_onboard_json_lines(text: str) -> dict[str, Any] | None:
             if isinstance(canonical.get("state_summary"), dict)
             else {}
         )
+        is_new_val = resp.get("is_new") if "is_new" in resp else canonical.get("is_new")
         return {
             "uuid": uuid_val,
             "agent_id": str(resp.get("agent_id") or canonical.get("agent_id") or "").strip(),
@@ -620,6 +632,7 @@ def _parse_onboard_json_lines(text: str) -> dict[str, Any] | None:
                 or resp.get("onboard_origin_basis")
                 or ""
             ).strip(),
+            "_is_new": is_new_val,
         }
     return None
 
@@ -712,25 +725,25 @@ def recover_agy_identity_from_transcript(
     if not turn_entries_reversed:
         return False
 
-    recovered: dict[str, Any] | None = None
-    pending_offsets: set[int] = set()
+    candidates: list[tuple[dict[str, Any], dict[str, str]]] = []
+    pending_meta: dict[int, dict[str, str]] = {}
     generic_idx = 0
     for entry in reversed(turn_entries_reversed):
         step_type = entry.get("type")
         if step_type == "PLANNER_RESPONSE":
-            pending_offsets = _agy_driver_onboard_call_offsets(entry)
+            pending_meta = _agy_driver_onboard_call_meta(entry)
             generic_idx = 0
         elif step_type == "GENERIC":
-            if generic_idx in pending_offsets:
+            call_meta = pending_meta.pop(generic_idx, None)
+            if call_meta is not None:
                 candidate = _extract_onboard_response_from_generic(
                     entry, transcript_path_used
                 )
                 if candidate is not None:
-                    recovered = candidate
-                pending_offsets.discard(generic_idx)
+                    candidates.append((candidate, call_meta))
             generic_idx += 1
 
-    if recovered is None:
+    if not candidates:
         return False
 
     try:
@@ -738,24 +751,70 @@ def recover_agy_identity_from_transcript(
     except ModuleNotFoundError:
         from scripts.onboard_helper import _update_cache_transaction
 
-    new_cache = {
-        **recovered,
-        "continuity_token": "",
-        "prior_process": False,
-        "schema_version": 2,
-        "slot": slot_clean,
-    }
+    chosen: dict[str, Any] | None = None
+    matched_existing = False
+
+    def _is_live_binding_idle(cur_uuid: str, cur_csid: str) -> bool:
+        try:
+            from _session_lookup import resolve_proof_session_file
+            from binding_activity import is_idle
+        except ModuleNotFoundError:
+            from scripts._session_lookup import resolve_proof_session_file
+            from scripts.binding_activity import is_idle
+        try:
+            proof_path = resolve_proof_session_file(slot_clean)
+            if proof_path is not None and is_idle(proof_path, slot_clean, cur_uuid, cur_csid):
+                return True
+        except Exception:
+            return False
+        return False
 
     def _commit_if_eligible(current: dict[str, Any]) -> dict[str, Any] | None:
+        nonlocal chosen, matched_existing
         cur_uuid = str(current.get("uuid") or "").strip()
         cur_csid = str(current.get("client_session_id") or "").strip()
-        if (
-            not cur_uuid
-            or not cur_csid
-            or current.get("prior_process")
-            or (recovered["uuid"], recovered["client_session_id"]) != (cur_uuid, cur_csid)
-        ):
-            return {**current, **new_cache}
+        cur_inherited = bool(current.get("prior_process"))
+        if cur_uuid and cur_csid and not cur_inherited:
+            if _is_live_binding_idle(cur_uuid, cur_csid):
+                cur_inherited = True
+
+        for candidate, meta in reversed(candidates):
+            cand_uuid = str(candidate.get("uuid") or "").strip()
+            cand_csid = str(candidate.get("client_session_id") or "").strip()
+            is_new = candidate.get("_is_new")
+            public_fields = {k: v for k, v in candidate.items() if not k.startswith("_")}
+            entry_cache = {
+                **public_fields,
+                "continuity_token": "",
+                "prior_process": False,
+                "schema_version": 2,
+                "slot": slot_clean,
+            }
+            if not cur_uuid or not cur_csid or cur_inherited:
+                chosen = entry_cache
+                return {**current, **entry_cache}
+            if cand_uuid == cur_uuid:
+                if cand_csid == cur_csid:
+                    matched_existing = True
+                    return None
+                if meta.get("tool") in ("identity", "bind_session") or is_new is False:
+                    if current.get("onboard_origin"):
+                        entry_cache["onboard_origin"] = current["onboard_origin"]
+                    if current.get("onboard_origin_basis"):
+                        entry_cache["onboard_origin_basis"] = current["onboard_origin_basis"]
+                chosen = entry_cache
+                return {**current, **entry_cache}
+            # Protect a live, non-idle slot binding against silent overwrites by
+            # unparented duplicate mints, mismatched parent_agent_id, or foreign
+            # identity/bind_session resumes (cirwel/unitares-governance-plugin#416).
+            declared_switch = (
+                meta.get("tool") in ("onboard", "start_session")
+                and meta.get("parent_agent_id") == cur_uuid
+                and meta.get("spawn_reason") in _AGY_DELIBERATE_SWITCH_REASONS
+            )
+            if declared_switch:
+                chosen = entry_cache
+                return {**current, **entry_cache}
         return None
 
     _auth, committed = _update_cache_transaction(
@@ -763,22 +822,15 @@ def recover_agy_identity_from_transcript(
         _commit_if_eligible,
         slot_clean,
     )
-    if committed:
+    if committed and chosen is not None:
         try:
             from binding_activity import touch as _touch_binding_activity
         except ModuleNotFoundError:
             from scripts.binding_activity import touch as _touch_binding_activity
         _touch_binding_activity(
-            slot_clean, recovered["uuid"], recovered["client_session_id"]
+            slot_clean, chosen["uuid"], chosen["client_session_id"]
         )
-    return bool(
-        committed
-        or (
-            _auth.get("uuid")
-            and _auth.get("client_session_id")
-            and not _auth.get("prior_process")
-        )
-    )
+    return bool(committed or matched_existing)
 
 
 def normalize_agy(payload: Mapping[str, Any]) -> StopHookEvent:
