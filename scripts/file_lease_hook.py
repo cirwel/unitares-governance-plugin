@@ -13,8 +13,10 @@ from __future__ import annotations
 import argparse
 import hashlib
 import hmac
+import http.client
 import json
 import os
+import socket
 import stat
 import sys
 import tempfile
@@ -63,6 +65,14 @@ DEFAULT_BATCH_TIMEOUT_S = 3.5
 
 class UnsupportedLeaseStateError(RuntimeError):
     """Existing local lease state cannot be mutated by this plugin version."""
+
+
+class UnixSocketValidationError(OSError):
+    """Configured lease-plane Unix domain socket failed fail-closed validation."""
+
+    def __init__(self, reason: str, message: str) -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 def _safe_slot(slot: str) -> str:
@@ -379,6 +389,140 @@ def _configured_bearer_token() -> str:
     return _bearer_from_env()
 
 
+def _unix_socket_config() -> tuple[bool, str | None, str | None]:
+    """Return ``(is_unix, socket_path, error_reason)`` for UDS lease transport.
+
+    ``UNITARES_LEASE_PLANE_UNIX_SOCKET`` takes precedence over HTTP base URLs.
+    Alternatively, ``LEASE_PLANE_BASE_URL`` or ``UNITARES_LEASE_PLANE_URL`` may
+    specify a ``unix:///absolute/path`` URL.
+    """
+    raw_socket = (os.environ.get("UNITARES_LEASE_PLANE_UNIX_SOCKET") or "").strip()
+    if raw_socket:
+        try:
+            expanded = os.path.expanduser(raw_socket)
+        except Exception:
+            return True, None, "invalid_unix_socket"
+        if not expanded or "\x00" in expanded:
+            return True, None, "invalid_unix_socket"
+        return True, expanded, None
+
+    raw_url = (
+        os.environ.get("LEASE_PLANE_BASE_URL")
+        or os.environ.get("UNITARES_LEASE_PLANE_URL")
+        or ""
+    ).strip()
+    if raw_url.lower().startswith("unix:"):
+        try:
+            parsed = urllib.parse.urlsplit(raw_url)
+        except ValueError:
+            return True, None, "invalid_unix_socket"
+        if (
+            parsed.scheme.lower() != "unix"
+            or parsed.netloc
+            or parsed.query
+            or parsed.fragment
+            or not parsed.path.startswith("/")
+            or len(parsed.path) <= 1
+            or "\x00" in parsed.path
+        ):
+            return True, None, "invalid_unix_socket"
+        return True, parsed.path, None
+
+    return False, None, None
+
+
+def _validate_unix_socket(socket_path: str) -> str:
+    """Validate a lease-plane Unix domain socket fail-closed before connecting.
+
+    Requires an existing, non-symlink AF_UNIX socket owned by the current UID
+    with no group or world permission bits (``st_mode & 0o077 == 0``).
+    """
+    if not hasattr(socket, "AF_UNIX"):
+        raise UnixSocketValidationError(
+            "unix_socket_unsupported",
+            "Unix domain sockets are not supported on this platform",
+        )
+    if not socket_path or "\x00" in socket_path:
+        raise UnixSocketValidationError(
+            "invalid_unix_socket",
+            "invalid Unix socket path",
+        )
+    try:
+        info = os.lstat(socket_path)
+    except FileNotFoundError as exc:
+        raise UnixSocketValidationError(
+            "unreachable",
+            f"Unix socket not found: {socket_path}",
+        ) from exc
+    except OSError as exc:
+        raise UnixSocketValidationError(
+            "invalid_unix_socket",
+            f"cannot stat Unix socket {socket_path}: {exc}",
+        ) from exc
+    if stat.S_ISLNK(info.st_mode):
+        raise UnixSocketValidationError(
+            "insecure_unix_socket",
+            f"Unix socket path must not be a symlink: {socket_path}",
+        )
+    if not stat.S_ISSOCK(info.st_mode):
+        raise UnixSocketValidationError(
+            "insecure_unix_socket",
+            f"Unix socket path is not a socket: {socket_path}",
+        )
+    getuid = getattr(os, "getuid", None)
+    if not callable(getuid) or info.st_uid != getuid():
+        raise UnixSocketValidationError(
+            "insecure_unix_socket",
+            f"Unix socket is not owned by the current user: {socket_path}",
+        )
+    if info.st_mode & 0o077:
+        raise UnixSocketValidationError(
+            "insecure_unix_socket",
+            f"Unix socket must not have group or world permissions: {socket_path}",
+        )
+    return socket_path
+
+
+class _UnixHTTPConnection(http.client.HTTPConnection):
+    """Stdlib HTTPConnection over a validated AF_UNIX stream socket."""
+
+    def __init__(self, socket_path: str, *, timeout: float | None = None) -> None:
+        super().__init__("localhost", timeout=timeout)
+        self._socket_path = socket_path
+
+    def connect(self) -> None:
+        validated = _validate_unix_socket(self._socket_path)
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            if self.timeout is not None:
+                sock.settimeout(self.timeout)
+            sock.connect(validated)
+        except BaseException:
+            sock.close()
+            raise
+        self.sock = sock
+
+
+def _unix_http_request(
+    socket_path: str,
+    method: str,
+    path: str,
+    *,
+    headers: dict[str, str],
+    body: bytes | None = None,
+    timeout_s: float,
+) -> tuple[int, bytes]:
+    conn = _UnixHTTPConnection(socket_path, timeout=max(0.05, timeout_s))
+    try:
+        conn.request(method, path, body=body, headers=headers)
+        response = conn.getresponse()
+        status = int(response.status)
+        raw = read_limited_response(response)
+        return status, raw
+    finally:
+        conn.close()
+
+
 def _is_loopback_url(url: str) -> bool:
     try:
         host = urllib.parse.urlsplit(url).hostname or ""
@@ -391,7 +535,16 @@ def _bearer_token_with_source() -> tuple[str, str]:
     """The bearer to present, and where it came from: "configured",
     "compose_default" (loopback lease plane, nothing configured) or "none"."""
     token = _configured_bearer_token()
+    is_unix, sock_path, unix_error = _unix_socket_config()
     if token:
+        if is_unix:
+            if unix_error or not sock_path:
+                return "", "insecure_transport"
+            try:
+                _validate_unix_socket(sock_path)
+            except UnixSocketValidationError:
+                return "", "insecure_transport"
+            return token, "configured"
         url = _base_url()
         try:
             scheme = urllib.parse.urlsplit(url).scheme.lower()
@@ -410,7 +563,7 @@ def _bearer_token_with_source() -> tuple[str, str]:
         return "", "insecure_transport"
     # Required mode is an explicit fail-closed policy; it names its bearer
     # rather than inheriting a development default.
-    if _is_loopback_url(_base_url()) and not _required():
+    if not is_unix and _is_loopback_url(_base_url()) and not _required():
         return COMPOSE_DEFAULT_BEARER, "compose_default"
     return "", "none"
 
@@ -420,6 +573,18 @@ def _bearer_token() -> str:
 
 
 def _base_url() -> str:
+    is_unix, sock_path, _unix_error = _unix_socket_config()
+    if is_unix:
+        if sock_path:
+            return f"unix://{sock_path}"
+        raw_socket = (os.environ.get("UNITARES_LEASE_PLANE_UNIX_SOCKET") or "").strip()
+        if raw_socket:
+            return f"unix://{raw_socket}"
+        return (
+            os.environ.get("LEASE_PLANE_BASE_URL")
+            or os.environ.get("UNITARES_LEASE_PLANE_URL")
+            or ""
+        ).strip()
     return (
         os.environ.get("LEASE_PLANE_BASE_URL")
         or os.environ.get("UNITARES_LEASE_PLANE_URL")
@@ -465,20 +630,39 @@ def _http_json(
         headers = {"Accept": "application/json", "Authorization": f"Bearer {token}"}
         if body is not None:
             headers["Content-Type"] = "application/json"
-        request = urllib.request.Request(
-            _base_url() + path,
-            data=data,
-            headers=headers,
-            method=method,
-        )
-        try:
-            with authorization_safe_urlopen(
-                request,
-                timeout=_timeout_s() if timeout_s is None else max(0.05, timeout_s),
-            ) as response:
-                raw = read_limited_response(response)
-        except urllib.error.HTTPError as exc:
-            raw = read_limited_response(exc)
+        effective_timeout = _timeout_s() if timeout_s is None else max(0.05, timeout_s)
+        is_unix, sock_path, unix_error = _unix_socket_config()
+        if is_unix:
+            if unix_error or not sock_path:
+                return {
+                    "ok": False,
+                    "error": "service_unavailable",
+                    "reason": "UnixSocketValidationError",
+                }
+            headers["Connection"] = "close"
+            _status, raw = _unix_http_request(
+                sock_path,
+                method,
+                path,
+                headers=headers,
+                body=data,
+                timeout_s=effective_timeout,
+            )
+        else:
+            request = urllib.request.Request(
+                _base_url() + path,
+                data=data,
+                headers=headers,
+                method=method,
+            )
+            try:
+                with authorization_safe_urlopen(
+                    request,
+                    timeout=effective_timeout,
+                ) as response:
+                    raw = read_limited_response(response)
+            except urllib.error.HTTPError as exc:
+                raw = read_limited_response(exc)
     except Exception as exc:
         return {"ok": False, "error": "service_unavailable", "reason": type(exc).__name__}
 
@@ -1565,29 +1749,75 @@ def _lease_status_unbounded(timeout_s: float) -> dict[str, Any]:
     if not _enabled():
         return {"state": "disabled", "url": url}
     token, source = _bearer_token_with_source()
+    is_unix, sock_path, unix_error = _unix_socket_config()
     if not token:
+        if is_unix and source == "insecure_transport" and not unix_error and sock_path:
+            try:
+                _validate_unix_socket(sock_path)
+            except UnixSocketValidationError as exc:
+                if exc.reason == "unreachable":
+                    return {
+                        "state": "off",
+                        "reason": "unreachable",
+                        "url": url,
+                        "bearer": "configured",
+                        "error": "FileNotFoundError",
+                    }
         reason = "insecure_transport" if source == "insecure_transport" else "no_bearer"
         return {"state": "off", "reason": reason, "url": url, "bearer": source}
-    request = urllib.request.Request(
-        url + "/v1/health",
-        headers={"Accept": "application/json", "Authorization": f"Bearer {token}"},
-        method="GET",
-    )
     raw = b""
-    try:
-        with authorization_safe_urlopen(request, timeout=max(0.05, timeout_s)) as response:
-            code = response.status
-            raw = response.read(65536)
-    except urllib.error.HTTPError as exc:
-        code = exc.code
-    except Exception as exc:
-        return {
-            "state": "off",
-            "reason": "unreachable",
-            "url": url,
-            "bearer": source,
-            "error": type(exc).__name__,
-        }
+    if is_unix:
+        if unix_error or not sock_path:
+            return {"state": "off", "reason": "insecure_transport", "url": url, "bearer": source}
+        try:
+            code, raw = _unix_http_request(
+                sock_path,
+                "GET",
+                "/v1/health",
+                headers={
+                    "Accept": "application/json",
+                    "Authorization": f"Bearer {token}",
+                    "Connection": "close",
+                },
+                timeout_s=max(0.05, timeout_s),
+            )
+            raw = raw[:65536]
+        except UnixSocketValidationError as exc:
+            return {
+                "state": "off",
+                "reason": "unreachable" if exc.reason == "unreachable" else "insecure_transport",
+                "url": url,
+                "bearer": source,
+                "error": type(exc).__name__,
+            }
+        except Exception as exc:
+            return {
+                "state": "off",
+                "reason": "unreachable",
+                "url": url,
+                "bearer": source,
+                "error": type(exc).__name__,
+            }
+    else:
+        request = urllib.request.Request(
+            url + "/v1/health",
+            headers={"Accept": "application/json", "Authorization": f"Bearer {token}"},
+            method="GET",
+        )
+        try:
+            with authorization_safe_urlopen(request, timeout=max(0.05, timeout_s)) as response:
+                code = response.status
+                raw = response.read(65536)
+        except urllib.error.HTTPError as exc:
+            code = exc.code
+        except Exception as exc:
+            return {
+                "state": "off",
+                "reason": "unreachable",
+                "url": url,
+                "bearer": source,
+                "error": type(exc).__name__,
+            }
     if 200 <= code < 300:
         # A 2xx alone could come from any web server on that port; "on" needs
         # the lease plane's own health shape, the protocol the acquire speaks.
@@ -1634,11 +1864,18 @@ def _status_line(status: dict[str, Any]) -> str:
             f"Set LEASE_PLANE_BEARER_TOKEN in {_secrets_env_path()} or the environment."
         )
     elif reason == "insecure_transport":
-        why = f"the configured bearer would cross unauthenticated HTTP at {url}"
-        fix = (
-            "Use HTTPS (recommended), local authenticated IPC, or explicitly opt in "
-            "to insecure loopback development transport."
-        )
+        if url.startswith("unix://"):
+            why = f"the Unix socket at {url} failed security validation"
+            fix = (
+                "Ensure the socket is a non-symlink AF_UNIX socket owned by the "
+                "current user with 0600 permissions."
+            )
+        else:
+            why = f"the configured bearer would cross unauthenticated HTTP at {url}"
+            fix = (
+                "Use HTTPS (recommended), local authenticated IPC, or explicitly opt in "
+                "to insecure loopback development transport."
+            )
     elif reason == "not_a_lease_plane":
         why = f"the service at {url} does not answer as a v1 lease plane"
         fix = "Point LEASE_PLANE_BASE_URL at the UNITARES lease plane."

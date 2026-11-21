@@ -213,15 +213,30 @@ python3 scripts/identity_sidecar.py \
   --port 8768
 ```
 
+For full local isolation on POSIX hosts, pass `--unix-socket <path>` (or set
+`UNITARES_SIDECAR_SOCKET`) instead of `--port`: the sidecar enforces a `0o700`
+owner-only parent directory, refuses symlinks, binds a `0o600` `AF_UNIX`
+socket, and unlinks it on exit.
+
 Every operational route, including `/health`, requires
 `Authorization: Bearer $UNITARES_SIDECAR_CAPABILITY`. The capability is bound
 to the sidecar's configured slot; request headers and bodies cannot switch the
 server to another slot. The unauthenticated `/startup-proof` route returns only
-a challenge-bound HMAC so wrappers can authenticate the listener before sending
-that bearer. A request that asks for `Connection: keep-alive` gets its proof
-connection held open for one more request, so the wrapper can send the bearer
-on the connection that proved itself. Run a separate sidecar with separate
-secrets for each concurrently managed process.
+a challenge-bound HMAC so wrappers and `scripts/sidecar_client.py` can
+authenticate a TCP listener before sending that bearer. A request that asks for
+`Connection: keep-alive` gets its proof connection held open for one more
+request, so the caller can send the bearer on the connection that proved itself.
+On loopback TCP, `BoundedThreadingHTTPServer` enforces a tight pre-auth
+request-line and header deadline (`AUTH_HEADER_DEADLINE = 1.0s`, escalating to
+`REQUEST_READ_DEADLINE = 10.0s` only after capability authentication succeeds)
+and caps concurrent pre-auth connections with a separate admission semaphore
+(`max_preauth = min(8, max(1, max_workers // 4))`, released immediately once
+capability auth passes or the connection closes) so slow unauthenticated
+clients cannot exhaust authenticated worker capacity. TCP loopback still
+traverses the kernel accept queue before capability authentication; use
+`--unix-socket` (`0o600`) when full local isolation from other local users is
+required. Run a separate sidecar with separate secrets for each concurrently
+managed process.
 
 Phase 1 is a dependency-free sidecar, not a full streamable-MCP/SSE
 implementation. It wraps REST `/v1/tools/call` and minimal JSON-RPC MCP
@@ -297,31 +312,43 @@ scripts/u-run --class goose -- goose run --recipe review.yaml
 
 The first `--` separates wrapper options from the child command. `u-run` then:
 
-1. reuses a healthy sidecar only after a challenge-response using
-   `UNITARES_SIDECAR_STARTUP_SECRET`, then verifies that the process holds the
-   separate `UNITARES_SIDECAR_CAPABILITY`; otherwise it starts one with fresh
-   random secrets and owns its cleanup;
+1. reuses a healthy sidecar only after proving the transport — a
+   challenge-response using `UNITARES_SIDECAR_STARTUP_SECRET` on loopback TCP,
+   or fail-closed socket validation (`0o600`, current UID, non-symlink
+   `S_ISSOCK`) when `--sidecar-socket` / `UNITARES_SIDECAR_SOCKET` is set —
+   then verifies that the process holds the separate
+   `UNITARES_SIDECAR_CAPABILITY`; otherwise it starts one with fresh random
+   secrets and owns its cleanup;
 2. creates one unique slot (or uses an explicit `--slot`) and calls
    `/session/start` once with `replace_existing: true`, which writes
    `.unitares/session-<slot>.json`;
-3. exports `UNITARES_SERVER_URL`, `UNITARES_SIDECAR_URL`,
-   `UNITARES_SIDECAR_SLOT`, `UNITARES_SIDECAR_CAPABILITY`, and
-   `UNITARES_MODEL_TYPE` to the child;
+3. exports `UNITARES_SERVER_URL`, `UNITARES_SIDECAR_SLOT`,
+   `UNITARES_SIDECAR_CAPABILITY`, `UNITARES_SIDECAR_CLIENT` (path to
+   `scripts/sidecar_client.py`), and `UNITARES_MODEL_TYPE` to the child, plus
+   `UNITARES_SIDECAR_URL` and `UNITARES_SIDECAR_STARTUP_SECRET` in TCP mode or
+   `UNITARES_SIDECAR_SOCKET` in Unix domain socket mode;
 4. forwards `SIGINT`, `SIGTERM`, and `SIGHUP` to the child process group and
    preserves the child's shell exit status; and
 5. submits one `/turn/stop` check-in from observed wall time and exit status,
    always labeled `epistemic_class="substrate_interpretation"` and with no
    confidence field. If the listener does not prove the startup secret again
-   within 0.5 s, or the check-in fails, the check-in is skipped with a warning
-   and the child's exit status is still returned.
+   within 0.5 s (or the Unix socket fails validation), or the check-in fails,
+   the check-in is skipped with a warning and the child's exit status is still
+   returned.
 
 Each request `u-run` sends with the capability (`/health`, `/session/start` and
-`/turn/stop`) goes on the same connection as a fresh startup challenge, so a
-process that takes over the port later does not receive it from `u-run`. The
-child and its tools receive the capability in their environment and send it
-without a challenge. A
-sidecar started by an earlier plugin version closes that connection; restart it
-before reusing it with this `u-run`.
+`/turn/stop`) goes on the same connection as a fresh startup challenge over TCP
+(or over the validated `0o600` Unix domain socket), so a process that takes over
+the port later does not receive it from `u-run`. Child processes should talk to
+the sidecar through `scripts/sidecar_client.py` (exported in
+`UNITARES_SIDECAR_CLIENT`, usable as a Python module or CLI via `call <tool>`
+and `post <path>`), which performs the same `_proven_exchange` HMAC
+startup-secret challenge before sending `UNITARES_SIDECAR_CAPABILITY` over TCP
+or validates and connects over `UNITARES_SIDECAR_SOCKET` in UDS mode. Plain HTTP
+clients that bypass `sidecar_client.py` over loopback TCP send the capability
+without proving the listener first. A sidecar started by an earlier plugin
+version closes the proof connection; restart it before reusing it with this
+`u-run`.
 
 The exit complexity proxy is intentionally small and inspectable: `0.30` base,
 up to `0.35` over the first hour of observed runtime, plus `0.20` for a nonzero
@@ -333,7 +360,9 @@ Class selection is deliberately explicit. Passing `--class X` uses exactly
 `X`; omitting it uses the neutral literal `u-run`. The wrapper never guesses a
 calibration class from the command name, process name, or working directory.
 Configuration defaults to `UNITARES_SERVER_URL` and `UNITARES_SIDECAR_URL`, or
-to `http://localhost:8767` and `http://127.0.0.1:8768` respectively.
+to `http://localhost:8767` and `http://127.0.0.1:8768` respectively; pass
+`--sidecar-socket` or set `UNITARES_SIDECAR_SOCKET` to use an owner-only Unix
+domain socket instead of loopback TCP.
 
 ### Repo Boundary
 

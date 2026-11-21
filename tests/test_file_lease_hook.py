@@ -2471,3 +2471,182 @@ def test_status_is_bounded_by_a_wall_clock_deadline(tmp_path, monkeypatch):
     assert time.monotonic() - started < 1.0
     assert status["state"] == "off"
     assert status["error"] == "deadline_exceeded"
+
+
+# --- Unix domain socket (AF_UNIX) lease-plane transport (Finding 10) --------
+
+
+class _UnixLeaseHandler(LeaseHandler):
+    def address_string(self):
+        return "unix"
+
+
+@pytest.fixture
+def unix_lease_server():
+    import socket
+    import tempfile
+
+    if not hasattr(socket, "AF_UNIX") or not hasattr(socketserver, "UnixStreamServer"):
+        pytest.skip("AF_UNIX not supported on this platform")
+
+    LeaseHandler.calls = []
+    LeaseHandler.health_token = "lease-token"
+    LeaseHandler.health_payload = {"ok": True, "status": "ok", "protocol_version": "v1.0"}
+    LeaseHandler.acquire_response = {
+        "ok": True,
+        "lease": {
+            "lease_id": "11111111-1111-4111-8111-111111111111",
+            "surface_id": "file:///tmp/example.py",
+            "expires_at": "2026-05-28T00:00:00Z",
+        },
+        "idempotent": False,
+        "protocol_version": "v1.0",
+    }
+
+    with tempfile.TemporaryDirectory(prefix="u-lp-") as tmpdir:
+        os.chmod(tmpdir, 0o700)
+        sock_path = Path(tmpdir) / "lp.sock"
+        srv = socketserver.UnixStreamServer(str(sock_path), _UnixLeaseHandler)
+        os.chmod(sock_path, 0o600)
+        thread = threading.Thread(target=srv.serve_forever, daemon=True)
+        thread.start()
+        try:
+            yield sock_path
+        finally:
+            srv.shutdown()
+            thread.join(timeout=2)
+            srv.server_close()
+
+
+@pytest.mark.parametrize("config_mode", ["env_socket", "url_scheme", "base_url_scheme"])
+def test_verified_unix_socket_works_without_insecure_loopback_opt_in(
+    tmp_path,
+    monkeypatch,
+    unix_lease_server,
+    config_mode,
+):
+    monkeypatch.delenv("UNITARES_ALLOW_INSECURE_LOOPBACK_LEASE_HTTP", raising=False)
+    monkeypatch.delenv("LEASE_PLANE_BASE_URL", raising=False)
+    monkeypatch.delenv("UNITARES_LEASE_PLANE_URL", raising=False)
+    monkeypatch.delenv("UNITARES_LEASE_PLANE_UNIX_SOCKET", raising=False)
+    monkeypatch.setenv("LEASE_PLANE_BEARER_TOKEN", "lease-token")
+    monkeypatch.setenv("UNITARES_SECRETS_ENV", "/dev/null")
+
+    if config_mode == "env_socket":
+        monkeypatch.setenv("UNITARES_LEASE_PLANE_UNIX_SOCKET", str(unix_lease_server))
+    elif config_mode == "url_scheme":
+        monkeypatch.setenv("UNITARES_LEASE_PLANE_URL", f"unix://{unix_lease_server}")
+    else:
+        monkeypatch.setenv("LEASE_PLANE_BASE_URL", f"unix://{unix_lease_server}")
+
+    assert file_lease_hook._bearer_token_with_source() == ("lease-token", "configured")
+
+    status = file_lease_hook.lease_status()
+    assert status["state"] == "on"
+    assert status["bearer"] == "configured"
+    assert status["url"] == f"unix://{unix_lease_server}"
+
+    tool_use_id = f"toolu_uds_{config_mode}"
+    rc = file_lease_hook.main(
+        ["pre-edit", "--workspace", str(tmp_path)],
+        stdin_text=_payload(tool_use_id=tool_use_id),
+    )
+    assert rc == 0
+    acquires = [c for c in LeaseHandler.calls if c["path"] == "/v1/lease/acquire"]
+    assert len(acquires) == 1
+    assert acquires[0]["authorization"] == "Bearer lease-token"
+
+    rc = file_lease_hook.main(
+        ["release-edit", "--workspace", str(tmp_path)],
+        stdin_text=_payload(tool_use_id=tool_use_id),
+    )
+    assert rc == 0
+    releases = [c for c in LeaseHandler.calls if c["path"] == "/v1/lease/release"]
+    assert len(releases) == 1
+
+
+@pytest.mark.parametrize("bad_mode", [0o640, 0o644, 0o660, 0o666])
+def test_unix_socket_rejects_group_or_world_permissions_fail_closed(
+    tmp_path,
+    monkeypatch,
+    unix_lease_server,
+    bad_mode,
+):
+    os.chmod(unix_lease_server, bad_mode)
+    monkeypatch.delenv("UNITARES_ALLOW_INSECURE_LOOPBACK_LEASE_HTTP", raising=False)
+    monkeypatch.setenv("UNITARES_LEASE_PLANE_UNIX_SOCKET", str(unix_lease_server))
+    monkeypatch.setenv("LEASE_PLANE_BEARER_TOKEN", "lease-token")
+    monkeypatch.setenv("UNITARES_SECRETS_ENV", "/dev/null")
+
+    assert file_lease_hook._bearer_token_with_source() == ("", "insecure_transport")
+    assert file_lease_hook._http_json("GET", "/v1/health", token="lease-token")["ok"] is False
+    status = file_lease_hook.lease_status()
+    assert status["state"] == "off"
+    assert status["reason"] == "insecure_transport"
+    assert LeaseHandler.calls == []
+
+    monkeypatch.setenv("UNITARES_FILE_LEASES_REQUIRED", "1")
+    rc = file_lease_hook.main(
+        ["pre-edit", "--workspace", str(tmp_path)],
+        stdin_text=_payload(tool_use_id="toolu_uds_bad_perm"),
+    )
+    assert rc == 2
+    assert LeaseHandler.calls == []
+
+
+def test_unix_socket_rejects_symlink_regular_file_and_foreign_uid(
+    tmp_path,
+    monkeypatch,
+    unix_lease_server,
+):
+    monkeypatch.delenv("UNITARES_ALLOW_INSECURE_LOOPBACK_LEASE_HTTP", raising=False)
+    monkeypatch.setenv("LEASE_PLANE_BEARER_TOKEN", "lease-token")
+    monkeypatch.setenv("UNITARES_SECRETS_ENV", "/dev/null")
+
+    # Symlink to a valid 0600 socket is refused.
+    link = unix_lease_server.parent / "link.sock"
+    link.symlink_to(unix_lease_server)
+    monkeypatch.setenv("UNITARES_LEASE_PLANE_UNIX_SOCKET", str(link))
+    assert file_lease_hook._bearer_token_with_source() == ("", "insecure_transport")
+    assert file_lease_hook._http_json("GET", "/v1/health", token="lease-token")["ok"] is False
+    assert LeaseHandler.calls == []
+
+    # Regular file with 0600 mode is refused (not S_ISSOCK).
+    regular = tmp_path / "not-a-socket.sock"
+    regular.write_text("x", encoding="utf-8")
+    os.chmod(regular, 0o600)
+    monkeypatch.setenv("UNITARES_LEASE_PLANE_UNIX_SOCKET", str(regular))
+    assert file_lease_hook._bearer_token_with_source() == ("", "insecure_transport")
+    assert file_lease_hook._http_json("GET", "/v1/health", token="lease-token")["ok"] is False
+
+    # Socket owned by another UID is refused.
+    monkeypatch.setenv("UNITARES_LEASE_PLANE_UNIX_SOCKET", str(unix_lease_server))
+    monkeypatch.setattr(os, "getuid", lambda: os.lstat(unix_lease_server).st_uid + 1)
+    assert file_lease_hook._bearer_token_with_source() == ("", "insecure_transport")
+    assert file_lease_hook._http_json("GET", "/v1/health", token="lease-token")["ok"] is False
+    assert LeaseHandler.calls == []
+
+
+def test_unix_socket_malformed_url_and_missing_socket_fail_closed(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.delenv("UNITARES_ALLOW_INSECURE_LOOPBACK_LEASE_HTTP", raising=False)
+    monkeypatch.delenv("UNITARES_LEASE_PLANE_UNIX_SOCKET", raising=False)
+    monkeypatch.delenv("LEASE_PLANE_BASE_URL", raising=False)
+    monkeypatch.setenv("LEASE_PLANE_BEARER_TOKEN", "lease-token")
+    monkeypatch.setenv("UNITARES_SECRETS_ENV", "/dev/null")
+
+    # Malformed unix:// URL with authority/host is rejected.
+    monkeypatch.setenv("UNITARES_LEASE_PLANE_URL", "unix://evil-host/tmp/lp.sock")
+    assert file_lease_hook._bearer_token_with_source() == ("", "insecure_transport")
+    assert file_lease_hook._http_json("GET", "/v1/health", token="lease-token")["ok"] is False
+
+    # Missing socket withholds bearer and reports unreachable in status.
+    missing = tmp_path / "does-not-exist.sock"
+    monkeypatch.setenv("UNITARES_LEASE_PLANE_URL", f"unix://{missing}")
+    assert file_lease_hook._bearer_token_with_source() == ("", "insecure_transport")
+    status = file_lease_hook.lease_status()
+    assert status["state"] == "off"
+    assert status["reason"] == "unreachable"
+    assert status["url"] == f"unix://{missing}"

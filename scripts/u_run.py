@@ -5,55 +5,57 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import hmac
-import http.client
-import ipaddress
-import json
 import os
 import secrets
 import signal
-import socket
 import subprocess
 import sys
-import threading
 import time
-import urllib.parse
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
 
-from _http_auth import DEFAULT_MAX_RESPONSE_BYTES, read_limited_response
+try:
+    from .sidecar_client import (
+        DEFAULT_SIDECAR_URL,
+        HTTP_TIMEOUT,
+        ListenerNotProven,
+        PROOF_MAX_BYTES,
+        PROOF_TIMEOUT,
+        SidecarClientError as URunError,
+        SidecarUnavailable,
+        _exchange,
+        _prove_listener,
+        _require_declared_length,
+        proven_exchange as _sidecar_proven_exchange,
+        sidecar_bind as _sidecar_bind,
+    )
+except ImportError:  # Executed directly or via scripts/ on sys.path.
+    from sidecar_client import (
+        DEFAULT_SIDECAR_URL,
+        HTTP_TIMEOUT,
+        ListenerNotProven,
+        PROOF_MAX_BYTES,
+        PROOF_TIMEOUT,
+        SidecarClientError as URunError,
+        SidecarUnavailable,
+        _exchange,
+        _prove_listener,
+        _require_declared_length,
+        proven_exchange as _sidecar_proven_exchange,
+        sidecar_bind as _sidecar_bind,
+    )
 
 
 DEFAULT_SERVER_URL = "http://localhost:8767"
-DEFAULT_SIDECAR_URL = "http://127.0.0.1:8768"
 DEFAULT_MODEL_TYPE = "u-run"
 STARTUP_TIMEOUT = 10.0
-HTTP_TIMEOUT = 25.0
-#: Wall-clock budget for the unauthenticated startup challenge.
-PROOF_TIMEOUT = 0.5
-PROOF_MAX_BYTES = 4096
 #: Wall-clock budget for the local /health read on a proven connection.
 HEALTH_TIMEOUT = 2.0
-#: Statuses that carry no body under HTTP; never a valid answer from these
-#: JSON endpoints, and ``http.client`` treats their length as zero.
-_BODYLESS_STATUSES = frozenset({204, 304})
 
 #: The clock every exchange deadline is measured on (replaceable in tests).
 _monotonic = time.monotonic
-
-
-class URunError(RuntimeError):
-    """The wrapper could not establish its local lifecycle contract."""
-
-
-class SidecarUnavailable(URunError):
-    """Nothing on the sidecar port answered the startup challenge in time."""
-
-
-class ListenerNotProven(URunError):
-    """A listener answered on the sidecar port without proving the startup secret."""
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -80,6 +82,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--sidecar-url",
         default=os.environ.get("UNITARES_SIDECAR_URL", DEFAULT_SIDECAR_URL),
         help="Local identity sidecar base URL.",
+    )
+    parser.add_argument(
+        "--sidecar-socket",
+        default=os.environ.get("UNITARES_SIDECAR_SOCKET", ""),
+        help=(
+            "Local identity sidecar Unix domain socket path "
+            "(takes precedence over --sidecar-url when set)."
+        ),
     )
     parser.add_argument(
         "--slot",
@@ -110,235 +120,29 @@ def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
     return args, command
 
 
-def _sidecar_bind(sidecar_url: str) -> tuple[str, int, str]:
-    base = sidecar_url.rstrip("/")
-    parsed = urllib.parse.urlsplit(base)
-    if (
-        parsed.scheme.lower() != "http"
-        or parsed.path
-        or parsed.query
-        or parsed.fragment
-        or parsed.username
-        or parsed.password
-    ):
-        raise URunError("--sidecar-url must be an HTTP base URL without a path")
-    try:
-        port = 80 if parsed.port is None else parsed.port
-    except ValueError as exc:
-        raise URunError(f"invalid sidecar port: {exc}") from exc
-    host = parsed.hostname or ""
-    if host == "localhost":
-        bind_host = "127.0.0.1"
-    else:
-        try:
-            address = ipaddress.ip_address(host)
-        except ValueError as exc:
-            raise URunError(
-                "--sidecar-url must use localhost or an IPv4 loopback address"
-            ) from exc
-        if address.version != 4 or not address.is_loopback:
-            raise URunError(
-                "--sidecar-url must use localhost or an IPv4 loopback address"
-            )
-        bind_host = host
-    if not 1 <= port <= 65535:
-        raise URunError("--sidecar-url port must be between 1 and 65535")
-    return bind_host, port, base
-
-
-def _require_declared_length(response: http.client.HTTPResponse) -> None:
-    """Refuse a response whose body is not delimited by an explicit length."""
-    if 100 <= response.status < 200 or response.status in _BODYLESS_STATUSES:
-        raise http.client.HTTPException(
-            f"HTTP {response.status} is not a JSON response"
-        )
-    if response.getheader("Transfer-Encoding") is not None:
-        raise http.client.HTTPException("Transfer-Encoding is not accepted")
-    if response.getheader("Content-Length") is None:
-        raise http.client.HTTPException("Content-Length is required")
-
-
-def _exchange(
-    connection: http.client.HTTPConnection,
-    method: str,
-    path: str,
-    *,
-    headers: dict[str, str],
-    seconds: float,
-    max_bytes: int,
-    body: bytes | None = None,
-) -> tuple[http.client.HTTPResponse, bytes]:
-    """Send one request and read its whole response within ``seconds``.
-
-    The socket timeout bounds each read, not the exchange: a peer that keeps
-    sending a byte at a time would otherwise hold u-run indefinitely, so a
-    watchdog shuts the socket down when the wall clock runs out. That shutdown
-    can end a read early with whatever bytes had arrived, so the response is
-    accepted only if it completed before the deadline (checked on the clock
-    itself, not only by whether the watchdog ran) and the body is exactly an
-    explicit ``Content-Length``: no chunked encoding and no bodyless status.
-    Raises ``TimeoutError`` when the time ran out and ``OSError``,
-    ``http.client.HTTPException`` or ``ValueError`` when the exchange failed
-    or the response was malformed or incomplete.
-    """
-    deadline = _monotonic() + max(0.0, seconds)
-    expired = threading.Event()
-    sock = connection.sock
-
-    def expire() -> None:
-        expired.set()
-        try:
-            sock.shutdown(socket.SHUT_RDWR)
-        except OSError:
-            pass
-
-    timer = threading.Timer(max(0.0, seconds), expire)
-    timer.daemon = True
-    timer.start()
-    try:
-        connection.request(method, path, body=body, headers=headers)
-        response = connection.getresponse()
-        _require_declared_length(response)
-        raw = read_limited_response(response, max_bytes=max_bytes)
-    except (OSError, http.client.HTTPException, ValueError) as exc:
-        if expired.is_set():
-            raise TimeoutError(f"no response within {seconds}s") from exc
-        raise
-    finally:
-        timer.cancel()
-    # A delayed watchdog can lose the race with a late last byte, so the
-    # deadline is also checked here, after the exchange finished.
-    if expired.is_set() or _monotonic() >= deadline:
-        raise TimeoutError(f"no response within {seconds}s")
-    # http.client counts down the declared length as it reads; anything but
-    # zero is a body cut short, or one with no declared length at all.
-    if response.length != 0:
-        raise http.client.IncompleteRead(raw, response.length)
-    return response, raw
-
-
-def _prove_listener(
-    connection: http.client.HTTPConnection, url: str, startup_secret: str
-) -> None:
-    """Challenge the listener and leave the proven connection open."""
-    challenge = secrets.token_urlsafe(32)
-    query = urllib.parse.urlencode({"challenge": challenge})
-    try:
-        response, raw = _exchange(
-            connection,
-            "GET",
-            f"/startup-proof?{query}",
-            headers={"Accept": "application/json", "Connection": "keep-alive"},
-            seconds=PROOF_TIMEOUT,
-            max_bytes=PROOF_MAX_BYTES,
-        )
-    except TimeoutError as exc:
-        raise SidecarUnavailable(
-            f"{url} did not answer the startup challenge within {PROOF_TIMEOUT}s"
-        ) from exc
-    except OSError as exc:
-        # Refused, reset or closed before any answer.
-        raise SidecarUnavailable(f"{url} is unavailable: {exc}") from exc
-    except (http.client.HTTPException, ValueError) as exc:
-        raise ListenerNotProven(
-            f"{url} returned a malformed startup-proof response: "
-            f"{type(exc).__name__}"
-        ) from exc
-    if response.status != 200:
-        raise ListenerNotProven(
-            f"{url} answered the startup challenge with HTTP {response.status}"
-        )
-    try:
-        decoded = json.loads(raw.decode("utf-8"))
-    except ValueError as exc:
-        raise ListenerNotProven(f"{url} returned an invalid startup proof") from exc
-    proof = decoded.get("proof") if isinstance(decoded, dict) else None
-    expected = hmac.new(
-        startup_secret.encode("utf-8"),
-        challenge.encode("utf-8"),
-        hashlib.sha256,
-    ).hexdigest()
-    if not (
-        isinstance(decoded, dict)
-        and decoded.get("success") is True
-        and isinstance(proof, str)
-        and proof.isascii()
-        and hmac.compare_digest(proof, expected)
-    ):
-        raise ListenerNotProven(f"{url} did not prove the startup secret")
-    if response.will_close or connection.sock is None:
-        raise ListenerNotProven(
-            f"{url} proved the startup secret but closed the connection; "
-            "a sidecar started before this u-run version must be restarted"
-        )
-
-
 def _proven_exchange(
     sidecar_url: str,
-    startup_secret: str,
+    startup_secret: str | None,
     *,
     path: str,
     capability: str,
     payload: dict[str, Any] | None = None,
     slot: str = "",
     timeout: float = HTTP_TIMEOUT,
+    sidecar_socket: str = "",
 ) -> dict[str, Any]:
-    """Prove the listener, then send one capability request on that connection.
-
-    A connection stays with the process that accepted it, so a process that
-    binds the port after the proof never receives the capability. Raises
-    ``SidecarUnavailable`` when nothing answered the challenge,
-    ``ListenerNotProven`` when a listener answered without proving the startup
-    secret, and ``URunError`` when the proven request itself fails.
-    """
-    host, port, base = _sidecar_bind(sidecar_url)
-    url = f"{base}{path}"
-    connection = http.client.HTTPConnection(host, port, timeout=PROOF_TIMEOUT)
-    try:
-        try:
-            connection.connect()
-        except OSError as exc:
-            raise SidecarUnavailable(f"{url} is unavailable: {exc}") from exc
-        # Never reconnect: a fresh connection would reach whatever holds the
-        # port now, not the listener that just proved itself.
-        connection.auto_open = 0
-        _prove_listener(connection, url, startup_secret)
-        headers = {
-            "Accept": "application/json",
-            "Authorization": f"Bearer {capability}",
-            "Connection": "close",
-        }
-        if slot:
-            headers["X-UNITARES-Slot"] = slot
-        body = None
-        if payload is not None:
-            body = json.dumps(payload).encode("utf-8")
-            headers["Content-Type"] = "application/json"
-        try:
-            connection.sock.settimeout(timeout)
-            response, raw = _exchange(
-                connection,
-                "POST" if payload is not None else "GET",
-                path,
-                headers=headers,
-                body=body,
-                seconds=timeout,
-                max_bytes=DEFAULT_MAX_RESPONSE_BYTES,
-            )
-        except (OSError, http.client.HTTPException, ValueError) as exc:
-            raise URunError(f"{url} failed: {exc}") from exc
-    finally:
-        connection.close()
-    if not 200 <= response.status < 300:
-        detail = raw[:300].decode("utf-8", errors="replace")
-        raise URunError(f"{url} returned HTTP {response.status}: {detail}")
-    try:
-        decoded = json.loads(raw.decode("utf-8"))
-    except ValueError as exc:
-        raise URunError(f"{url} returned invalid JSON") from exc
-    if not isinstance(decoded, dict):
-        raise URunError(f"{url} returned a non-object JSON response")
-    return decoded
+    """Prove the listener (or validate UDS), then send one capability request."""
+    return _sidecar_proven_exchange(
+        sidecar_url,
+        startup_secret,
+        path=path,
+        capability=capability,
+        payload=payload,
+        slot=slot,
+        timeout=timeout,
+        sidecar_socket=sidecar_socket or None,
+        clock=_monotonic,
+    )
 
 
 def _validate_health(
@@ -403,9 +207,13 @@ def _stop_process(process: subprocess.Popen[Any] | None) -> None:
 
 
 def _proven_health(
-    sidecar_url: str, startup_secret: str, capability: str
+    sidecar_url: str,
+    startup_secret: str | None,
+    capability: str,
+    *,
+    sidecar_socket: str = "",
 ) -> dict[str, Any] | None:
-    """Return /health from a proven listener, or None when nothing answered."""
+    """Return /health from a proven listener (or validated UDS), or None when unavailable."""
     try:
         return _proven_exchange(
             sidecar_url,
@@ -413,6 +221,7 @@ def _proven_health(
             path="/health",
             capability=capability,
             timeout=HEALTH_TIMEOUT,
+            sidecar_socket=sidecar_socket,
         )
     except SidecarUnavailable:
         return None
@@ -428,12 +237,22 @@ def ensure_sidecar(
     slot: str,
     model_type: str,
     capability: str,
-    startup_secret: str,
+    startup_secret: str | None,
     reuse_existing: bool,
+    sidecar_socket: str = "",
 ) -> subprocess.Popen[Any] | None:
-    host, port, sidecar_url = _sidecar_bind(sidecar_url)
+    socket_path = os.path.expanduser(sidecar_socket.strip()) if sidecar_socket.strip() else ""
+    host = ""
+    port = 0
+    if not socket_path:
+        host, port, sidecar_url = _sidecar_bind(sidecar_url)
     if reuse_existing:
-        health = _proven_health(sidecar_url, startup_secret, capability)
+        health = _proven_health(
+            sidecar_url,
+            startup_secret,
+            capability,
+            sidecar_socket=socket_path,
+        )
         if health is not None:
             _validate_health(
                 health,
@@ -447,23 +266,33 @@ def ensure_sidecar(
     command = [
         sys.executable,
         str(Path(__file__).resolve().with_name("identity_sidecar.py")),
-        "--host",
-        host,
-        "--port",
-        str(port),
-        "--server-url",
-        server_url,
-        "--workspace",
-        str(workspace),
-        "--slot",
-        slot,
-        "--model-type",
-        model_type,
     ]
+    if socket_path:
+        command.extend(["--unix-socket", socket_path])
+    else:
+        command.extend(["--host", host, "--port", str(port)])
+    command.extend(
+        [
+            "--server-url",
+            server_url,
+            "--workspace",
+            str(workspace),
+            "--slot",
+            slot,
+            "--model-type",
+            model_type,
+        ]
+    )
     try:
         sidecar_environment = os.environ.copy()
         sidecar_environment["UNITARES_SIDECAR_CAPABILITY"] = capability
-        sidecar_environment["UNITARES_SIDECAR_STARTUP_SECRET"] = startup_secret
+        if socket_path:
+            sidecar_environment["UNITARES_SIDECAR_SOCKET"] = socket_path
+            sidecar_environment.pop("UNITARES_SIDECAR_STARTUP_SECRET", None)
+        else:
+            sidecar_environment.pop("UNITARES_SIDECAR_SOCKET", None)
+            if startup_secret:
+                sidecar_environment["UNITARES_SIDECAR_STARTUP_SECRET"] = startup_secret
         process = subprocess.Popen(
             command,
             stdin=subprocess.DEVNULL,
@@ -479,7 +308,12 @@ def ensure_sidecar(
     deadline = time.monotonic() + STARTUP_TIMEOUT
     try:
         while time.monotonic() < deadline:
-            health = _proven_health(sidecar_url, startup_secret, capability)
+            health = _proven_health(
+                sidecar_url,
+                startup_secret,
+                capability,
+                sidecar_socket=socket_path,
+            )
             if health is not None:
                 _validate_health(
                     health,
@@ -506,10 +340,11 @@ def ensure_sidecar(
 def _start_session(
     *,
     sidecar_url: str,
-    startup_secret: str,
+    startup_secret: str | None,
     slot: str,
     model_type: str,
     capability: str,
+    sidecar_socket: str = "",
 ) -> None:
     response = _proven_exchange(
         sidecar_url,
@@ -519,6 +354,7 @@ def _start_session(
         payload={"slot": slot, "model_type": model_type, "replace_existing": True},
         slot=slot,
         capability=capability,
+        sidecar_socket=sidecar_socket,
     )
     result = response.get("result")
     if (
@@ -549,15 +385,17 @@ def _exit_summary(return_code: int, exit_code: int, wall_seconds: float) -> str:
 def _submit_exit_checkin(
     *,
     sidecar_url: str,
-    startup_secret: str,
+    startup_secret: str | None,
     slot: str,
     return_code: int,
     exit_code: int,
     wall_seconds: float,
     capability: str,
+    sidecar_socket: str = "",
 ) -> None:
     # The child may run for hours and the listener may have changed hands;
-    # the check-in travels on a connection that has just proved itself.
+    # the check-in travels on a connection that has just proved itself (or over
+    # the validated owner-only UDS).
     response = _proven_exchange(
         sidecar_url,
         startup_secret,
@@ -571,6 +409,7 @@ def _submit_exit_checkin(
         },
         slot=slot,
         capability=capability,
+        sidecar_socket=sidecar_socket,
     )
     if response.get("success") is not True:
         raise URunError(f"exit check-in was not accepted: {response}")
@@ -635,12 +474,22 @@ def main(argv: list[str] | None = None) -> int:
     configured_startup_secret = (
         os.environ.get("UNITARES_SIDECAR_STARTUP_SECRET") or ""
     ).strip()
+    sidecar_socket = args.sidecar_socket.strip()
+    if sidecar_socket:
+        sidecar_socket = os.path.expanduser(sidecar_socket)
     capability = configured_capability or secrets.token_urlsafe(32)
     startup_secret = configured_startup_secret or secrets.token_urlsafe(32)
     owned_sidecar: subprocess.Popen[Any] | None = None
 
     try:
-        _host, _port, sidecar_url = _sidecar_bind(args.sidecar_url)
+        if sidecar_socket:
+            sidecar_url = ""
+            effective_startup_secret: str | None = None
+            reuse_existing = bool(configured_capability)
+        else:
+            _host, _port, sidecar_url = _sidecar_bind(args.sidecar_url)
+            effective_startup_secret = startup_secret
+            reuse_existing = bool(configured_capability and configured_startup_secret)
         owned_sidecar = ensure_sidecar(
             sidecar_url=sidecar_url,
             server_url=server_url,
@@ -648,36 +497,48 @@ def main(argv: list[str] | None = None) -> int:
             slot=slot,
             model_type=model_type,
             capability=capability,
-            startup_secret=startup_secret,
-            reuse_existing=bool(configured_capability and configured_startup_secret),
+            startup_secret=effective_startup_secret,
+            reuse_existing=reuse_existing,
+            sidecar_socket=sidecar_socket,
         )
         _start_session(
             sidecar_url=sidecar_url,
-            startup_secret=startup_secret,
+            startup_secret=effective_startup_secret,
             slot=slot,
             model_type=model_type,
             capability=capability,
+            sidecar_socket=sidecar_socket,
         )
+        sidecar_client_path = str(Path(__file__).resolve().with_name("sidecar_client.py"))
         environment = os.environ.copy()
         environment.update(
             {
                 "UNITARES_SERVER_URL": server_url,
-                "UNITARES_SIDECAR_URL": sidecar_url,
                 "UNITARES_SIDECAR_SLOT": slot,
                 "UNITARES_SIDECAR_CAPABILITY": capability,
+                "UNITARES_SIDECAR_CLIENT": sidecar_client_path,
                 "UNITARES_MODEL_TYPE": model_type,
             }
         )
+        if sidecar_socket:
+            environment["UNITARES_SIDECAR_SOCKET"] = sidecar_socket
+            environment.pop("UNITARES_SIDECAR_URL", None)
+            environment.pop("UNITARES_SIDECAR_STARTUP_SECRET", None)
+        else:
+            environment["UNITARES_SIDECAR_URL"] = sidecar_url
+            environment["UNITARES_SIDECAR_STARTUP_SECRET"] = startup_secret
+            environment.pop("UNITARES_SIDECAR_SOCKET", None)
         return_code, exit_code, wall_seconds = _run_child(command, environment)
         try:
             _submit_exit_checkin(
                 sidecar_url=sidecar_url,
-                startup_secret=startup_secret,
+                startup_secret=effective_startup_secret,
                 slot=slot,
                 return_code=return_code,
                 exit_code=exit_code,
                 wall_seconds=wall_seconds,
                 capability=capability,
+                sidecar_socket=sidecar_socket,
             )
         except Exception as exc:
             # Lifecycle telemetry must not replace the wrapped command's exit

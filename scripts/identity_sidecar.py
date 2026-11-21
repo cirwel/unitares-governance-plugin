@@ -38,7 +38,10 @@ import ipaddress
 import json
 import os
 import secrets
+import signal
 import socket
+import socketserver
+import stat
 import sys
 import threading
 import time
@@ -87,8 +90,12 @@ DEFAULT_PORT = 8768
 DEFAULT_TIMEOUT = 20.0
 MAX_REQUEST_BYTES = 1024 * 1024
 CLIENT_SOCKET_TIMEOUT = 5.0
-#: Wall-clock bound on reading one request (line, headers, then body); the
-#: per-recv socket timeout alone lets a client trickle bytes indefinitely.
+#: Tight wall-clock bound on reading the request line and headers before
+#: capability authentication succeeds.
+AUTH_HEADER_DEADLINE = 1.0
+#: Wall-clock bound on reading one authenticated request (line, headers, then
+#: body); the per-recv socket timeout alone lets a client trickle bytes
+#: indefinitely.
 REQUEST_READ_DEADLINE = 10.0
 #: The clock the request read deadline is measured on (replaceable in tests).
 _read_clock = time.monotonic
@@ -197,33 +204,71 @@ def canonicalize_call(name: object, arguments: dict[str, Any]) -> tuple[str, dic
     return name, arguments
 
 
+def _send_503_and_close(server: Any, request: Any) -> None:
+    try:
+        try:
+            request.sendall(
+                b"HTTP/1.1 503 Service Unavailable\r\n"
+                b"Connection: close\r\nContent-Length: 0\r\n\r\n"
+            )
+        except OSError:
+            pass
+    finally:
+        server.shutdown_request(request)
+
+
 class BoundedThreadingHTTPServer(ThreadingHTTPServer):
-    """Threaded loopback server with a hard cap on active handlers."""
+    """Threaded loopback server with bounded worker and pre-auth admission caps."""
 
     daemon_threads = True
     allow_reuse_address = True
     request_queue_size = 64
 
-    def __init__(self, *args: Any, max_workers: int = MAX_REQUEST_WORKERS, **kwargs: Any) -> None:
-        self._request_slots = threading.BoundedSemaphore(max(1, max_workers))
+    def __init__(
+        self,
+        *args: Any,
+        max_workers: int = MAX_REQUEST_WORKERS,
+        max_preauth: int | None = None,
+        **kwargs: Any,
+    ) -> None:
+        workers = max(1, max_workers)
+        preauth = (
+            min(8, max(1, workers // 4))
+            if max_preauth is None
+            else min(workers, max(1, max_preauth))
+        )
+        self.max_workers = workers
+        self.max_preauth = preauth
+        self._request_slots = threading.BoundedSemaphore(workers)
+        self._preauth_slots = threading.BoundedSemaphore(preauth)
+        self._preauth_lock = threading.Lock()
+        self._preauth_requests: set[int] = set()
         super().__init__(*args, **kwargs)
+
+    def release_preauth_slot(self, request: Any) -> bool:
+        """Release the pre-auth admission slot for ``request`` at most once."""
+        req_id = id(request)
+        with self._preauth_lock:
+            if req_id not in self._preauth_requests:
+                return False
+            self._preauth_requests.remove(req_id)
+        self._preauth_slots.release()
+        return True
 
     def process_request(self, request: Any, client_address: Any) -> None:
         if not self._request_slots.acquire(blocking=False):
-            try:
-                try:
-                    request.sendall(
-                        b"HTTP/1.1 503 Service Unavailable\r\n"
-                        b"Connection: close\r\nContent-Length: 0\r\n\r\n"
-                    )
-                except OSError:
-                    pass
-            finally:
-                self.shutdown_request(request)
+            _send_503_and_close(self, request)
             return
+        if not self._preauth_slots.acquire(blocking=False):
+            self._request_slots.release()
+            _send_503_and_close(self, request)
+            return
+        with self._preauth_lock:
+            self._preauth_requests.add(id(request))
         try:
             super().process_request(request, client_address)
         except Exception:
+            self.release_preauth_slot(request)
             self._request_slots.release()
             raise
 
@@ -231,7 +276,156 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
         try:
             super().process_request_thread(request, client_address)
         finally:
+            self.release_preauth_slot(request)
             self._request_slots.release()
+
+
+def _prepare_unix_socket_path(raw_path: str) -> Path:
+    """Validate and prepare an owner-only Unix domain socket path.
+
+    Ensures the parent directory is not a symlink, is owned by the current UID,
+    and has ``0o700`` permissions. Refuses symlinks, non-socket files, foreign-
+    owned sockets, and already-active listeners at the socket path.
+    """
+    if not hasattr(socket, "AF_UNIX") or not hasattr(socketserver, "UnixStreamServer"):
+        raise OSError("Unix domain sockets are not supported on this platform")
+    cleaned = raw_path.strip()
+    if not cleaned or "\x00" in cleaned:
+        raise ValueError("Unix socket path must be a non-empty path without NUL bytes")
+    sock_path = Path(os.path.expanduser(cleaned))
+    if not sock_path.name:
+        raise ValueError("Unix socket path must name a socket file")
+
+    parent = sock_path.parent
+    getuid = getattr(os, "getuid", None)
+    try:
+        parent_info = os.lstat(parent)
+    except FileNotFoundError:
+        parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+        os.chmod(parent, 0o700)
+        parent_info = os.lstat(parent)
+    if stat.S_ISLNK(parent_info.st_mode):
+        raise ValueError(f"Unix socket parent directory must not be a symlink: {parent}")
+    if not stat.S_ISDIR(parent_info.st_mode):
+        raise ValueError(f"Unix socket parent is not a directory: {parent}")
+    if os.name != "nt" and callable(getuid) and parent_info.st_uid != getuid():
+        raise PermissionError(f"Unix socket parent directory must be owned by current user: {parent}")
+    os.chmod(parent, 0o700)
+    parent_info = os.lstat(parent)
+    if os.name != "nt" and (parent_info.st_mode & 0o077):
+        raise PermissionError(f"Unix socket parent directory must be 0700: {parent}")
+
+    try:
+        target_info = os.lstat(sock_path)
+    except FileNotFoundError:
+        return sock_path
+    if stat.S_ISLNK(target_info.st_mode):
+        raise ValueError(f"refusing to bind Unix socket at symlink path: {sock_path}")
+    if not stat.S_ISSOCK(target_info.st_mode):
+        raise ValueError(f"refusing to replace non-socket path with Unix socket: {sock_path}")
+    if os.name != "nt" and callable(getuid) and target_info.st_uid != getuid():
+        raise PermissionError(f"refusing to replace Unix socket owned by another user: {sock_path}")
+
+    # Refuse to steal a socket that currently has an active listener.
+    probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        probe.settimeout(0.1)
+        probe.connect(str(sock_path))
+    except ConnectionRefusedError:
+        os.unlink(sock_path)
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        raise OSError(f"cannot verify existing Unix socket {sock_path}: {exc}") from exc
+    else:
+        raise OSError(f"Unix socket is already in use: {sock_path}")
+    finally:
+        probe.close()
+    return sock_path
+
+
+if hasattr(socketserver, "UnixStreamServer"):
+
+    class BoundedThreadingUnixHTTPServer(
+        socketserver.ThreadingMixIn, socketserver.UnixStreamServer
+    ):
+        """Threaded AF_UNIX HTTP server with owner-only socket and worker cap."""
+
+        daemon_threads = True
+        request_queue_size = 64
+
+        def __init__(
+            self,
+            socket_path: str | Path,
+            RequestHandlerClass: Any,
+            *,
+            max_workers: int = MAX_REQUEST_WORKERS,
+            bind_and_activate: bool = True,
+        ) -> None:
+            workers = max(1, max_workers)
+            self.max_workers = workers
+            self._request_slots = threading.BoundedSemaphore(workers)
+            self._socket_path = _prepare_unix_socket_path(str(socket_path))
+            self._bound_inode: tuple[int, int] | None = None
+            super().__init__(
+                str(self._socket_path),
+                RequestHandlerClass,
+                bind_and_activate=bind_and_activate,
+            )
+
+        def server_bind(self) -> None:
+            super().server_bind()
+            os.chmod(self._socket_path, 0o600)
+            info = os.lstat(self._socket_path)
+            getuid = getattr(os, "getuid", None)
+            if (
+                stat.S_ISLNK(info.st_mode)
+                or not stat.S_ISSOCK(info.st_mode)
+                or (os.name != "nt" and callable(getuid) and info.st_uid != getuid())
+                or (os.name != "nt" and (info.st_mode & 0o077))
+            ):
+                raise PermissionError(
+                    f"bound Unix socket failed owner-only verification: {self._socket_path}"
+                )
+            self._bound_inode = (info.st_dev, info.st_ino)
+            self.server_name = "localhost"
+            self.server_port = 0
+
+        def process_request(self, request: Any, client_address: Any) -> None:
+            if not self._request_slots.acquire(blocking=False):
+                _send_503_and_close(self, request)
+                return
+            try:
+                super().process_request(request, client_address)
+            except Exception:
+                self._request_slots.release()
+                raise
+
+        def process_request_thread(self, request: Any, client_address: Any) -> None:
+            try:
+                super().process_request_thread(request, client_address)
+            finally:
+                self._request_slots.release()
+
+        def server_close(self) -> None:
+            try:
+                super().server_close()
+            finally:
+                bound_inode = self._bound_inode
+                self._bound_inode = None
+                if bound_inode is not None:
+                    try:
+                        info = os.lstat(self._socket_path)
+                        if (info.st_dev, info.st_ino) == bound_inode:
+                            os.unlink(self._socket_path)
+                    except OSError:
+                        pass
+
+else:  # pragma: no cover
+
+    class BoundedThreadingUnixHTTPServer:  # type: ignore[no-redef]
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            raise OSError("Unix domain sockets are not supported on this platform")
 
 
 def _now_iso() -> str:
@@ -299,7 +493,10 @@ def _handler_base_url(handler: BaseHTTPRequestHandler) -> str:
     host = (forwarded_host.split(",")[0].strip() if forwarded_host else "") or handler.headers.get("Host")
     if not host:
         address = handler.server.server_address
-        host = f"{address[0]}:{address[1]}"
+        if isinstance(address, tuple) and len(address) >= 2:
+            host = f"{address[0]}:{address[1]}"
+        else:
+            host = "localhost"
     return f"{scheme}://{host}".rstrip("/")
 
 
@@ -1170,8 +1367,21 @@ def make_handler(sidecar: IdentitySidecar) -> type[BaseHTTPRequestHandler]:
             self._read_lock = threading.Lock()
             self._read_timer: threading.Timer | None = None
             self._read_deadline_hit = False
+            self._request_started = 0.0
             self._request_read_deadline = 0.0
             self._proof_kept_connection = False
+
+        def address_string(self) -> str:
+            if isinstance(self.client_address, tuple) and self.client_address:
+                return str(self.client_address[0])
+            return "unix"
+
+        def _on_authenticated(self) -> None:
+            """Release pre-auth admission capacity and escalate read deadline."""
+            release_preauth = getattr(self.server, "release_preauth_slot", None)
+            if callable(release_preauth):
+                release_preauth(self.connection)
+            self._request_read_deadline = self._request_started + REQUEST_READ_DEADLINE
 
         def _arm_read_deadline(self) -> None:
             """Arm the current request's read deadline for its remaining time."""
@@ -1215,9 +1425,13 @@ def make_handler(sidecar: IdentitySidecar) -> type[BaseHTTPRequestHandler]:
             return not hit
 
         def handle_one_request(self) -> None:
-            # One wall-clock budget per request: the request line, headers and
-            # any POST body all draw on it.
-            self._request_read_deadline = _read_clock() + REQUEST_READ_DEADLINE
+            # Start with a tight pre-auth header deadline; only after capability
+            # auth succeeds does the request escalate to REQUEST_READ_DEADLINE
+            # (still measured from request start so headers + body share one cap).
+            self._request_started = _read_clock()
+            self._request_read_deadline = self._request_started + min(
+                AUTH_HEADER_DEADLINE, REQUEST_READ_DEADLINE
+            )
             self._arm_read_deadline()
             try:
                 super().handle_one_request()
@@ -1263,8 +1477,9 @@ def make_handler(sidecar: IdentitySidecar) -> type[BaseHTTPRequestHandler]:
             if not sidecar.authorized(self.headers):
                 _json_response(self, 401, {"success": False, "error": "unauthorized"})
                 return
+            self._on_authenticated()
             if path == "/health":
-                _json_response(self, 200, {
+                health_payload: dict[str, Any] = {
                     "success": True,
                     "capability_id": hashlib.sha256(
                         sidecar.capability_token.encode("utf-8")
@@ -1274,7 +1489,10 @@ def make_handler(sidecar: IdentitySidecar) -> type[BaseHTTPRequestHandler]:
                     "default_slot": sidecar.default_slot,
                     "client_config": f"{_handler_base_url(self)}/client-config",
                     "mcp": f"{_handler_base_url(self)}/mcp/",
-                })
+                }
+                if isinstance(self.server.server_address, str):
+                    health_payload["unix_socket"] = self.server.server_address
+                _json_response(self, 200, health_payload)
                 return
             if path in {"/client-config", "/config"}:
                 requested_slot = (query.get("slot") or [""])[0]
@@ -1316,6 +1534,7 @@ def make_handler(sidecar: IdentitySidecar) -> type[BaseHTTPRequestHandler]:
             if not sidecar.authorized(self.headers):
                 _json_response(self, 401, {"success": False, "error": "unauthorized"})
                 return
+            self._on_authenticated()
             self._arm_read_deadline()
             try:
                 raw = _read_request_body(self)
@@ -1382,6 +1601,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default=os.environ.get("UNITARES_SIDECAR_HOST", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=int(os.environ.get("UNITARES_SIDECAR_PORT", DEFAULT_PORT)))
+    parser.add_argument(
+        "--unix-socket",
+        default=os.environ.get("UNITARES_SIDECAR_SOCKET", ""),
+        help="Listen on an owner-only Unix domain socket (0600 in 0700 parent dir) instead of loopback TCP.",
+    )
     parser.add_argument("--server-url", default=os.environ.get("UNITARES_SERVER_URL", DEFAULT_SERVER_URL))
     parser.add_argument("--workspace", default=os.getcwd())
     parser.add_argument("--slot", default=os.environ.get("UNITARES_SIDECAR_SLOT", ""))
@@ -1392,15 +1616,17 @@ def main(argv: list[str] | None = None) -> int:
                         help="default number of check-in log lines included by GET /audit")
     args = parser.parse_args(argv)
 
-    raw_host = args.host.strip()
-    try:
-        address = ipaddress.ip_address(raw_host.strip("[]"))
-    except ValueError:
-        if raw_host.lower() != "localhost":
-            parser.error("--host must be localhost or a loopback IP address")
-    else:
-        if not address.is_loopback:
-            parser.error("--host must be localhost or a loopback IP address")
+    unix_socket = args.unix_socket.strip()
+    if not unix_socket:
+        raw_host = args.host.strip()
+        try:
+            address = ipaddress.ip_address(raw_host.strip("[]"))
+        except ValueError:
+            if raw_host.lower() != "localhost":
+                parser.error("--host must be localhost or a loopback IP address")
+        else:
+            if not address.is_loopback:
+                parser.error("--host must be localhost or a loopback IP address")
 
     workspace = Path(args.workspace).expanduser().resolve()
     default_slot = args.slot.strip() or f"sidecar-{_workspace_hash(workspace)}"
@@ -1421,19 +1647,44 @@ def main(argv: list[str] | None = None) -> int:
         ).strip() or None,
         audit_log_tail=args.audit_log_tail,
     )
-    httpd = BoundedThreadingHTTPServer((args.host, args.port), make_handler(sidecar))
-    print(json.dumps({
-        "success": True,
-        "sidecar_url": f"http://{args.host}:{args.port}",
-        "server_url": sidecar.server_url,
-        "workspace": str(workspace),
-        "default_slot": default_slot,
-    }), flush=True)
+    if unix_socket:
+        try:
+            httpd: Any = BoundedThreadingUnixHTTPServer(unix_socket, make_handler(sidecar))
+        except (OSError, ValueError) as exc:
+            parser.error(f"invalid --unix-socket: {exc}")
+        startup_info: dict[str, Any] = {
+            "success": True,
+            "sidecar_url": f"unix://{httpd._socket_path}",
+            "unix_socket": str(httpd._socket_path),
+            "server_url": sidecar.server_url,
+            "workspace": str(workspace),
+            "default_slot": default_slot,
+        }
+    else:
+        httpd = BoundedThreadingHTTPServer((args.host, args.port), make_handler(sidecar))
+        startup_info = {
+            "success": True,
+            "sidecar_url": f"http://{args.host}:{args.port}",
+            "server_url": sidecar.server_url,
+            "workspace": str(workspace),
+            "default_slot": default_slot,
+        }
+    print(json.dumps(startup_info), flush=True)
+
+    previous_sigterm = None
+    if hasattr(signal, "SIGTERM"):
+        def _handle_sigterm(_signum: int, _frame: Any) -> None:
+            raise SystemExit(0)
+
+        previous_sigterm = signal.getsignal(signal.SIGTERM)
+        signal.signal(signal.SIGTERM, _handle_sigterm)
     try:
         httpd.serve_forever()
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, SystemExit):
         pass
     finally:
+        if previous_sigterm is not None and hasattr(signal, "SIGTERM"):
+            signal.signal(signal.SIGTERM, previous_sigterm)
         httpd.server_close()
     return 0
 
