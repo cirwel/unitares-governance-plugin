@@ -80,6 +80,25 @@ bundled transport and register an authenticated `unitares-governance` server.
 local continuity cache. Hook scripts must exist in the client's execution
 environment; installing a plugin on the web does not deploy local scripts.
 
+### Antigravity
+
+Antigravity reads user-global lifecycle hooks from `~/.gemini/config/hooks.json`.
+The Antigravity manifest ships at [hooks/agy-hooks.json](hooks/agy-hooks.json)
+rather than `hooks/hooks.json` so it never collides with Claude Code's automatic
+discovery of `hooks/hooks.json` alongside [`hooks/claude-hooks.json`](hooks/claude-hooks.json).
+
+Install or sync the `"unitares-governance"` hook group (`SessionStart`,
+`PreToolUse` on `call_mcp_tool`, and `Stop`) into `~/.gemini/config/hooks.json`
+without disturbing other hook groups:
+
+```bash
+python3 scripts/install_agy_hooks.py
+```
+
+Pass `--auto-onboard` to opt into lazy `Stop` backstop onboarding
+(`UNITARES_AUTO_ONBOARD=on`), or `--check` to verify that
+`~/.gemini/config/hooks.json` matches this checkout.
+
 ### ChatGPT
 
 Build a hook-free portable package after registering the UNITARES MCP endpoint

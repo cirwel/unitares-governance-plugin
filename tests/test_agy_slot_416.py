@@ -931,8 +931,9 @@ def test_advisory_review_script_help_dry_run_and_cli_invocation(tmp_path):
     shim_dir.mkdir()
     capture_file = tmp_path / "captured.txt"
     shim = shim_dir / "claude"
+    argv_file = tmp_path / "argv.txt"
     shim.write_text(
-        f"#!/usr/bin/env bash\ncat > {str(capture_file)!r}\necho 'CLEAN'\n",
+        f"#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > {str(argv_file)!r}\ncat > {str(capture_file)!r}\necho 'CLEAN'\n",
         encoding="utf-8",
     )
     shim.chmod(0o755)
@@ -950,3 +951,460 @@ def test_advisory_review_script_help_dry_run_and_cli_invocation(tmp_path):
     assert "CLEAN" in res_run.stdout
     captured = capture_file.read_text(encoding="utf-8")
     assert "+v2" in captured
+    claude_argv = argv_file.read_text(encoding="utf-8").splitlines()
+    assert "--permission-mode" in claude_argv and "plan" in claude_argv
+    assert "--tools" in claude_argv and "Read,Grep,Glob" in claude_argv
+
+    # Verify codex and agy shims receive read-only enforcement flags
+    for cli_name, reviewer_arg, expected_tokens in (
+        ("codex", "codex", ("exec", "-s", "read-only")),
+        ("agy", "antigravity", ("-p", "--mode", "plan", "--sandbox", "--disable-slash-commands")),
+    ):
+        cli_shim = shim_dir / cli_name
+        cli_argv_file = tmp_path / f"{cli_name}_argv.txt"
+        cli_shim.write_text(
+            f"#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > {str(cli_argv_file)!r}\ncat >/dev/null\necho 'CLEAN'\n",
+            encoding="utf-8",
+        )
+        cli_shim.chmod(0o755)
+        res_cli = subprocess.run(
+            [
+                str(repo / "scripts" / "dev" / "review.sh"),
+                "--reviewer",
+                reviewer_arg,
+                "--base",
+                "master",
+            ],
+            cwd=str(repo),
+            env={"PATH": f"{shim_dir}:/usr/bin:/bin", "HOME": str(tmp_path)},
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+        assert res_cli.returncode == 0
+        got_argv = cli_argv_file.read_text(encoding="utf-8").splitlines()
+        for tok in expected_tokens:
+            assert tok in got_argv, f"{cli_name} missing {tok!r} in {got_argv}"
+
+    # gemini shim lacking read-only flags in --help fails closed with exit 2
+    gem_unsafe = shim_dir / "gemini"
+    gem_unsafe.write_text(
+        "#!/usr/bin/env bash\nif [[ \"${1:-}\" == \"--help\" ]]; then echo 'usage: gemini -p PROMPT'; exit 0; fi\necho 'SHOULD_NOT_RUN'\n",
+        encoding="utf-8",
+    )
+    gem_unsafe.chmod(0o755)
+    res_gem_unsafe = subprocess.run(
+        [str(repo / "scripts" / "dev" / "review.sh"), "--reviewer", "gemini", "--base", "master"],
+        cwd=str(repo),
+        env={"PATH": f"{shim_dir}:/usr/bin:/bin", "HOME": str(tmp_path)},
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+    assert res_gem_unsafe.returncode == 2
+    assert "SHOULD_NOT_RUN" not in res_gem_unsafe.stdout
+    assert "read-only" in res_gem_unsafe.stderr
+
+    # gemini shim advertising --approval-mode + --sandbox runs with both enforced
+    gem_argv_file = tmp_path / "gemini_argv.txt"
+    gem_unsafe.write_text(
+        f"#!/usr/bin/env bash\nif [[ \"${{1:-}}\" == \"--help\" ]]; then echo 'flags: --approval-mode --sandbox'; exit 0; fi\nprintf '%s\\n' \"$@\" > {str(gem_argv_file)!r}\ncat >/dev/null\necho 'CLEAN'\n",
+        encoding="utf-8",
+    )
+    res_gem_safe = subprocess.run(
+        [str(repo / "scripts" / "dev" / "review.sh"), "--reviewer", "gemini", "--base", "master"],
+        cwd=str(repo),
+        env={"PATH": f"{shim_dir}:/usr/bin:/bin", "HOME": str(tmp_path)},
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+    assert res_gem_safe.returncode == 0
+    gem_argv = gem_argv_file.read_text(encoding="utf-8").splitlines()
+    assert "--approval-mode" in gem_argv and "plan" in gem_argv and "--sandbox" in gem_argv
+
+
+# ---------------------------------------------------------------------------
+# 6. Codex review hardening regressions (PR #434)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("lineage_state", ["rejected_coincidental", "rejected_cross_role"])
+def test_recover_refuses_live_slot_overwrite_when_lineage_disposition_rejected(
+    tmp_path, monkeypatch, lineage_state
+):
+    """A server-rejected lineage switch must not clobber the active live slot binding."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+    ws = tmp_path / "ws"
+    ws.mkdir()
+
+    slot = f"slot-rejected-{lineage_state}"
+    _write_slot_cache(fake_home, slot, uuid=UUID_C, csid=CSID_C, onboard_origin="agent")
+    transcript_path = tmp_path / f"{slot}.jsonl"
+    _write_transcript(
+        transcript_path,
+        [
+            {"step_index": 0, "type": "USER_INPUT", "content": "switch"},
+            {
+                "step_index": 1,
+                "type": "PLANNER_RESPONSE",
+                "status": "DONE",
+                "tool_calls": [
+                    {
+                        "name": "call_mcp_tool",
+                        "args": {
+                            "ServerName": '"unitares-governance"',
+                            "ToolName": '"start_session"',
+                            "Arguments": json.dumps(
+                                {
+                                    "force_new": True,
+                                    "parent_agent_id": UUID_C,
+                                    "spawn_reason": "explicit",
+                                }
+                            ),
+                        },
+                    }
+                ],
+            },
+            {
+                "step_index": 2,
+                "type": "GENERIC",
+                "status": "DONE",
+                "content": json.dumps(
+                    {
+                        "success": True,
+                        "tool": "start_session",
+                        "agent_uuid": UUID_D,
+                        "client_session_id": CSID_D,
+                        "lineage_state": lineage_state,
+                        "is_new": True,
+                    }
+                ),
+            },
+        ],
+    )
+    payload = {"conversationId": slot, "transcriptPath": str(transcript_path)}
+    assert (
+        stop_hook_event.recover_agy_identity_from_transcript(payload, workspace=ws, slot=slot)
+        is False
+    )
+    bound = load_usable_session_for_hook(ws, json.dumps(payload))
+    assert bound["uuid"] == UUID_C
+    assert bound["client_session_id"] == CSID_C
+
+
+def test_same_turn_double_unparented_mint_blocked_in_pretooluse_and_first_wins_in_recovery(
+    tmp_path, monkeypatch
+):
+    """On an initially unbound slot:
+    - Second unparented start_session in the same turn is denied in PreToolUse
+      (both via pending-turn marker before flush and via transcript inspection).
+    - If two unparented mints appear in an unbound turn's transcript, recovery
+      adopts the FIRST valid mint rather than letting the duplicate override it.
+    """
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+    ws = tmp_path / "ws"
+    ws.mkdir()
+
+    slot = "slot-double-mint-turn1"
+    call1 = _agy_pre_tool_payload(
+        slot,
+        args={
+            "ServerName": "unitares-governance",
+            "ToolName": "start_session",
+            "Arguments": {"force_new": True},
+        },
+    )
+    call1["toolCall"]["id"] = "toolu_first"
+    call2 = _agy_pre_tool_payload(
+        slot,
+        args={
+            "ServerName": "unitares-governance",
+            "ToolName": "start_session",
+            "Arguments": {"force_new": True},
+        },
+    )
+    call2["toolCall"]["id"] = "toolu_second"
+
+    # First unparented mint on unbound slot passes; second in same turn is denied.
+    assert _run_inject_agy(call1, home_dir=fake_home) == {"decision": "allow"}
+    out2 = _run_inject_agy(call2, home_dir=fake_home)
+    assert out2["decision"] == "deny"
+    assert "already in progress" in out2["reason"]
+
+    # Also test transcript-based detection on a fresh unbound slot when call 1 already flushed.
+    slot_tx = "slot-double-mint-tx"
+    tx_path = tmp_path / "double_mint.jsonl"
+    _write_transcript(
+        tx_path,
+        [
+            {"step_index": 0, "type": "USER_INPUT", "content": "turn 1"},
+            {
+                "step_index": 1,
+                "type": "PLANNER_RESPONSE",
+                "status": "DONE",
+                "tool_calls": [
+                    {
+                        "name": "call_mcp_tool",
+                        "args": {
+                            "ServerName": '"unitares-governance"',
+                            "ToolName": '"start_session"',
+                            "Arguments": json.dumps({"force_new": True}),
+                        },
+                    }
+                ],
+            },
+            {
+                "step_index": 2,
+                "type": "GENERIC",
+                "status": "DONE",
+                "content": json.dumps(
+                    {
+                        "success": True,
+                        "tool": "start_session",
+                        "agent_uuid": UUID_A,
+                        "client_session_id": CSID_A,
+                        "is_new": True,
+                    }
+                ),
+            },
+        ],
+    )
+    call_after_tx = _agy_pre_tool_payload(
+        slot_tx,
+        args={
+            "ServerName": "unitares-governance",
+            "ToolName": "start_session",
+            "Arguments": {"force_new": True},
+        },
+    )
+    call_after_tx["transcriptPath"] = str(tx_path)
+    out_tx = _run_inject_agy(call_after_tx, home_dir=fake_home)
+    assert out_tx["decision"] == "deny"
+    assert UUID_A in out_tx["reason"]
+    assert CSID_A in out_tx["reason"]
+
+    # Recovery encountering two unparented mints on an unbound slot keeps the FIRST (UUID_A).
+    tx_both = tmp_path / "both_mints.jsonl"
+    _write_transcript(
+        tx_both,
+        [
+            {"step_index": 0, "type": "USER_INPUT", "content": "turn 1"},
+            {
+                "step_index": 1,
+                "type": "PLANNER_RESPONSE",
+                "status": "DONE",
+                "tool_calls": [
+                    {
+                        "name": "call_mcp_tool",
+                        "args": {
+                            "ServerName": '"unitares-governance"',
+                            "ToolName": '"start_session"',
+                            "Arguments": json.dumps({"force_new": True}),
+                        },
+                    },
+                    {
+                        "name": "call_mcp_tool",
+                        "args": {
+                            "ServerName": '"unitares-governance"',
+                            "ToolName": '"start_session"',
+                            "Arguments": json.dumps({"force_new": True}),
+                        },
+                    },
+                ],
+            },
+            {
+                "step_index": 2,
+                "type": "GENERIC",
+                "status": "DONE",
+                "content": json.dumps(
+                    {
+                        "success": True,
+                        "tool": "start_session",
+                        "agent_uuid": UUID_A,
+                        "client_session_id": CSID_A,
+                        "is_new": True,
+                    }
+                ),
+            },
+            {
+                "step_index": 3,
+                "type": "GENERIC",
+                "status": "DONE",
+                "content": json.dumps(
+                    {
+                        "success": True,
+                        "tool": "start_session",
+                        "agent_uuid": UUID_B,
+                        "client_session_id": CSID_B,
+                        "is_new": True,
+                    }
+                ),
+            },
+        ],
+    )
+    rec_payload = {"conversationId": slot_tx, "transcriptPath": str(tx_both)}
+    assert (
+        stop_hook_event.recover_agy_identity_from_transcript(
+            rec_payload, workspace=ws, slot=slot_tx
+        )
+        is True
+    )
+    bound = load_usable_session_for_hook(ws, json.dumps(rec_payload))
+    assert bound["uuid"] == UUID_A
+    assert bound["client_session_id"] == CSID_A
+
+
+def test_agy_use_tool_gateway_handles_orchestrated_anchor_and_bare_mint_guards(tmp_path):
+    """use_tool(tool_name='start_session'|'onboard') must match direct mint rules."""
+    home_dir = tmp_path / "home"
+    home_dir.mkdir()
+
+    # (a) Unbound orchestrated session calling bare start_session via use_tool gets anchor injected.
+    orch_env = {
+        "UNITARES_ORCHESTRATED": "1",
+        "UNITARES_CLIENT_SESSION_ID": "agent:/thread-gw-416",
+        "UNITARES_ORCHESTRATED_OWNER_PID": "77777",
+        "UNITARES_HOOK_HOST_PID": "77777",
+    }
+    out_dict = _run_inject_agy(
+        _agy_pre_tool_payload(
+            "slot-gw-orch-dict",
+            args={
+                "ServerName": "unitares-governance",
+                "ToolName": "use_tool",
+                "Arguments": {"tool_name": "start_session", "arguments": {}},
+            },
+        ),
+        home_dir=home_dir,
+        extra_env=orch_env,
+    )
+    assert out_dict["decision"] == "allow"
+    inner_out = out_dict["overwrite"]["Arguments"]["arguments"]
+    assert inner_out["client_session_id"] == "agent:/thread-gw-416"
+    assert inner_out["orchestrated"] is True
+
+    # JSON-string nested arguments preserves string type on overwrite.
+    out_str = _run_inject_agy(
+        _agy_pre_tool_payload(
+            "slot-gw-orch-str",
+            args={
+                "ServerName": "unitares-governance",
+                "ToolName": "use_tool",
+                "Arguments": {
+                    "tool_name": "onboard",
+                    "arguments": json.dumps({"model_type": "gemini-4-argon"}),
+                },
+            },
+        ),
+        home_dir=home_dir,
+        extra_env=orch_env,
+    )
+    assert out_str["decision"] == "allow"
+    assert isinstance(out_str["overwrite"]["Arguments"]["arguments"], str)
+    decoded_inner = json.loads(out_str["overwrite"]["Arguments"]["arguments"])
+    assert decoded_inner["client_session_id"] == "agent:/thread-gw-416"
+    assert decoded_inner["orchestrated"] is True
+
+    # (b) Bound slot denies bare use_tool(start_session) and unparseable arguments fail closed.
+    _write_slot_cache(home_dir, "slot-gw-bound", uuid=UUID_A, csid=CSID_A)
+    out_bare = _run_inject_agy(
+        _agy_pre_tool_payload(
+            "slot-gw-bound",
+            args={
+                "ServerName": "unitares-governance",
+                "ToolName": "use_tool",
+                "Arguments": {"tool_name": "start_session", "arguments": {}},
+            },
+        ),
+        home_dir=home_dir,
+    )
+    assert out_bare["decision"] == "deny"
+
+    out_bad = _run_inject_agy(
+        _agy_pre_tool_payload(
+            "slot-gw-bound",
+            args={
+                "ServerName": "unitares-governance",
+                "ToolName": "use_tool",
+                "Arguments": {"tool_name": "start_session", "arguments": "{not-json"},
+            },
+        ),
+        home_dir=home_dir,
+    )
+    assert out_bad["decision"] == "deny"
+
+
+def test_install_agy_hooks_merges_into_user_hooks_json_without_claude_collision(tmp_path):
+    """scripts/install_agy_hooks.py syncs hooks/agy-hooks.json into target hooks.json."""
+    assert not (PLUGIN_ROOT / "hooks" / "hooks.json").exists()
+    installer = PLUGIN_ROOT / "scripts" / "install_agy_hooks.py"
+    assert installer.is_file() and os.access(installer, os.X_OK)
+
+    target = tmp_path / ".gemini" / "config" / "hooks.json"
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        json.dumps({"agent-presence": {"Stop": [{"type": "command", "command": "true"}]}}),
+        encoding="utf-8",
+    )
+
+    # --check fails before install
+    res_check_pre = subprocess.run(
+        [sys.executable, str(installer), "--target", str(target), "--check"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    assert res_check_pre.returncode == 1
+
+    # Install merges unitares-governance and preserves sibling agent-presence
+    res_install = subprocess.run(
+        [sys.executable, str(installer), "--target", str(target)],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    assert res_install.returncode == 0
+    merged = json.loads(target.read_text(encoding="utf-8"))
+    assert "agent-presence" in merged
+    ug = merged["unitares-governance"]
+    resolved_root = str(PLUGIN_ROOT.resolve())
+    assert resolved_root in ug["SessionStart"][0]["command"]
+    assert "${PLUGIN_ROOT" not in ug["SessionStart"][0]["command"]
+    assert ug["PreToolUse"][0]["matcher"] == "call_mcp_tool"
+    assert resolved_root in ug["PreToolUse"][0]["hooks"][0]["command"]
+    assert resolved_root in ug["Stop"][0]["command"]
+    assert "UNITARES_AUTO_ONBOARD=" not in ug["Stop"][0]["command"]
+
+    # --check passes after install
+    res_check_post = subprocess.run(
+        [sys.executable, str(installer), "--target", str(target), "--check"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    assert res_check_post.returncode == 0
+
+    # --auto-onboard prefixes SessionStart and Stop only (never PreToolUse)
+    res_auto = subprocess.run(
+        [sys.executable, str(installer), "--target", str(target), "--auto-onboard"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    assert res_auto.returncode == 0
+    auto_ug = json.loads(target.read_text(encoding="utf-8"))["unitares-governance"]
+    assert auto_ug["SessionStart"][0]["command"].startswith("UNITARES_AUTO_ONBOARD=on ")
+    assert auto_ug["Stop"][0]["command"].startswith("UNITARES_AUTO_ONBOARD=on ")
+    assert "UNITARES_AUTO_ONBOARD=" not in auto_ug["PreToolUse"][0]["hooks"][0]["command"]

@@ -608,6 +608,29 @@ def _parse_onboard_json_lines(text: str) -> dict[str, Any] | None:
             else {}
         )
         is_new_val = resp.get("is_new") if "is_new" in resp else canonical.get("is_new")
+        lineage_state = str(
+            resp.get("lineage_state")
+            or canonical.get("lineage_state")
+            or summary.get("lineage_state")
+            or canon_summary.get("lineage_state")
+            or resp.get("lineage_disposition")
+            or canonical.get("lineage_disposition")
+            or ""
+        ).strip().lower()
+        lineage_rejected = (
+            lineage_state.startswith("rejected")
+            or lineage_state in ("denied", "invalid", "failed", "error")
+            or bool(resp.get("lineage_rejected") or canonical.get("lineage_rejected"))
+            or bool(
+                str(
+                    resp.get("error")
+                    or canonical.get("error")
+                    or resp.get("lineage_error")
+                    or canonical.get("lineage_error")
+                    or ""
+                ).strip()
+            )
+        )
         return {
             "uuid": uuid_val,
             "agent_id": str(resp.get("agent_id") or canonical.get("agent_id") or "").strip(),
@@ -633,6 +656,8 @@ def _parse_onboard_json_lines(text: str) -> dict[str, Any] | None:
                 or ""
             ).strip(),
             "_is_new": is_new_val,
+            "_lineage_state": lineage_state,
+            "_lineage_rejected": lineage_rejected,
         }
     return None
 
@@ -672,22 +697,32 @@ def _extract_onboard_response_from_generic(
     return None
 
 
-def recover_agy_identity_from_transcript(
-    raw: str | Mapping[str, Any],
-    *,
-    workspace: str | Path,
-    slot: str,
-) -> bool:
-    """Recover an agent-minted start_session/onboard binding from the current agy turn."""
+def _agy_turn_mint_marker_path(slot: str) -> Path:
+    safe = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in slot)[:64]
+    return Path.home() / ".unitares" / f".agy-turn-mint-{safe}.json"
+
+
+def clear_agy_turn_mint_marker(slot: str) -> None:
+    """Remove any in-turn pending-mint marker for ``slot`` once a turn ends."""
     slot_clean = (slot or "").strip()
     if not slot_clean:
-        return False
-    payload = _decode_payload(raw)
-    session_id = str(payload.get("conversationId") or payload.get("session_id") or "").strip()
+        return
+    try:
+        _agy_turn_mint_marker_path(slot_clean).unlink(missing_ok=True)
+    except OSError:
+        pass
 
+
+def find_current_turn_agy_onboards(
+    payload: Mapping[str, Any],
+) -> tuple[list[tuple[dict[str, Any], dict[str, str]]], int | None]:
+    """Return chronological ``(candidates, turn_boundary_step)`` for the current agy turn."""
+    session_id = str(payload.get("conversationId") or payload.get("session_id") or "").strip()
     window = _AGY_TRANSCRIPT_TAIL_BYTES
     turn_entries_reversed: list[dict[str, Any]] = []
     transcript_path_used = ""
+    turn_boundary_step: int | None = None
+
     for path in _agy_transcript_candidates(payload, session_id):
         fd = _open_regular_transcript_fd(path)
         if fd is None:
@@ -717,13 +752,16 @@ def recover_agy_identity_from_transcript(
             if not isinstance(item, dict):
                 continue
             if item.get("type") in ("USER_INPUT", "SYSTEM_MESSAGE"):
+                raw_step = item.get("step_index")
+                if isinstance(raw_step, int) and not isinstance(raw_step, bool):
+                    turn_boundary_step = raw_step
                 break
             turn_entries_reversed.append(item)
         transcript_path_used = path
         break
 
     if not turn_entries_reversed:
-        return False
+        return [], turn_boundary_step
 
     candidates: list[tuple[dict[str, Any], dict[str, str]]] = []
     pending_meta: dict[int, dict[str, str]] = {}
@@ -743,6 +781,22 @@ def recover_agy_identity_from_transcript(
                     candidates.append((candidate, call_meta))
             generic_idx += 1
 
+    return candidates, turn_boundary_step
+
+
+def recover_agy_identity_from_transcript(
+    raw: str | Mapping[str, Any],
+    *,
+    workspace: str | Path,
+    slot: str,
+) -> bool:
+    """Recover an agent-minted start_session/onboard binding from the current agy turn."""
+    slot_clean = (slot or "").strip()
+    if not slot_clean:
+        return False
+    clear_agy_turn_mint_marker(slot_clean)
+    payload = _decode_payload(raw)
+    candidates, _turn_boundary_step = find_current_turn_agy_onboards(payload)
     if not candidates:
         return False
 
@@ -771,17 +825,23 @@ def recover_agy_identity_from_transcript(
 
     def _commit_if_eligible(current: dict[str, Any]) -> dict[str, Any] | None:
         nonlocal chosen, matched_existing
-        cur_uuid = str(current.get("uuid") or "").strip()
-        cur_csid = str(current.get("client_session_id") or "").strip()
-        cur_inherited = bool(current.get("prior_process"))
-        if cur_uuid and cur_csid and not cur_inherited:
-            if _is_live_binding_idle(cur_uuid, cur_csid):
-                cur_inherited = True
+        state = dict(current)
+        state_uuid = str(state.get("uuid") or "").strip()
+        state_csid = str(state.get("client_session_id") or "").strip()
+        state_inherited = bool(state.get("prior_process"))
+        if state_uuid and state_csid and not state_inherited:
+            if _is_live_binding_idle(state_uuid, state_csid):
+                state_inherited = True
 
-        for candidate, meta in reversed(candidates):
+        mutated = False
+        # Evaluate candidates in chronological order so that on an unbound/idle
+        # slot the FIRST valid mint binds the slot and any subsequent unparented
+        # duplicate in the same turn is rejected by live-slot protection.
+        for candidate, meta in candidates:
             cand_uuid = str(candidate.get("uuid") or "").strip()
             cand_csid = str(candidate.get("client_session_id") or "").strip()
             is_new = candidate.get("_is_new")
+            lineage_rejected = bool(candidate.get("_lineage_rejected"))
             public_fields = {k: v for k, v in candidate.items() if not k.startswith("_")}
             entry_cache = {
                 **public_fields,
@@ -790,31 +850,44 @@ def recover_agy_identity_from_transcript(
                 "schema_version": 2,
                 "slot": slot_clean,
             }
-            if not cur_uuid or not cur_csid or cur_inherited:
-                chosen = entry_cache
-                return {**current, **entry_cache}
-            if cand_uuid == cur_uuid:
-                if cand_csid == cur_csid:
+            if not state_uuid or not state_csid or state_inherited:
+                state = {**state, **entry_cache}
+                state_uuid = cand_uuid
+                state_csid = cand_csid
+                state_inherited = False
+                mutated = True
+                continue
+            if cand_uuid == state_uuid:
+                if cand_csid == state_csid:
                     matched_existing = True
-                    return None
+                    continue
                 if meta.get("tool") in ("identity", "bind_session") or is_new is False:
-                    if current.get("onboard_origin"):
-                        entry_cache["onboard_origin"] = current["onboard_origin"]
-                    if current.get("onboard_origin_basis"):
-                        entry_cache["onboard_origin_basis"] = current["onboard_origin_basis"]
-                chosen = entry_cache
-                return {**current, **entry_cache}
+                    if state.get("onboard_origin"):
+                        entry_cache["onboard_origin"] = state["onboard_origin"]
+                    if state.get("onboard_origin_basis"):
+                        entry_cache["onboard_origin_basis"] = state["onboard_origin_basis"]
+                state = {**state, **entry_cache}
+                state_csid = cand_csid
+                mutated = True
+                continue
             # Protect a live, non-idle slot binding against silent overwrites by
-            # unparented duplicate mints, mismatched parent_agent_id, or foreign
-            # identity/bind_session resumes (cirwel/unitares-governance-plugin#416).
+            # unparented duplicate mints, mismatched parent_agent_id, rejected
+            # server lineage dispositions (e.g. rejected_coincidental), or
+            # foreign identity/bind_session resumes (#416).
             declared_switch = (
                 meta.get("tool") in ("onboard", "start_session")
-                and meta.get("parent_agent_id") == cur_uuid
+                and meta.get("parent_agent_id") == state_uuid
                 and meta.get("spawn_reason") in _AGY_DELIBERATE_SWITCH_REASONS
+                and not lineage_rejected
             )
             if declared_switch:
-                chosen = entry_cache
-                return {**current, **entry_cache}
+                state = {**state, **entry_cache}
+                state_uuid = cand_uuid
+                state_csid = cand_csid
+                mutated = True
+        if mutated:
+            chosen = state
+            return state
         return None
 
     _auth, committed = _update_cache_transaction(

@@ -174,25 +174,36 @@ build_input() {
 case "${REVIEWER}" in
     claude)
         command -v claude >/dev/null 2>&1 || die "claude CLI not found on PATH"
-        CMD=(claude -p)
+        # Enforce read-only review posture: plan permission mode + read-only built-in tools.
+        CMD=(claude -p --permission-mode plan --tools Read,Grep,Glob)
         [[ -n "${MODEL}" ]] && CMD+=(--model "${MODEL}")
         build_input | "${CMD[@]}"
         ;;
     codex)
         command -v codex >/dev/null 2>&1 || die "codex CLI not found on PATH"
-        CMD=(codex exec --sandbox read-only)
+        # Enforce read-only sandbox for untrusted diffs.
+        CMD=(codex exec -s read-only)
         [[ -n "${MODEL}" ]] && CMD+=(-m "${MODEL}")
         build_input | "${CMD[@]}" -
         ;;
     gemini)
         command -v gemini >/dev/null 2>&1 || die "gemini CLI not found on PATH"
-        CMD=(gemini -p "${REVIEW_PROMPT}")
-        [[ -n "${MODEL}" ]] && CMD+=(-m "${MODEL}")
-        git diff "${DIFF_MODE}" | "${CMD[@]}"
+        # Fail closed unless the installed gemini CLI advertises explicit
+        # read-only enforcement (--approval-mode plan + --sandbox).
+        GEMINI_HELP="$(gemini --help 2>&1 || true)"
+        if grep -q -- '--approval-mode' <<<"${GEMINI_HELP}" \
+            && grep -q -- '--sandbox' <<<"${GEMINI_HELP}"; then
+            CMD=(gemini -p "${REVIEW_PROMPT}" --approval-mode plan --sandbox)
+            [[ -n "${MODEL}" ]] && CMD+=(-m "${MODEL}")
+            git diff "${DIFF_MODE}" | "${CMD[@]}"
+        else
+            die "gemini CLI does not advertise verified read-only flags (--approval-mode plan + --sandbox); refusing to run unrestricted tools on untrusted diff (use --reviewer antigravity, claude, or codex)"
+        fi
         ;;
     antigravity|agy)
         command -v agy >/dev/null 2>&1 || die "agy CLI not found on PATH"
-        CMD=(agy -p)
+        # Enforce plan mode, terminal sandbox, and no slash-command expansion.
+        CMD=(agy -p --mode plan --sandbox --disable-slash-commands)
         [[ -n "${MODEL}" ]] && CMD+=(--model "${MODEL}")
         build_input | "${CMD[@]}"
         ;;
