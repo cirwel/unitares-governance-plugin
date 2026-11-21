@@ -1,0 +1,30 @@
+{
+  "unitares-governance": {
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "exec \"${PLUGIN_ROOT:-.}/hooks/run-hook.cmd\" post-stop --host agy --session-start",
+        "timeout": 10
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "call_mcp_tool",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "exec \"${PLUGIN_ROOT:-.}/hooks/run-hook.cmd\" pre-governance-call --host agy",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "type": "command",
+        "command": "exec \"${PLUGIN_ROOT:-.}/hooks/run-hook.cmd\" post-stop --host agy",
+        "timeout": 30
+      }
+    ]
+  }
+}
