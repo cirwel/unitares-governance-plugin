@@ -96,7 +96,7 @@ python3 scripts/install_agy_hooks.py
 ```
 
 Pass `--auto-onboard` to set `UNITARES_AUTO_ONBOARD=on` in the hook commands
-(ask whatever server is configured, not only a local or HTTPS one), or `--check` (pair with `--check --auto-onboard`
+(now also the default when the variable is unset), or `--check` (pair with `--check --auto-onboard`
 when installed with `--auto-onboard`) to verify that
 `~/.gemini/config/hooks.json` matches this checkout.
 
@@ -168,12 +168,12 @@ kill switch.
 ## Configuration
 
 A session that never calls `start_session` still gets an identity: by default
-(`UNITARES_AUTO_ONBOARD=auto`) the hooks ask the server for one, when the
-server is on this machine or reached over HTTPS. The request is marked as
-coming from a harness, and the server's operator decides whether to accept
-those (`UNITARES_HARNESS_ONBOARDING` on the server). A server that declines,
-or `UNITARES_AUTO_ONBOARD=off`, leaves the session with identity-free
-observations.
+(`UNITARES_AUTO_ONBOARD=on`) the hooks ask the server for one. The request is
+marked as coming from a harness, and the server's operator decides whether to
+accept those (`UNITARES_HARNESS_ONBOARDING` on the server). A server that
+declines, or `UNITARES_AUTO_ONBOARD=off`, leaves the session with
+identity-free observations. Governance data is only ever sent over HTTPS or to
+a loopback address.
 
 Edit leases default to enabled. Missing or unreachable lease infrastructure
 fails open unless `UNITARES_FILE_LEASES_REQUIRED=1`; an actual conflicting

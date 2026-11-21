@@ -55,9 +55,8 @@ create or bind an identity. Two things can:
   identity. The first such call for a thread id creates the identity, and the
   same call in a later turn resumes it.
 - **The hooks.** At the end of a turn the agent left unbound, the Stop hook
-  asks the server to bind the anchor. By default (`UNITARES_AUTO_ONBOARD=auto`)
-  it asks a server on this machine or one reached over HTTPS, and does not ask
-  a plain-HTTP server elsewhere.
+  asks the server to bind the anchor. That is the default
+  (`UNITARES_AUTO_ONBOARD=on`).
 
 A bind made by the hooks is recorded as made by the harness (`onboard_origin`
 is `orchestrated_resume`), not as the agent's own claim. The request is marked
@@ -74,8 +73,7 @@ scripts/thread-anchor-exec --bind <thread-id> -- <cli> [args...]
 
 It sets `UNITARES_AUTO_ONBOARD=anchored`, which a bridge that sets the
 variables itself can set too. The hooks then ask only in the process that owns
-the anchor, whatever kind of server is configured, and a CLI the agent starts
-is left unbound. It replaces a value the launcher inherited. The hooks must be
+the anchor, and a CLI the agent starts is left unbound. It replaces a value the launcher inherited. The hooks must be
 from a plugin version that knows `anchored`; an older one reads any word it
 does not know as `on`.
 

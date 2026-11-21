@@ -282,10 +282,7 @@ CHECKINS_MODE="$(printf '%s' "${UNITARES_CHECKINS:-on}" | tr '[:upper:]' '[:lowe
 # Whether to ask the server for an identity is decided in one place, for this
 # hook and for the session-start text that tells the agent what will happen
 # (scripts/auto_onboard_decision.py): off, anchored (only the owner of a
-# thread anchor), auto (the default: a server this machine has reason to
-# trust), or on. A missing helper means do not ask.
-AUTO_ONBOARD_URL_EXPLICIT=0
-[[ -n "${UNITARES_SERVER_URL:-}" ]] && AUTO_ONBOARD_URL_EXPLICIT=1
+# thread anchor), or on (the default). A missing helper means do not ask.
 AUTO_ONBOARD_DECISION="skip:error"
 if [[ -f "${PLUGIN_ROOT}/scripts/auto_onboard_decision.py" ]]; then
   AUTO_ONBOARD_DECISION="$(python3 "${PLUGIN_ROOT}/scripts/auto_onboard_decision.py" \
@@ -294,13 +291,13 @@ if [[ -f "${PLUGIN_ROOT}/scripts/auto_onboard_decision.py" ]]; then
     "--checkins=${UNITARES_CHECKINS:-on}" \
     "--owns-anchor=${ANCHOR_RESUME_ENABLED:-0}" \
     "--server-url=${SERVER_URL}" \
-    "--url-explicit=${AUTO_ONBOARD_URL_EXPLICIT}" 2>/dev/null)" || AUTO_ONBOARD_DECISION="skip:error"
+    "--slot=${RAW_SLOT:-}" 2>/dev/null)" || AUTO_ONBOARD_DECISION="skip:error"
 fi
 ANCHOR_REPORT="${PLUGIN_ROOT}/scripts/anchor_bind_report.py"
 ANCHOR_BIND_TRIED=0
 case "${AUTO_ONBOARD_DECISION}" in
   skip:checkins_off) ANCHOR_UNBOUND_WHY="check-ins are off" ;;
-  skip:untrusted_endpoint) ANCHOR_UNBOUND_WHY="the server is not on this machine and is not an HTTPS address the operator set" ;;
+  skip:insecure_transport) ANCHOR_UNBOUND_WHY="the server is neither on this machine nor reached over HTTPS" ;;
   *) ANCHOR_UNBOUND_WHY="auto-onboarding is off" ;;
 esac
 if [[ -z "${CSID:-}" && -n "${RAW_SLOT:-}" \

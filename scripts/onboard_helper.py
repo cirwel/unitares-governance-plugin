@@ -437,6 +437,7 @@ def run_onboard(
     force_new: bool = False,
     client_session_id: str | None = None,
     orchestrated: bool = False,
+    harness_request: bool = False,
     auth_token: str | None = None,
     timeout: float = DEFAULT_TIMEOUT,
     initial_state: dict | None = None,
@@ -497,10 +498,6 @@ def run_onboard(
             "client_session_id": anchor,
             "orchestrated": True,
             "onboard_origin": ORCHESTRATED_RESUME_ORIGIN,
-            # A harness is asking. The server's operator decides whether it
-            # creates identities for one; resuming an existing identity is
-            # not affected.
-            "harness_request": True,
         }
     else:
         # Scope the name by slot so the server's name-claim lookup doesn't bind
@@ -513,7 +510,6 @@ def run_onboard(
             "model_type": model_type,
             "force_new": True,
             "onboard_origin": HARNESS_BACKSTOP_ORIGIN,
-            "harness_request": True,
         }
 
         # Optional genesis anchor (OFF by default — see BOOTSTRAP_* above; it is
@@ -534,10 +530,27 @@ def run_onboard(
         if spawned_under:
             arguments["spawned_under"] = spawned_under
 
+    # A hook asking on a session's behalf says so, and the server's operator
+    # decides whether it creates identities for a harness. Resuming an
+    # existing identity is not affected. The sidecar's explicit start route
+    # does not pass this, and behaves as it did.
+    if harness_request:
+        arguments["harness_request"] = True
+
     raw = post_json(url, {"name": "onboard", "arguments": arguments}, timeout, auth_token)
     parsed = unwrap_tool_response(raw)
 
     if is_harness_onboarding_declined(parsed):
+        if not resume:
+            # Let this slot's later hooks stop asking for a while. An anchor
+            # is not marked: its agent may claim an identity this turn, and
+            # the next hook must ask again to resume it.
+            try:
+                from harness_decline_marker import record_decline
+
+                record_decline(slot, server_url)
+            except Exception:
+                pass
         return {
             "status": "harness_declined",
             "error": "the server creates identities only for agents that claim one",
@@ -727,6 +740,8 @@ def main(argv: list[str] | None = None) -> int:
         force_new=args.force_new,
         client_session_id=client_session_id,
         orchestrated=args.orchestrated,
+        # Every command-line caller is a hook acting for a session.
+        harness_request=True,
         auth_token=auth_token,
         timeout=args.timeout,
         bootstrap=args.bootstrap,

@@ -79,6 +79,9 @@ shift
 # lineage are indistinguishable here, so both are discarded.
 UNITARES_HOOK_HOST_PID="$PPID"
 export UNITARES_HOOK_HOST_PID
+# Where this process ran is something only this launcher works out, below.
+# A value that arrived in the environment says nothing about this process.
+unset UNITARES_SPAWNED_UNDER
 if { [ -n "${UNITARES_CLIENT_SESSION_ID:-}" ] \
         || [ -n "${UNITARES_ORCHESTRATED_OWNER_PID:-}" ]; } \
     && [ "$UNITARES_HOOK_HOST_PID" != "${UNITARES_ORCHESTRATED_OWNER_PID:-}" ]; then

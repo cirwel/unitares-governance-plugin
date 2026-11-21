@@ -55,6 +55,7 @@ def test_a_declined_onboard_is_reported_as_declined_and_caches_nothing(tmp_path)
         model_type="claude-code",
         workspace=tmp_path,
         slot=SLOT,
+        harness_request=True,
         post_json=lambda *a, **k: {"result": DECLINED},
         read_cache=lambda *a, **k: {},
         write_cache=lambda *a, **k: written.append(a),
@@ -68,20 +69,33 @@ def test_a_declined_onboard_is_reported_as_declined_and_caches_nothing(tmp_path)
     {},
     {"client_session_id": "agent:/thread-4242", "orchestrated": True},
 ])
-def test_every_harness_made_call_says_it_is_one(tmp_path, kwargs):
+def test_a_hook_says_it_is_a_harness_and_other_callers_are_unchanged(tmp_path, kwargs):
     sent = []
 
     def post_json(url, payload, timeout, auth_token=None):
         sent.append(payload)
         return {"result": _identity()}
 
-    run_onboard(
+    common = dict(
         server_url="http://localhost:8767", agent_name="claude-test",
         model_type="claude-code", workspace=tmp_path, slot=SLOT,
         post_json=post_json, read_cache=lambda *a, **k: {}, write_cache=lambda *a, **k: None,
         **kwargs,
     )
+    run_onboard(harness_request=True, **common)
     assert sent[0]["arguments"]["harness_request"] is True
+    # The sidecar's explicit start route calls this without the flag, and a
+    # server's harness policy must not start applying to it.
+    run_onboard(**common)
+    assert "harness_request" not in sent[1]["arguments"]
+
+
+def test_the_command_line_the_hooks_use_always_asks_as_a_harness():
+    source = (PLUGIN_ROOT / "scripts" / "onboard_helper.py").read_text()
+    main = source[source.index("def main("):]
+    assert "harness_request=True" in main
+    sidecar = (PLUGIN_ROOT / "scripts" / "identity_sidecar.py").read_text()
+    assert "harness_request" not in sidecar
 
 
 @pytest.mark.parametrize("value,expected", [
@@ -188,8 +202,122 @@ def test_an_unanchored_turn_the_server_declines_stays_quiet_and_unbound(tmp_path
     assert "anchor" not in result.stderr and "UNITARES" not in result.stderr
     assert not (tmp_path / ".unitares" / _slot_filename(SLOT)).exists()
     # The turn still leaves its identity-free observation; it is not lost.
-    floor = [c for c in AnchorHandler.calls if c.get("name") != "onboard"]
-    assert floor, AnchorHandler.calls
+    floor = [c for c in AnchorHandler.calls if "slot_key" in c]
+    assert len(floor) == 1 and floor[0]["event"] == "turn_stop", AnchorHandler.calls
+    assert not [c for c in AnchorHandler.calls if c.get("name") == "process_agent_update"]
+
+
+def _run_twice_against_one_server(tmp_path, env, results):
+    """Two Stops of one session against one server, as two turns are."""
+    AnchorHandler.calls = []
+    srv = _ReusableTCPServer(("127.0.0.1", 0), AnchorHandler)
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    url = f"http://127.0.0.1:{srv.server_address[1]}"
+    per_turn = []
+    try:
+        for onboard_result in results:
+            AnchorHandler.onboard_result = onboard_result
+            before = len(AnchorHandler.calls)
+            subprocess.run(
+                [str(PLUGIN_ROOT / "hooks" / "post-stop")],
+                env={
+                    "PATH": "/usr/bin:/bin:/usr/local/bin", "HOME": str(tmp_path),
+                    "PWD": str(tmp_path), "CLAUDE_PLUGIN_ROOT": str(PLUGIN_ROOT),
+                    "UNITARES_SERVER_URL": url,
+                    "UNITARES_CHECKIN_LOG": str(tmp_path / "checkins.log"),
+                    "UNITARES_HOOK_HOST_PID": OWNED["UNITARES_ORCHESTRATED_OWNER_PID"],
+                    **env,
+                },
+                cwd=str(tmp_path),
+                input=json.dumps({"hook_event_name": "Stop", "session_id": SLOT,
+                                  "stop_hook_active": False, "last_assistant_message": "Done."}),
+                text=True, capture_output=True, timeout=90, check=False,
+            )
+            per_turn.append(AnchorHandler.calls[before:])
+    finally:
+        srv.shutdown()
+        thread.join(timeout=2)
+    return url, per_turn
+
+
+def test_a_declined_slot_is_not_asked_again_by_its_later_hooks(tmp_path):
+    """One decline, then silence: the next Stop of the same session does not
+    ask again, and the turn is still observed."""
+    _, (first, second) = _run_twice_against_one_server(tmp_path, {}, [DECLINED, DECLINED])
+    assert len([c for c in first if c.get("name") == "onboard"]) == 1
+    assert [c for c in second if c.get("name") == "onboard"] == []
+    assert len([c for c in second if "slot_key" in c]) == 1
+
+
+def test_a_declined_anchor_is_asked_again_so_a_later_claim_is_resumed(tmp_path):
+    env = {**OWNED, "UNITARES_AUTO_ONBOARD": "anchored"}
+    _, (first, second) = _run_twice_against_one_server(
+        tmp_path, env, [DECLINED, _identity(is_new=False)])
+    assert len([c for c in first if c.get("name") == "onboard"]) == 1
+    assert len([c for c in second if c.get("name") == "onboard"]) == 1
+
+
+def test_session_start_does_not_ask_a_server_that_declined_this_session(tmp_path, monkeypatch):
+    from harness_decline_marker import record_decline
+
+    _PolicyHealthHandler.policy = ""
+    RecordingHandler.calls = []
+    srv = _ReusableTCPServer(("127.0.0.1", 0), _PolicyHealthHandler)
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    url = f"http://127.0.0.1:{srv.server_address[1]}"
+    monkeypatch.setenv("HOME", str(tmp_path))
+    record_decline("policy-slot-0001", url)
+    try:
+        result = subprocess.run(
+            [str(PLUGIN_ROOT / "hooks" / "session-start"), "--host", "claude"],
+            env={
+                "PATH": "/usr/bin:/bin:/usr/local/bin", "HOME": str(tmp_path), "PWD": str(tmp_path),
+                "CLAUDE_PLUGIN_ROOT": str(PLUGIN_ROOT), "UNITARES_SERVER_URL": url,
+                "UNITARES_HOOK_SKIP_WORKSPACE_BRIEFING": "1", "UNITARES_FILE_LEASES_ENABLED": "0",
+            },
+            cwd=str(tmp_path), input=json.dumps({"session_id": "policy-slot-0001", "source": "startup"}),
+            text=True, capture_output=True, timeout=90, check=False,
+        )
+    finally:
+        srv.shutdown()
+        thread.join(timeout=2)
+    context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+    assert not [c for c in RecordingHandler.calls if c.get("name") == "onboard"]
+    assert "creates identities only for agents that claim one" in context
+
+
+def test_an_inherited_spawned_under_is_not_believed(tmp_path):
+    """Only the launcher works out where a process ran. A value that arrived
+    in the environment, with no anchor stripped, is dropped."""
+    AnchorHandler.calls = []
+    AnchorHandler.onboard_result = _identity()
+    srv = _ReusableTCPServer(("127.0.0.1", 0), AnchorHandler)
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    try:
+        subprocess.run(
+            ["/bin/sh", "-c", f'exec "{PLUGIN_ROOT / "hooks" / "run-hook.cmd"}" post-stop --host claude'],
+            env={
+                "PATH": "/usr/bin:/bin:/usr/local/bin", "HOME": str(tmp_path), "PWD": str(tmp_path),
+                "CLAUDE_PLUGIN_ROOT": str(PLUGIN_ROOT),
+                "UNITARES_SERVER_URL": f"http://127.0.0.1:{srv.server_address[1]}",
+                "UNITARES_CHECKIN_LOG": str(tmp_path / "checkins.log"),
+                "UNITARES_STOP_DETACH": "0",
+                "UNITARES_SPAWNED_UNDER": "agent:/thread-someone-elses",
+            },
+            cwd=str(tmp_path),
+            input=json.dumps({"hook_event_name": "Stop", "session_id": "plain-slot-0001",
+                              "stop_hook_active": False, "last_assistant_message": "Done."}),
+            text=True, capture_output=True, timeout=90, check=False,
+        )
+    finally:
+        srv.shutdown()
+        thread.join(timeout=2)
+    onboards = [c for c in AnchorHandler.calls if c.get("name") == "onboard"]
+    assert len(onboards) == 1
+    assert "spawned_under" not in onboards[0]["arguments"]
 
 
 def test_the_default_asks_a_local_server_and_binds_what_it_gives(tmp_path):
@@ -207,12 +335,13 @@ class _PolicyHealthHandler(RecordingHandler):
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
-        self.wfile.write(json.dumps({
-            "status": "ok", "onboarding": {"harness": self.policy, "basis": "explicit"},
-        }).encode())
+        body = {"status": "ok"}
+        if self.policy:
+            body["onboarding"] = {"harness": self.policy, "basis": "explicit"}
+        self.wfile.write(json.dumps(body).encode())
 
 
-def _session_start(tmp_path, *, policy, env=None):
+def _session_start(tmp_path, *, policy, env=None, session_id="policy-slot-0001"):
     _PolicyHealthHandler.policy = policy
     RecordingHandler.calls = []
     srv = _ReusableTCPServer(("127.0.0.1", 0), _PolicyHealthHandler)
@@ -232,7 +361,7 @@ def _session_start(tmp_path, *, policy, env=None):
                 "UNITARES_EAGER_BIND": "off",
                 **(env or {}),
             },
-            cwd=str(tmp_path), input=json.dumps({"session_id": "policy-slot-0001"}),
+            cwd=str(tmp_path), input=json.dumps({"session_id": session_id}),
             text=True, capture_output=True, timeout=90, check=False,
         )
     finally:
@@ -260,3 +389,15 @@ def test_an_anchored_session_on_an_agent_only_server_is_told_to_claim_first(tmp_
     assert "This server creates identities only for agents that claim one" in context
     assert "the Stop hook binds this conversation's anchor" not in context
     assert "start_session()" in context
+
+
+def test_session_start_without_a_session_id_does_not_promise_a_stop_bind(tmp_path):
+    context = _session_start(tmp_path, policy="welcome", session_id="")
+    assert "lazily create" not in context
+    assert "recorded identity-free" in context
+
+
+def test_session_start_with_checkins_off_does_not_promise_an_observation(tmp_path):
+    context = _session_start(tmp_path, policy="welcome", env={"UNITARES_CHECKINS": "off"})
+    assert "is not recorded (UNITARES_CHECKINS is off)" in context
+    assert "lazily create" not in context

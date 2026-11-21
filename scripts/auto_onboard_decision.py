@@ -9,58 +9,50 @@ hook cannot disagree about what will happen. Prints ``bind`` or
 
     off, 0, false, no   never ask
     anchored            ask only in the process that owns a thread anchor
-    auto (the default)  ask when the server is one this machine has reason to
-                        trust with the session's name, workspace and host
-                        session id: a loopback address, or an HTTPS address
-                        the operator set explicitly
-    on, or any other    ask
+    on (the default),   ask
+    or any other word
 
-``UNITARES_DISABLE_AUTO_ONBOARD`` (1, true, on, yes) and ``UNITARES_CHECKINS=off``
-each turn it off whatever the value.
+``UNITARES_DISABLE_AUTO_ONBOARD`` (1, true, on, yes) and
+``UNITARES_CHECKINS=off`` each turn it off whatever the value.
+
+Two things can still say no after that. The transport refuses to send
+governance data anywhere but HTTPS or a loopback address, so a request to
+such a server would never leave; and a server that declined this session
+slot within the last hour is not asked again.
 
 Asking is not binding. The call is marked as a harness request, and a server
-whose operator accepts only agent-claimed identities declines it. Under
-``auto`` the client decides only whether the endpoint may be asked at all.
+whose operator accepts only agent-claimed identities declines it.
 """
 
 from __future__ import annotations
 
 import argparse
-import ipaddress
+import os
 import sys
-from urllib.parse import urlsplit
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 OFF_WORDS = frozenset({"0", "off", "false", "no"})
 DISABLE_WORDS = frozenset({"1", "true", "on", "yes"})
-DEFAULT_MODE = "auto"
+DEFAULT_MODE = "on"
 
 
-def is_loopback_url(url: str) -> bool:
-    try:
-        host = (urlsplit(url).hostname or "").strip().lower()
-    except ValueError:
-        return False
-    if host == "localhost":
-        return True
-    try:
-        return ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        return False
+def transport_allows(url: str) -> bool:
+    """Whether the governance transport would send a request to ``url``.
 
-
-def endpoint_trusted(url: str, *, explicit: bool) -> bool:
-    """Whether ``auto`` may ask this endpoint.
-
-    Loopback is this machine. Anything else must have been named by the
-    operator and be HTTPS, so the answer comes from the server that was meant.
+    The same rule the request itself is held to (``_http_auth``): HTTPS, or
+    cleartext HTTP to a loopback address. Asking through it here keeps what
+    the agent is told in step with what will actually be sent.
     """
-    if is_loopback_url(url):
-        return True
     try:
-        scheme = (urlsplit(url).scheme or "").lower()
-    except ValueError:
+        from _http_auth import _http_origin, _is_loopback_host
+    except Exception:
         return False
-    return explicit and scheme == "https"
+    origin = _http_origin(url)
+    if origin is None:
+        return False
+    scheme, host, _port = origin
+    return scheme == "https" or (scheme == "http" and _is_loopback_host(host))
 
 
 def decide(
@@ -70,9 +62,14 @@ def decide(
     checkins: str | None,
     owns_anchor: bool,
     server_url: str,
-    url_explicit: bool,
+    slot: str | None = None,
+    declined=None,
 ) -> tuple[bool, str]:
-    """(bind, reason). ``reason`` names why not, or the mode that said yes."""
+    """(bind, reason). ``reason`` names why not, or the mode that said yes.
+
+    ``declined(slot, server_url)`` reports a recent decline; it defaults to
+    the on-disk marker.
+    """
     if (disable or "").strip().lower() in DISABLE_WORDS:
         return False, "disabled"
     if (checkins or "on").strip().lower() == "off":
@@ -80,13 +77,16 @@ def decide(
     word = (mode or "").strip().lower() or DEFAULT_MODE
     if word in OFF_WORDS:
         return False, "off"
-    if word == "anchored":
-        return (True, "anchored") if owns_anchor else (False, "not_anchor_owner")
-    if word == "auto":
-        if endpoint_trusted(server_url, explicit=url_explicit):
-            return True, "auto"
-        return False, "untrusted_endpoint"
-    return True, "on"
+    if word == "anchored" and not owns_anchor:
+        return False, "not_anchor_owner"
+    if not transport_allows(server_url):
+        return False, "insecure_transport"
+    if not owns_anchor:
+        if declined is None:
+            from harness_decline_marker import recently_declined as declined
+        if declined(slot, server_url):
+            return False, "server_declined"
+    return True, "anchored" if word == "anchored" else "on"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -96,7 +96,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--checkins", default="on")
     parser.add_argument("--owns-anchor", default="0")
     parser.add_argument("--server-url", default="")
-    parser.add_argument("--url-explicit", default="0")
+    parser.add_argument("--slot", default="")
     try:
         args = parser.parse_args(argv)
         bind, reason = decide(
@@ -105,7 +105,7 @@ def main(argv: list[str] | None = None) -> int:
             checkins=args.checkins,
             owns_anchor=args.owns_anchor == "1",
             server_url=args.server_url,
-            url_explicit=args.url_explicit == "1",
+            slot=args.slot or None,
         )
     except (SystemExit, Exception):
         print("skip:error")
