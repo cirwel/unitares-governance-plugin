@@ -1640,6 +1640,91 @@ def test_prior_failed_identity_resume_does_not_allow_parallel_double_start_sessi
     assert _run_inject_agy(call_b, home_dir=fake_home)["decision"] == "deny"
 
 
+def test_unrelated_identity_failure_after_pending_mint_does_not_unlock_second_mint(
+    tmp_path, monkeypatch
+):
+    """If an unrelated identity(resume=true) fails AFTER a start_session mint with a
+    call_id is pending in the same turn, a second start_session must still be denied."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+
+    slot = "slot-unrelated-fail-after-claim"
+    tx_path = tmp_path / "unrelated_fail_after_claim.jsonl"
+    _write_transcript(tx_path, [{"step_index": 0, "type": "USER_INPUT", "content": "start"}])
+
+    # Call 1 claims the turn marker with call_id="toolu_start_pending".
+    call1 = _agy_pre_tool_payload(
+        slot,
+        args={
+            "ServerName": "unitares-governance",
+            "ToolName": "start_session",
+            "Arguments": {"force_new": True},
+        },
+    )
+    call1["toolCall"]["id"] = "toolu_start_pending"
+    call1["transcriptPath"] = str(tx_path)
+    assert _run_inject_agy(call1, home_dir=fake_home) == {"decision": "allow"}
+
+    # While call 1 is still in flight, an unrelated identity(resume=true) fails
+    # (and even a different start_session call id failing must not match call 1).
+    _write_transcript(
+        tx_path,
+        [
+            {"step_index": 0, "type": "USER_INPUT", "content": "start"},
+            {
+                "step_index": 1,
+                "type": "PLANNER_RESPONSE",
+                "status": "DONE",
+                "tool_calls": [
+                    {
+                        "id": "toolu_unrelated_identity",
+                        "name": "call_mcp_tool",
+                        "args": {
+                            "ServerName": '"unitares-governance"',
+                            "ToolName": '"identity"',
+                            "Arguments": json.dumps({"resume": True}),
+                        },
+                    },
+                    {
+                        "id": "toolu_other_start",
+                        "name": "call_mcp_tool",
+                        "args": {
+                            "ServerName": '"unitares-governance"',
+                            "ToolName": '"start_session"',
+                            "Arguments": json.dumps({"force_new": True}),
+                        },
+                    },
+                ],
+            },
+            {
+                "step_index": 2,
+                "type": "GENERIC",
+                "status": "DONE",
+                "content": json.dumps({"success": False, "error": "not found"}),
+            },
+            {
+                "step_index": 3,
+                "type": "GENERIC",
+                "status": "ERROR",
+                "content": json.dumps({"success": False, "error": "other failure"}),
+            },
+        ],
+    )
+
+    call2 = _agy_pre_tool_payload(
+        slot,
+        args={
+            "ServerName": "unitares-governance",
+            "ToolName": "start_session",
+            "Arguments": {"force_new": True},
+        },
+    )
+    call2["toolCall"]["id"] = "toolu_start_dup"
+    call2["transcriptPath"] = str(tx_path)
+    assert _run_inject_agy(call2, home_dir=fake_home)["decision"] == "deny"
+
+
 def test_live_slot_denies_mismatched_parent_agent_id_and_non_session_proof_and_longest_alias(
     tmp_path,
 ):

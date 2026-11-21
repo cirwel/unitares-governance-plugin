@@ -492,18 +492,24 @@ def _agy_claim_turn_mint_guard(
                 prev_baseline = existing.get("baseline_failed_count")
                 if not isinstance(prev_baseline, int) or prev_baseline < 0:
                     prev_baseline = 0
+                mint_failed = [
+                    item
+                    for item in failed_attempts
+                    if item.get("tool") in ANCHORED_MINT_SUFFIXES
+                ]
                 failed_ids = {
                     str(item.get("call_id") or "").strip()
-                    for item in failed_attempts
+                    for item in mint_failed
                     if item.get("call_id")
                 }
-                prior_failed = bool(
-                    failed_attempts
-                    and (
-                        (prev_call_id and prev_call_id in failed_ids)
-                        or len(failed_attempts) > prev_baseline
-                    )
-                )
+                if prev_call_id:
+                    # When the pending marker has a call ID, require the failed
+                    # mint attempt in the transcript to match that exact call ID
+                    # so an unrelated failure (e.g. identity(resume=true) or a
+                    # different call) cannot unlock a concurrent duplicate mint.
+                    prior_failed = prev_call_id in failed_ids
+                else:
+                    prior_failed = len(mint_failed) > prev_baseline
                 if fresh and not new_turn and not same_call and not prior_failed:
                     return (
                         "An unparented start_session/onboard mint is already in progress "
@@ -512,12 +518,15 @@ def _agy_claim_turn_mint_guard(
                         "call's client_session_id, or pass spawn_reason=\"subagent\" only "
                         "when spawning a separate subagent."
                     )
+        mint_failed_count = sum(
+            1 for item in failed_attempts if item.get("tool") in ANCHORED_MINT_SUFFIXES
+        )
         record = json.dumps(
             {
                 "tool_call_id": call_id,
                 "step_idx": step_idx,
                 "turn_boundary_step": turn_boundary_step,
-                "baseline_failed_count": len(failed_attempts),
+                "baseline_failed_count": mint_failed_count,
                 "ts": now,
             },
             separators=(",", ":"),
