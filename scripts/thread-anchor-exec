@@ -2,7 +2,7 @@
 # thread-anchor-exec: launch one agent CLI turn bound to a conversation's
 # governance identity.
 #
-#   scripts/thread-anchor-exec <thread-id> -- <cli> [args...]
+#   scripts/thread-anchor-exec [--bind] <thread-id> -- <cli> [args...]
 #
 # A chat bridge or orchestrator that starts a new CLI process for every turn
 # gets a new UNITARES identity for every turn. This launcher declares the three
@@ -19,17 +19,29 @@
 # its own PID is the CLI's. A CLI started any other way, including one this CLI
 # starts later, has a different PID and is refused the anchor.
 #
+# By default this only names the conversation; the agent binds the identity by
+# calling start_session(). With --bind the hooks bind it when the agent has
+# not, by setting UNITARES_AUTO_ONBOARD=anchored. That value is honored only in
+# the process that owns the anchor, so a CLI the agent starts later inherits it
+# and is still left alone.
+#
 # Guide: docs/orchestrators.md
 set -eu
 
 usage() {
     printf '%s\n' \
-        'usage: thread-anchor-exec <thread-id> -- <cli> [args...]' \
+        'usage: thread-anchor-exec [--bind] <thread-id> -- <cli> [args...]' \
+        '  --bind       let the hooks bind the identity when the agent does not' \
         '  <thread-id>  stable id of the conversation: ASCII letters, digits,' \
         '               . _ and -, no two dots in a row, at most 128 characters' >&2
     exit 64
 }
 
+bind=
+if [ "${1-}" = "--bind" ]; then
+    bind=1
+    shift
+fi
 [ "$#" -ge 3 ] || usage
 thread_id=$1
 [ "$2" = "--" ] || usage
@@ -97,6 +109,11 @@ UNITARES_CLIENT_SESSION_ID="agent:/thread-$thread_id"
 UNITARES_ORCHESTRATED=1
 UNITARES_ORCHESTRATED_OWNER_PID=$$
 export UNITARES_CLIENT_SESSION_ID UNITARES_ORCHESTRATED UNITARES_ORCHESTRATED_OWNER_PID
+
+if [ -n "$bind" ]; then
+    UNITARES_AUTO_ONBOARD=anchored
+    export UNITARES_AUTO_ONBOARD
+fi
 
 # An anchored turn resumes its conversation's identity. Lineage inherited from
 # the bridge's own environment would describe some other process.

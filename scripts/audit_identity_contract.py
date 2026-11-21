@@ -274,7 +274,9 @@ def audit_checkin_log(
                 f"check-in log status={status} event={event or '?'}",
             ))
 
-        if uuid == "?" and not status.startswith("floor"):
+        # An anchor report says why a turn has no identity. The turn itself is
+        # already counted by its floor line, and the report has no uuid to give.
+        if uuid == "?" and not status.startswith("floor") and event != "anchor_bind":
             findings.append(Finding(
                 "warning",
                 "checkin_unknown_uuid",
