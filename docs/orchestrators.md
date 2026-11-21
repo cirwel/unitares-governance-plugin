@@ -16,7 +16,7 @@ Install the plugin in the CLI as usual. Then start each turn through
 that is stable for the conversation:
 
 ```bash
-scripts/thread-anchor-exec <thread-id> -- <cli> [args...]
+scripts/thread-anchor-exec [--bind] <thread-id> -- <cli> [args...]
 ```
 
 For example, a bridge that runs Claude Code headless for a Discord thread:
@@ -47,17 +47,53 @@ exists but is not an executable file exits 126.
 
 ### What binds the identity
 
-The launcher only says which conversation the process belongs to. It does not
-create or bind an identity. The agent does that by calling `start_session()`
-with no arguments, which the session-start hook tells it to do before the
-first tool that needs an identity. The first such call for a thread id creates
-the identity, and the same call in a later turn resumes it.
+By default the launcher only says which conversation the process belongs to.
+It does not create or bind an identity. The agent does that by calling
+`start_session()` with no arguments, which the session-start hook tells it to
+do before the first tool that needs an identity. The first such call for a
+thread id creates the identity, and the same call in a later turn resumes it.
 
-By default nothing else binds it: a conversation in which the agent never
-makes that call has no identity. Set `UNITARES_AUTO_ONBOARD=on` for the CLI to
-have the hooks attempt the bind themselves when a turn is still unbound. That
-needs check-ins enabled and a session id from the host; see the
+A headless agent often never makes that call, and then the conversation has no
+identity. To have the hooks bind it at the end of any turn the agent left
+unbound, add `--bind`:
+
+```bash
+scripts/thread-anchor-exec --bind <thread-id> -- <cli> [args...]
+```
+
+`--bind` sets `UNITARES_AUTO_ONBOARD=anchored`. A bridge that sets the
+variables itself can set that too. The hooks honor it only in the process that
+owns the anchor. A CLI the agent starts later inherits the variable, is
+refused the anchor, and is left alone.
+
+Do not use `UNITARES_AUTO_ONBOARD=on` for this. It applies to every process
+that inherits it, so each CLI the agent starts would get an identity of its
+own, with no link to the conversation.
+
+A bind made by the hooks is recorded as made by the harness
+(`onboard_origin` is `orchestrated_resume`), not as the agent's own claim. It
+needs check-ins enabled and a session id from the host, and
+`UNITARES_DISABLE_AUTO_ONBOARD=1` still turns it off. See the
 [configuration reference](./configuration.md).
+
+### When nothing binds it
+
+The Stop hook reports what happened to an owned anchor. Every outcome below
+is a line in the check-in log (`~/.unitares/checkins.log`,
+`event=anchor_bind`), and the two that leave the turn without an identity,
+`anchor_bind_fail` and `anchor_unbound`, are also written to standard error:
+
+| Status | Meaning |
+|---|---|
+| `anchor_resumed` | The hooks bound the anchor to its existing identity. |
+| `anchor_minted` | The hooks bound the anchor and the server created a new identity. Expected on a conversation's first turn. |
+| `anchor_bound` | The hooks bound the anchor; the server did not say which of the two. |
+| `anchor_bind_fail` | The hooks tried to bind the anchor and could not. The turn has no identity. |
+| `anchor_unbound` | The turn ended with nothing bound and no bind attempted. |
+
+Read the log, not only standard error: a host may discard what a Stop hook
+prints. `anchor_minted` on a later turn means the server no longer resolved
+the conversation's earlier identity and created a new one with no link to it.
 
 ## What the launcher sets
 
@@ -169,7 +205,8 @@ python3 scripts/dev/strict_thread_anchor_contract.py --live \
 
 - It does not share memory or context between turns. That is the CLI's own
   resume feature. This only makes the governance record continuous.
-- It does not onboard, check in or report anything on the agent's behalf.
+- Without `--bind` it does not onboard, check in or report anything on the
+  agent's behalf.
 - It does not cover a CLI with no plugin hooks. For those, see the
   [sidecar and `u-run`](./adapters.md#sidecar).
 - It does not make two conversations one identity, or carry an identity from

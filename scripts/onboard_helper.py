@@ -582,6 +582,10 @@ def run_onboard(
         ),
         "display_name": new_cache.get("display_name", ""),
     }
+    # Whether the server created this identity or resumed it. Reported only
+    # when the server said so and this call's identity is the one committed.
+    if committed_fresh_identity and isinstance(parsed.get("is_new"), bool):
+        result["is_new"] = parsed["is_new"]
     authoritative_origin = new_cache.get("onboard_origin")
     if isinstance(authoritative_origin, str) and authoritative_origin.strip():
         result["onboard_origin"] = authoritative_origin.strip()

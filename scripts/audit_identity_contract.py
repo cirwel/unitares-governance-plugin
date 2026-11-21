@@ -38,7 +38,15 @@ WEAK_SOURCES = (
     "implicit",
     "heuristic",
 )
-FALLBACK_STATUSES = {"floor_sent", "floor_fail", "fail", "error"}
+FALLBACK_STATUSES = {
+    "floor_sent",
+    "floor_fail",
+    "fail",
+    "error",
+    # An orchestrated thread anchor that ended a turn without an identity.
+    "anchor_bind_fail",
+    "anchor_unbound",
+}
 SLOT_RE = re.compile(r"session-(?P<slot>[A-Za-z0-9_-]{1,64})\.json$")
 IDENTITY_RESPONSE_SCHEMA = "s22.identity_response.v1"
 

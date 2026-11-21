@@ -240,3 +240,30 @@ def test_empty_path_entry_means_the_current_directory(tmp_path, shell, path):
     _executable(tmp_path / "local-cli", "#!/bin/sh\necho ran\n")
     result = _run("t1", "--", "local-cli", shell=shell, env={"PATH": path}, cwd=tmp_path)
     assert result.stdout.strip() == "ran", result.stderr
+
+
+@pytest.mark.parametrize("shell", SHELLS)
+def test_bind_flag_opts_the_anchor_owner_in_and_nothing_else(shell):
+    result = _run("--bind", "t1", "--", *_report("UNITARES_AUTO_ONBOARD", *ANCHOR_VARS[:3]), shell=shell)
+    assert result.returncode == 0, result.stderr
+    pid, mode, anchor, marker, owner = result.stdout.split()
+    assert mode == "anchored"
+    assert (anchor, marker, owner) == ("agent:/thread-t1", "1", pid)
+
+
+@pytest.mark.parametrize("inherited", [None, "off", "on"])
+def test_without_the_bind_flag_the_callers_setting_is_left_alone(inherited):
+    env = {} if inherited is None else {"UNITARES_AUTO_ONBOARD": inherited}
+    base = {k: v for k, v in os.environ.items() if k != "UNITARES_AUTO_ONBOARD"}
+    result = subprocess.run(
+        [str(LAUNCHER), "t1", "--", *_report("UNITARES_AUTO_ONBOARD")],
+        text=True, capture_output=True, timeout=30, env={**base, **env},
+    )
+    assert result.stdout.split()[1] == (inherited or "<unset>")
+
+
+@pytest.mark.parametrize("args", [["--bind"], ["--bind", "t1"], ["--bind", "--", "true"], ["t1", "--bind", "--", "true"]])
+def test_bind_flag_does_not_loosen_the_usage_check(args):
+    result = _run(*args)
+    assert result.returncode == 64
+    assert "usage:" in result.stderr
