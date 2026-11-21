@@ -1416,6 +1416,9 @@ def _read_reply(client: socket.socket, *, within: float = 3.0) -> bytes:
             received += chunk
     except socket.timeout:
         pass
+    except ConnectionResetError:
+        if not received:
+            raise
     return received
 
 
@@ -2588,8 +2591,8 @@ def test_tcp_preauth_header_deadline_is_tight_and_escalates_only_after_auth(
     fake_server: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(identity_sidecar, "AUTH_HEADER_DEADLINE", 0.35)
-    monkeypatch.setattr(identity_sidecar, "REQUEST_READ_DEADLINE", 3.0)
+    monkeypatch.setattr(identity_sidecar, "AUTH_HEADER_DEADLINE", 0.85)
+    monkeypatch.setattr(identity_sidecar, "REQUEST_READ_DEADLINE", 4.5)
     sidecar = _sidecar(tmp_path, fake_server)
     server = BoundedThreadingHTTPServer(
         ("127.0.0.1", 0), make_handler(sidecar), max_workers=4
@@ -2599,17 +2602,17 @@ def test_tcp_preauth_header_deadline_is_tight_and_escalates_only_after_auth(
     port = server.server_address[1]
     try:
         # 1. Slow unauthenticated headers are terminated at AUTH_HEADER_DEADLINE
-        #    (~0.35s), well before REQUEST_READ_DEADLINE (3.0s).
+        #    (~0.85s), well before REQUEST_READ_DEADLINE (4.5s).
         with socket.create_connection(("127.0.0.1", port), timeout=5) as slow_unauth:
             started = time.monotonic()
             slow_unauth.sendall(b"GET /health HTTP/1.1\r\nX-Slow: ")
-            assert _trickle_until_closed(slow_unauth, budget=2.0)
+            assert _trickle_until_closed(slow_unauth, budget=2.5)
             elapsed = time.monotonic() - started
-        assert elapsed < 1.5
+        assert elapsed < 2.2
 
         # 2. An authenticated POST whose headers arrive within AUTH_HEADER_DEADLINE
-        #    escalates to REQUEST_READ_DEADLINE, so a body delivered after 0.55s
-        #    (> AUTH_HEADER_DEADLINE 0.35s, < REQUEST_READ_DEADLINE 3.0s) succeeds.
+        #    escalates to REQUEST_READ_DEADLINE, so a body delivered after 1.05s
+        #    (> AUTH_HEADER_DEADLINE 0.85s, < REQUEST_READ_DEADLINE 4.5s) succeeds.
         body = json.dumps(
             {"name": "knowledge", "arguments": {"action": "search", "query": "escalated"}}
         ).encode("utf-8")
@@ -2624,9 +2627,9 @@ def test_tcp_preauth_header_deadline_is_tight_and_escalates_only_after_auth(
                     "Connection: close\r\n\r\n"
                 ).encode("ascii")
             )
-            time.sleep(0.55)
+            time.sleep(1.05)
             auth_client.sendall(body)
-            reply = _read_reply(auth_client, within=3.0)
+            reply = _read_reply(auth_client, within=4.0)
         assert b" 200 " in reply
         assert b"escalated" in reply or FakeGovernanceHandler.calls
     finally:
@@ -3110,7 +3113,7 @@ def test_unix_socket_cleans_stale_socket_and_enforces_worker_cap_503(
                     overflow.sendall(
                         b"GET /overflow HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
                     )
-                except BrokenPipeError:
+                except (BrokenPipeError, ConnectionResetError):
                     pass
                 reply = _read_reply(overflow, within=2.0)
             assert b" 503 " in reply

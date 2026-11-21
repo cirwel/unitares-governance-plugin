@@ -216,6 +216,15 @@ def _send_503_and_close(server: Any, request: Any) -> None:
                 b"HTTP/1.1 503 Service Unavailable\r\n"
                 b"Connection: close\r\nContent-Length: 0\r\n\r\n"
             )
+            request.shutdown(socket.SHUT_WR)
+            # Drain any immediately buffered request bytes without blocking so
+            # closing the socket on Linux does not emit ECONNRESET and discard
+            # the 503 response from the peer's receive buffer.
+            request.setblocking(False)
+            try:
+                request.recv(4096)
+            except (BlockingIOError, OSError):
+                pass
         except OSError:
             pass
     finally:
