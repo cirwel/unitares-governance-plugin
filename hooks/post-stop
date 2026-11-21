@@ -147,7 +147,11 @@ fi
 
 ORCHESTRATED_MODE="$(printf '%s' "${UNITARES_ORCHESTRATED:-0}" | tr '[:upper:]' '[:lower:]')"
 ANCHOR_RESUME_ENABLED=0
-if [[ -n "${UNITARES_CLIENT_SESSION_ID:-}" \
+# An anchor of nothing but whitespace is no anchor: the onboarding helper
+# strips it and would mint an ordinary slot identity.
+ANCHOR_VALUE="${UNITARES_CLIENT_SESSION_ID:-}"
+ANCHOR_VALUE="${ANCHOR_VALUE//[[:space:]]/}"
+if [[ -n "${ANCHOR_VALUE}" \
       && ( "${ORCHESTRATED_MODE}" == "1" \
            || "${ORCHESTRATED_MODE}" == "true" \
            || "${ORCHESTRATED_MODE}" == "yes" \
@@ -269,16 +273,21 @@ fi
 # force_new=true, per-slot name scoping, lineage via parent_agent_id, no
 # persisted continuity token.
 CHECKINS_MODE="$(printf '%s' "${UNITARES_CHECKINS:-on}" | tr '[:upper:]' '[:lower:]')"
-AUTO_ONBOARD_MODE="$(printf '%s' "${UNITARES_AUTO_ONBOARD:-off}" | tr '[:upper:]' '[:lower:]')"
+AUTO_ONBOARD_MODE="$(printf '%s' "${UNITARES_AUTO_ONBOARD:-off}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
 DISABLE_AUTO_ONBOARD="$(printf '%s' "${UNITARES_DISABLE_AUTO_ONBOARD:-0}" | tr '[:upper:]' '[:lower:]')"
 # `anchored` opts in for one process only: the one that owns an orchestrated
 # thread anchor. Everything else, including a CLI that process starts and that
 # inherits this variable, is treated as off. `on` would mint an identity for
 # each of those children.
-if [[ "${AUTO_ONBOARD_MODE}" == "anchored" && "${ANCHOR_RESUME_ENABLED}" != "1" ]]; then
+if [[ "${AUTO_ONBOARD_MODE}" == "anchored" && "${ANCHOR_RESUME_ENABLED:-0}" != "1" ]]; then
   AUTO_ONBOARD_MODE="off"
 fi
+ANCHOR_REPORT="${PLUGIN_ROOT}/scripts/anchor_bind_report.py"
 ANCHOR_BIND_TRIED=0
+ANCHOR_UNBOUND_WHY="auto-onboarding is off"
+if [[ "${CHECKINS_MODE}" == "off" ]]; then
+  ANCHOR_UNBOUND_WHY="check-ins are off"
+fi
 if [[ -z "${CSID:-}" && -n "${RAW_SLOT:-}" \
       && "${CHECKINS_MODE}" != "off" \
       && "${AUTO_ONBOARD_MODE}" != "0" \
@@ -289,6 +298,7 @@ if [[ -z "${CSID:-}" && -n "${RAW_SLOT:-}" \
       && "${DISABLE_AUTO_ONBOARD}" != "true" \
       && "${DISABLE_AUTO_ONBOARD}" != "on" ]]; then
   ONBOARD_HELPER="${PLUGIN_ROOT}/scripts/onboard_helper.py"
+  ANCHOR_UNBOUND_WHY="the onboarding helper is missing from this install"
   if [[ -f "${ONBOARD_HELPER}" ]]; then
     # Name the session after the directory it was started in. $PWD is wherever
     # the shell happens to be at the first Stop, which can be anywhere.
@@ -330,11 +340,18 @@ if [[ -z "${CSID:-}" && -n "${RAW_SLOT:-}" \
       2>/dev/null) || true
     eval "$(printf '%s' "${PAYLOAD}" | python3 "${SESSION_LOOKUP}" --workspace "${LOOKUP_WORKSPACE}")"
     # For an owned anchor, say whether the bind resumed, minted or failed.
-    if [[ "${ANCHOR_RESUME_ENABLED}" == "1" \
-          && -f "${PLUGIN_ROOT}/scripts/anchor_bind_report.py" ]]; then
-      ANCHOR_BIND_TRIED=1
-      printf '%s' "${ONBOARD_RESULT}" | python3 "${PLUGIN_ROOT}/scripts/anchor_bind_report.py" \
-        --slot "${RAW_SLOT}" --anchor "${UNITARES_CLIENT_SESSION_ID:-}" || true
+    # CSID is what the slot holds now: another hook may have bound it while
+    # the request was in flight, and then the turn has an identity whatever
+    # this request returned. A pre-bind at session start reports a success
+    # and leaves a failure to the Stop that retries it.
+    ANCHOR_BIND_TRIED=1
+    if [[ "${ANCHOR_RESUME_ENABLED:-0}" == "1" && -f "${ANCHOR_REPORT}" ]]; then
+      ANCHOR_REPORT_ARGS=("--slot=${RAW_SLOT}" "--anchor=${ANCHOR_VALUE}" "--bound-csid=${CSID:-}")
+      if [[ "${HOOK_MODE:-}" == "session_start" ]]; then
+        ANCHOR_REPORT_ARGS+=(--successes-only)
+      fi
+      printf '%s' "${ONBOARD_RESULT}" | python3 "${ANCHOR_REPORT}" \
+        "${ANCHOR_REPORT_ARGS[@]}" >/dev/null || true
     fi
   fi
 fi
@@ -342,17 +359,12 @@ fi
 # An owned anchor that reaches the end of a turn with nothing bound to it and
 # no bind attempted: the conversation is identity-free and, until this line,
 # nobody was told. Only at a real Stop, with a slot to report against.
-if [[ "${HOOK_MODE}" != "session_start" && "${ANCHOR_RESUME_ENABLED}" == "1" \
+if [[ "${HOOK_MODE:-}" != "session_start" && "${ANCHOR_RESUME_ENABLED:-0}" == "1" \
       && "${ANCHOR_BIND_TRIED}" != "1" && -z "${CSID:-}" && -n "${RAW_SLOT:-}" \
-      && -f "${PLUGIN_ROOT}/scripts/anchor_bind_report.py" ]]; then
-  if [[ "${CHECKINS_MODE}" == "off" ]]; then
-    ANCHOR_UNBOUND_WHY="check-ins are off"
-  else
-    ANCHOR_UNBOUND_WHY="auto-onboarding is off"
-  fi
-  python3 "${PLUGIN_ROOT}/scripts/anchor_bind_report.py" \
-    --slot "${RAW_SLOT}" --anchor "${UNITARES_CLIENT_SESSION_ID:-}" \
-    --unbound-reason "${ANCHOR_UNBOUND_WHY}" </dev/null || true
+      && -f "${ANCHOR_REPORT}" ]]; then
+  python3 "${ANCHOR_REPORT}" \
+    "--slot=${RAW_SLOT}" "--anchor=${ANCHOR_VALUE}" \
+    "--unbound-reason=${ANCHOR_UNBOUND_WHY}" </dev/null >/dev/null || true
 fi
 
 # Record that this bound slot is active. A binding idle past the server's

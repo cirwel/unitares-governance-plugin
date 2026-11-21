@@ -634,7 +634,11 @@ printf '[%s] curl exit=%d len=%d url=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${H
 
 ORCHESTRATED_MODE="$(printf '%s' "${UNITARES_ORCHESTRATED:-0}" | tr '[:upper:]' '[:lower:]')"
 ANCHOR_RESUME_ENABLED=0
-if [[ -n "${UNITARES_CLIENT_SESSION_ID:-}" \
+# An anchor of nothing but whitespace is no anchor: the onboarding helper
+# strips it and would mint an ordinary slot identity.
+ANCHOR_VALUE="${UNITARES_CLIENT_SESSION_ID:-}"
+ANCHOR_VALUE="${ANCHOR_VALUE//[[:space:]]/}"
+if [[ -n "${ANCHOR_VALUE}" \
       && ( "${ORCHESTRATED_MODE}" == "1" \
            || "${ORCHESTRATED_MODE}" == "true" \
            || "${ORCHESTRATED_MODE}" == "yes" \
@@ -849,7 +853,7 @@ esac
 # overridden.
 ANCHOR_STOP_WHY="auto-onboarding or check-ins are off"
 ANCHOR_STOP_BINDS=0
-case "$(printf '%s' "${UNITARES_AUTO_ONBOARD:-off}" | tr '[:upper:]' '[:lower:]')" in
+case "$(printf '%s' "${UNITARES_AUTO_ONBOARD:-off}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')" in
   0|off|false|no) ;;
   *)
     case "$(printf '%s' "${UNITARES_DISABLE_AUTO_ONBOARD:-0}" | tr '[:upper:]' '[:lower:]')" in

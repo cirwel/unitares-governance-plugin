@@ -58,7 +58,7 @@ def _identity(**extra):
     }
 
 
-def _stop(tmp_path, *, env, onboard_result=None, host_pid=OWNER):
+def _stop(tmp_path, *, env, onboard_result=None, host_pid=OWNER, args=(), payload=None):
     """Run one Stop for a turn in which the agent bound nothing."""
     AnchorHandler.calls = []
     AnchorHandler.onboard_result = onboard_result if onboard_result is not None else _identity()
@@ -68,7 +68,7 @@ def _stop(tmp_path, *, env, onboard_result=None, host_pid=OWNER):
     log = tmp_path / "checkins.log"
     try:
         result = subprocess.run(
-            [str(PLUGIN_ROOT / "hooks" / "post-stop")],
+            [str(PLUGIN_ROOT / "hooks" / "post-stop"), *args],
             env={
                 "PATH": "/usr/bin:/bin:/usr/local/bin",
                 "HOME": str(tmp_path),
@@ -80,13 +80,13 @@ def _stop(tmp_path, *, env, onboard_result=None, host_pid=OWNER):
                 **env,
             },
             cwd=str(tmp_path),
-            input=json.dumps({
+            input=json.dumps(payload or {
                 "hook_event_name": "Stop",
                 "session_id": SLOT,
                 "stop_hook_active": False,
                 "last_assistant_message": "Did the work.",
             }),
-            text=True, capture_output=True, timeout=20, check=False,
+            text=True, capture_output=True, timeout=90, check=False,
         )
     finally:
         srv.shutdown()
@@ -132,6 +132,9 @@ def test_anchored_mode_binds_the_owner_of_the_anchor(tmp_path):
     # The same child reaching the hook without that launcher: the owner is
     # some other process.
     {**OWNED, "UNITARES_ORCHESTRATED_OWNER_PID": "1"},
+    # An anchor of nothing but whitespace, which the helper would strip and
+    # then mint an ordinary identity for.
+    {**OWNED, "UNITARES_CLIENT_SESSION_ID": "   "},
     # An anchor without the orchestrated marker.
     {"UNITARES_CLIENT_SESSION_ID": ANCHOR, "UNITARES_ORCHESTRATED_OWNER_PID": OWNER},
 ])
@@ -143,6 +146,14 @@ def test_anchored_mode_is_off_for_every_other_process(tmp_path, env):
     assert onboards == [], "anchored mode minted an identity for a process that owns no anchor"
     assert anchor_lines == []
     assert not (tmp_path / ".unitares" / _slot_filename(SLOT)).exists()
+
+
+@pytest.mark.parametrize("value", [" anchored ", "ANCHORED", "anchored\n"])
+def test_anchored_is_recognised_however_it_is_spelled(tmp_path, value):
+    """An unrecognised word counts as on, so a stray space must not turn the
+    scoped opt-in into the unscoped one."""
+    _, onboards, _ = _stop(tmp_path, env={"UNITARES_AUTO_ONBOARD": value})
+    assert onboards == []
 
 
 def test_on_still_binds_a_process_that_owns_no_anchor(tmp_path):
@@ -206,3 +217,95 @@ def test_a_session_without_an_anchor_is_never_reported(tmp_path):
 ])
 def test_classify(raw, status):
     assert classify(raw)[0] == status
+
+
+def _write_binding(tmp_path):
+    """The slot as another hook would leave it after binding it."""
+    cache = tmp_path / ".unitares"
+    cache.mkdir(parents=True, exist_ok=True)
+    path = cache / _slot_filename(SLOT)
+    path.write_text(json.dumps({
+        "uuid": "99999999-0000-4000-8000-000000000000",
+        "client_session_id": "agent-99999999-000",
+        "schema_version": 2,
+        "slot": SLOT,
+    }))
+    path.chmod(0o600)
+
+
+def test_a_turn_the_agent_bound_itself_is_not_reported(tmp_path):
+    _write_binding(tmp_path)
+    for mode in ("off", "anchored"):
+        result, onboards, anchor_lines = _stop(
+            tmp_path, env={**OWNED, "UNITARES_AUTO_ONBOARD": mode},
+        )
+        assert onboards == []
+        assert anchor_lines == []
+        assert "anchor" not in result.stderr
+
+
+@pytest.mark.parametrize("raw", [
+    '{"status": "onboard_superseded", "error": "newer local state preserved"}',
+    '{"status": "onboard_failed", "error": "timeout"}',
+    "",
+])
+def test_a_bind_that_lost_to_another_binding_is_not_called_a_failure(raw):
+    assert classify(raw, bound_csid="agent-99999999-000") == ("anchor_bound", "", "")
+    assert classify(raw, bound_csid="")[0] == "anchor_bind_fail"
+    assert classify(raw, bound_csid="   ")[0] == "anchor_bind_fail"
+
+
+def test_ok_without_an_identity_does_not_report_ok_as_the_error():
+    status, _, error = classify('{"status": "ok", "uuid": ""}')
+    assert status == "anchor_bind_fail" and error != "ok" and "identity" in error
+
+
+def _report(*args, stdin="", log):
+    return subprocess.run(
+        [sys.executable, str(PLUGIN_ROOT / "scripts" / "anchor_bind_report.py"), *args],
+        input=stdin, text=True, capture_output=True, timeout=20,
+        env={"PATH": "/usr/bin:/bin", "UNITARES_CHECKIN_LOG": str(log)},
+    )
+
+
+def test_report_is_silent_on_stdout_and_never_fails(tmp_path):
+    log = tmp_path / "checkins.log"
+    cases = [
+        (["--slot=s", "--unbound-reason=auto-onboarding is off"], ""),
+        (["--slot=s", "--anchor=agent:/thread-1"], "garbage"),
+        (["--slot=-starts-with-a-dash", "--anchor=-x"], '{"status": "ok", "uuid": "u"}'),
+        ([], ""),  # missing required argument
+    ]
+    for args, stdin in cases:
+        result = _report(*args, stdin=stdin, log=log)
+        assert result.returncode == 0, (args, result.stderr)
+        assert result.stdout == ""
+
+
+def test_a_log_that_cannot_be_written_still_gets_the_warning(tmp_path):
+    result = _report(
+        "--slot=s", "--anchor=agent:/thread-1", "--unbound-reason=auto-onboarding is off",
+        log=tmp_path,  # a directory: the append fails
+    )
+    assert result.returncode == 0
+    assert "no identity for agent:/thread-1" in result.stderr
+
+
+def test_a_failed_pre_bind_at_session_start_is_left_to_the_stop(tmp_path):
+    log = tmp_path / "checkins.log"
+    failed = '{"status": "onboard_failed", "error": "timeout"}'
+    quiet = _report("--slot=s", "--successes-only", stdin=failed, log=log)
+    assert quiet.stderr == "" and not log.exists()
+    ok = _report("--slot=s", "--successes-only", stdin='{"status": "ok", "uuid": "u", "is_new": false}', log=log)
+    assert ok.stderr == "" and "status=anchor_resumed" in log.read_text()
+    loud = _report("--slot=s", stdin=failed, log=log)
+    assert "could not bind" in loud.stderr and "status=anchor_bind_fail" in log.read_text()
+
+
+def test_audit_counts_an_unbound_anchor_once(tmp_path):
+    from audit_identity_contract import audit_checkin_log  # noqa: E402
+
+    log = tmp_path / "checkins.log"
+    _report("--slot=s", "--unbound-reason=auto-onboarding is off", log=log)
+    codes = [finding.code for finding in audit_checkin_log(log)]
+    assert codes == ["checkin_fallback_status"]

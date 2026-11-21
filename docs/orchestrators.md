@@ -66,6 +66,11 @@ variables itself can set that too. The hooks honor it only in the process that
 owns the anchor. A CLI the agent starts later inherits the variable, is
 refused the anchor, and is left alone.
 
+`--bind` replaces a value the launcher inherited, including `on`, so that
+what applies to the conversation does not also apply to its children. The
+hooks must be from a plugin version that knows `anchored`; an older one reads
+any word it does not know as `on`.
+
 Do not use `UNITARES_AUTO_ONBOARD=on` for this. It applies to every process
 that inherits it, so each CLI the agent starts would get an identity of its
 own, with no link to the conversation.
@@ -87,8 +92,8 @@ is a line in the check-in log (`~/.unitares/checkins.log`,
 |---|---|
 | `anchor_resumed` | The hooks bound the anchor to its existing identity. |
 | `anchor_minted` | The hooks bound the anchor and the server created a new identity. Expected on a conversation's first turn. |
-| `anchor_bound` | The hooks bound the anchor; the server did not say which of the two. |
-| `anchor_bind_fail` | The hooks tried to bind the anchor and could not. The turn has no identity. |
+| `anchor_bound` | The session holds an identity, and the report cannot say more: the server did not say whether it was new, or something else bound the session while the hooks were trying. |
+| `anchor_bind_fail` | The hooks tried to bind the anchor, could not, and nothing else bound the session. The turn has no identity. |
 | `anchor_unbound` | The turn ended with nothing bound and no bind attempted. |
 
 Read the log, not only standard error: a host may discard what a Stop hook
@@ -205,8 +210,9 @@ python3 scripts/dev/strict_thread_anchor_contract.py --live \
 
 - It does not share memory or context between turns. That is the CLI's own
   resume feature. This only makes the governance record continuous.
-- Without `--bind` it does not onboard, check in or report anything on the
-  agent's behalf.
+- The launcher itself never onboards or checks in. Without `--bind` it leaves
+  `UNITARES_AUTO_ONBOARD` as the caller set it, so whatever that says still
+  applies.
 - It does not cover a CLI with no plugin hooks. For those, see the
   [sidecar and `u-run`](./adapters.md#sidecar).
 - It does not make two conversations one identity, or carry an identity from
