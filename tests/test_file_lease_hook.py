@@ -2621,9 +2621,65 @@ def test_unix_socket_rejects_symlink_regular_file_and_foreign_uid(
 
     # Socket owned by another UID is refused.
     monkeypatch.setenv("UNITARES_LEASE_PLANE_UNIX_SOCKET", str(unix_lease_server))
-    monkeypatch.setattr(os, "getuid", lambda: os.lstat(unix_lease_server).st_uid + 1)
+    fake_uid = os.lstat(unix_lease_server).st_uid + 1
+    monkeypatch.setattr(os, "geteuid", lambda: fake_uid)
+    monkeypatch.setattr(os, "getuid", lambda: fake_uid)
     assert file_lease_hook._bearer_token_with_source() == ("", "insecure_transport")
     assert file_lease_hook._http_json("GET", "/v1/health", token="lease-token")["ok"] is False
+    assert LeaseHandler.calls == []
+
+
+def test_unix_socket_rejects_relative_path_bad_parent_mode_and_peer_uid_mismatch(
+    tmp_path,
+    monkeypatch,
+    unix_lease_server,
+):
+    import stat
+
+    monkeypatch.delenv("UNITARES_ALLOW_INSECURE_LOOPBACK_LEASE_HTTP", raising=False)
+    monkeypatch.delenv("LEASE_PLANE_BASE_URL", raising=False)
+    monkeypatch.delenv("UNITARES_LEASE_PLANE_URL", raising=False)
+    monkeypatch.setenv("LEASE_PLANE_BEARER_TOKEN", "lease-token")
+    monkeypatch.setenv("UNITARES_SECRETS_ENV", "/dev/null")
+
+    # Relative path is refused fail-closed.
+    monkeypatch.setenv("UNITARES_LEASE_PLANE_UNIX_SOCKET", "relative/lp.sock")
+    assert file_lease_hook._bearer_token_with_source() == ("", "insecure_transport")
+    assert file_lease_hook._http_json("GET", "/v1/health", token="lease-token")["ok"] is False
+
+    # '..' segment is refused fail-closed.
+    monkeypatch.setenv(
+        "UNITARES_LEASE_PLANE_UNIX_SOCKET",
+        f"{unix_lease_server.parent}/../{unix_lease_server.parent.name}/lp.sock",
+    )
+    assert file_lease_hook._bearer_token_with_source() == ("", "insecure_transport")
+
+    # Group/world-writable parent directory without sticky bit is refused.
+    parent = unix_lease_server.parent
+    original_mode = stat.S_IMODE(os.lstat(parent).st_mode)
+    try:
+        os.chmod(parent, 0o775)
+        monkeypatch.setenv("UNITARES_LEASE_PLANE_UNIX_SOCKET", str(unix_lease_server))
+        assert file_lease_hook._bearer_token_with_source() == ("", "insecure_transport")
+        assert file_lease_hook._http_json("GET", "/v1/health", token="lease-token")["ok"] is False
+        assert LeaseHandler.calls == []
+    finally:
+        os.chmod(parent, original_mode)
+
+    # Post-connect peer UID mismatch refuses before sending bearer over socket.
+    monkeypatch.setenv("UNITARES_LEASE_PLANE_UNIX_SOCKET", str(unix_lease_server))
+    monkeypatch.setattr(
+        file_lease_hook,
+        "_verify_unix_peer_uid",
+        lambda _sock: (_ for _ in ()).throw(
+            file_lease_hook.UnixSocketValidationError(
+                "insecure_unix_socket", "peer uid mismatch"
+            )
+        ),
+    )
+    res = file_lease_hook._http_json("GET", "/v1/health", token="lease-token")
+    assert res["ok"] is False
+    assert res["reason"] == "UnixSocketValidationError"
     assert LeaseHandler.calls == []
 
 

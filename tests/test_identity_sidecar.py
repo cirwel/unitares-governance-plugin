@@ -2880,3 +2880,124 @@ def test_unix_socket_cli_unlinks_socket_on_sigterm(
 
         assert proc.returncode == 0
         assert not sock_path.exists()
+
+
+def test_unix_socket_refuses_relative_path_and_permissive_existing_parent_without_chmod(
+    tmp_path: Path,
+    fake_server: str,
+) -> None:
+    import os
+    import stat
+    import tempfile
+
+    if not hasattr(socket, "AF_UNIX"):
+        pytest.skip("AF_UNIX not supported on this platform")
+
+    sidecar = _sidecar(tmp_path, fake_server)
+    with pytest.raises(ValueError, match="absolute"):
+        identity_sidecar.BoundedThreadingUnixHTTPServer(
+            "relative/sc.sock", make_handler(sidecar)
+        )
+
+    with tempfile.TemporaryDirectory(prefix="u-sc-") as tmpdir:
+        permissive_dir = Path(tmpdir) / "shared"
+        permissive_dir.mkdir()
+        os.chmod(permissive_dir, 0o755)
+        with pytest.raises(PermissionError, match="0700"):
+            identity_sidecar.BoundedThreadingUnixHTTPServer(
+                permissive_dir / "sc.sock", make_handler(sidecar)
+            )
+        # Pre-existing directory permissions MUST NOT be mutated.
+        assert stat.S_IMODE(os.lstat(permissive_dir).st_mode) == 0o755
+
+
+def test_unix_socket_cleans_stale_socket_and_enforces_worker_cap_503(
+    tmp_path: Path,
+    fake_server: str,
+) -> None:
+    import http.client
+    import os
+    import tempfile
+
+    if not hasattr(socket, "AF_UNIX"):
+        pytest.skip("AF_UNIX not supported on this platform")
+
+    with tempfile.TemporaryDirectory(prefix="u-sc-") as tmpdir:
+        sock_path = Path(tmpdir) / "stale.sock"
+        # Create a stale (unlistening) socket left behind by a crashed process.
+        stale = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        stale.bind(str(sock_path))
+        stale.close()
+        assert sock_path.exists()
+
+        entered = threading.Event()
+        release = threading.Event()
+
+        class BlockingUnixHandler(BaseHTTPRequestHandler):
+            def log_message(self, _fmt, *_args):  # pragma: no cover
+                return
+
+            def address_string(self):
+                return "unix"
+
+            def do_GET(self):  # noqa: N802
+                entered.set()
+                release.wait(timeout=5)
+                self.send_response(200)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+        # Rebinding over the stale socket succeeds and enforces max_workers=1.
+        server = identity_sidecar.BoundedThreadingUnixHTTPServer(
+            sock_path, BlockingUnixHandler, max_workers=1
+        )
+        serving = threading.Thread(target=server.serve_forever, daemon=True)
+        serving.start()
+
+        def _uds_get(path: str) -> int:
+            class _Conn(http.client.HTTPConnection):
+                def connect(self) -> None:
+                    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                    s.settimeout(5)
+                    s.connect(str(sock_path))
+                    self.sock = s
+
+            conn = _Conn("localhost", timeout=5)
+            try:
+                conn.request("GET", path)
+                resp = conn.getresponse()
+                resp.read()
+                return int(resp.status)
+            finally:
+                conn.close()
+
+        first_status: list[int] = []
+        first = threading.Thread(
+            target=lambda: first_status.append(_uds_get("/hold")), daemon=True
+        )
+        first.start()
+        try:
+            assert entered.wait(timeout=2)
+            # On AF_UNIX the server can write 503 and close before the client
+            # finishes writing its request (yielding BrokenPipeError on sendall
+            # while the 503 response sits in the client's recv buffer).
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as overflow:
+                overflow.settimeout(5)
+                overflow.connect(str(sock_path))
+                try:
+                    overflow.sendall(
+                        b"GET /overflow HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+                    )
+                except BrokenPipeError:
+                    pass
+                reply = _read_reply(overflow, within=2.0)
+            assert b" 503 " in reply
+        finally:
+            release.set()
+            first.join(timeout=2)
+            server.shutdown()
+            serving.join(timeout=2)
+            server.server_close()
+
+        assert first_status == [200]
+        assert not sock_path.exists()

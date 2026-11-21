@@ -80,15 +80,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--sidecar-url",
-        default=os.environ.get("UNITARES_SIDECAR_URL", DEFAULT_SIDECAR_URL),
-        help="Local identity sidecar base URL.",
+        default=None,
+        help=(
+            "Local identity sidecar base URL "
+            f"(defaults to UNITARES_SIDECAR_URL or {DEFAULT_SIDECAR_URL}; "
+            "explicitly passing --sidecar-url overrides env UNITARES_SIDECAR_SOCKET)."
+        ),
     )
     parser.add_argument(
         "--sidecar-socket",
-        default=os.environ.get("UNITARES_SIDECAR_SOCKET", ""),
+        default=None,
         help=(
-            "Local identity sidecar Unix domain socket path "
-            "(takes precedence over --sidecar-url when set)."
+            "Absolute path to a local identity sidecar Unix domain socket "
+            "(defaults to UNITARES_SIDECAR_SOCKET)."
         ),
     )
     parser.add_argument(
@@ -229,6 +233,20 @@ def _proven_health(
         raise URunError(f"sidecar listener failed startup authentication: {exc}") from exc
 
 
+def _normalize_sidecar_socket(raw_socket: str) -> str:
+    cleaned = raw_socket.strip()
+    if not cleaned:
+        return ""
+    if "\x00" in cleaned:
+        raise URunError("--sidecar-socket must not contain NUL bytes")
+    expanded = os.path.expanduser(cleaned)
+    if not os.path.isabs(expanded) or ".." in Path(expanded).parts:
+        raise URunError(
+            f"--sidecar-socket must be an absolute path without '..' segments: {raw_socket!r}"
+        )
+    return expanded
+
+
 def ensure_sidecar(
     *,
     sidecar_url: str,
@@ -241,7 +259,7 @@ def ensure_sidecar(
     reuse_existing: bool,
     sidecar_socket: str = "",
 ) -> subprocess.Popen[Any] | None:
-    socket_path = os.path.expanduser(sidecar_socket.strip()) if sidecar_socket.strip() else ""
+    socket_path = _normalize_sidecar_socket(sidecar_socket)
     host = ""
     port = 0
     if not socket_path:
@@ -474,20 +492,29 @@ def main(argv: list[str] | None = None) -> int:
     configured_startup_secret = (
         os.environ.get("UNITARES_SIDECAR_STARTUP_SECRET") or ""
     ).strip()
-    sidecar_socket = args.sidecar_socket.strip()
-    if sidecar_socket:
-        sidecar_socket = os.path.expanduser(sidecar_socket)
+    if args.sidecar_socket is not None:
+        raw_sidecar_socket = args.sidecar_socket.strip()
+    elif args.sidecar_url is not None:
+        raw_sidecar_socket = ""
+    else:
+        raw_sidecar_socket = (os.environ.get("UNITARES_SIDECAR_SOCKET") or "").strip()
+    resolved_sidecar_url = (
+        args.sidecar_url
+        if args.sidecar_url is not None
+        else (os.environ.get("UNITARES_SIDECAR_URL") or DEFAULT_SIDECAR_URL)
+    )
     capability = configured_capability or secrets.token_urlsafe(32)
     startup_secret = configured_startup_secret or secrets.token_urlsafe(32)
     owned_sidecar: subprocess.Popen[Any] | None = None
 
     try:
+        sidecar_socket = _normalize_sidecar_socket(raw_sidecar_socket)
         if sidecar_socket:
             sidecar_url = ""
             effective_startup_secret: str | None = None
             reuse_existing = bool(configured_capability)
         else:
-            _host, _port, sidecar_url = _sidecar_bind(args.sidecar_url)
+            _host, _port, sidecar_url = _sidecar_bind(resolved_sidecar_url)
             effective_startup_secret = startup_secret
             reuse_existing = bool(configured_capability and configured_startup_secret)
         owned_sidecar = ensure_sidecar(

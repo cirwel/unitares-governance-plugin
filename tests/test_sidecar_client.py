@@ -269,8 +269,39 @@ def test_unix_socket_client_connects_and_validates_fail_closed(
             os.chmod(sock_path, 0o600)
 
             # Socket owned by another UID is refused fail-closed.
-            monkeypatch.setattr(os, "getuid", lambda: os.lstat(sock_path).st_uid + 1)
+            fake_uid = os.lstat(sock_path).st_uid + 1
+            monkeypatch.setattr(os, "geteuid", lambda: fake_uid)
+            monkeypatch.setattr(os, "getuid", lambda: fake_uid)
             with pytest.raises(sidecar_client.ListenerNotProven, match="not owned"):
+                client.health()
+            assert records == []
+            monkeypatch.undo()
+
+            # Relative socket path is refused fail-closed.
+            with pytest.raises(sidecar_client.ListenerNotProven, match="absolute"):
+                sidecar_client.SidecarClient(
+                    capability=CAPABILITY,
+                    sidecar_socket="relative/s.sock",
+                ).health()
+
+            # Group/world-writable non-sticky parent dir is refused fail-closed.
+            os.chmod(tmpdir, 0o775)
+            try:
+                with pytest.raises(sidecar_client.ListenerNotProven, match="sticky"):
+                    client.health()
+                assert records == []
+            finally:
+                os.chmod(tmpdir, 0o700)
+
+            # Post-connect peer UID mismatch refuses before sending capability.
+            monkeypatch.setattr(
+                sidecar_client,
+                "_verify_unix_peer_uid",
+                lambda _sock: (_ for _ in ()).throw(
+                    sidecar_client.ListenerNotProven("peer uid mismatch")
+                ),
+            )
+            with pytest.raises(sidecar_client.ListenerNotProven, match="peer uid mismatch"):
                 client.health()
             assert records == []
         finally:
@@ -282,6 +313,27 @@ def test_unix_socket_client_connects_and_validates_fail_closed(
                 capability=CAPABILITY,
                 sidecar_socket=str(Path(tmpdir) / "missing.sock"),
             ).health()
+
+
+def test_startup_proof_503_maps_to_sidecar_unavailable() -> None:
+    class BusyHandler(BaseHTTPRequestHandler):
+        def log_message(self, _fmt, *_args):  # pragma: no cover
+            return
+
+        def do_GET(self):  # noqa: N802
+            _respond(self, {"success": False, "error": "busy"}, status=503)
+
+    server, thread, url = _serve_tcp(BusyHandler)
+    try:
+        client = sidecar_client.SidecarClient(
+            capability=CAPABILITY,
+            sidecar_url=url,
+            startup_secret=STARTUP_SECRET,
+        )
+        with pytest.raises(sidecar_client.SidecarUnavailable, match="503"):
+            client.health()
+    finally:
+        _stop_server(server, thread)
 
 
 def test_cli_call_post_and_get_over_tcp_and_uds(

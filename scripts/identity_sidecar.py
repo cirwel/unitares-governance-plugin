@@ -280,11 +280,17 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
             self._request_slots.release()
 
 
+_UMASK_LOCK = threading.Lock()
+
+
 def _prepare_unix_socket_path(raw_path: str) -> Path:
     """Validate and prepare an owner-only Unix domain socket path.
 
-    Ensures the parent directory is not a symlink, is owned by the current UID,
-    and has ``0o700`` permissions. Refuses symlinks, non-socket files, foreign-
+    Requires an absolute path without ``..`` segments. Missing parent
+    directories are created with ``0o700`` permissions; pre-existing parent
+    directories are never silently ``chmod``ed and must already be real
+    non-symlink directories owned by the current effective UID with no group
+    or world permission bits. Refuses symlinks, non-socket files, foreign-
     owned sockets, and already-active listeners at the socket path.
     """
     if not hasattr(socket, "AF_UNIX") or not hasattr(socketserver, "UnixStreamServer"):
@@ -292,28 +298,54 @@ def _prepare_unix_socket_path(raw_path: str) -> Path:
     cleaned = raw_path.strip()
     if not cleaned or "\x00" in cleaned:
         raise ValueError("Unix socket path must be a non-empty path without NUL bytes")
-    sock_path = Path(os.path.expanduser(cleaned))
-    if not sock_path.name:
-        raise ValueError("Unix socket path must name a socket file")
+    expanded = os.path.expanduser(cleaned)
+    if not os.path.isabs(expanded):
+        raise ValueError(f"Unix socket path must be absolute: {raw_path!r}")
+    sock_path = Path(expanded)
+    if not sock_path.name or ".." in sock_path.parts:
+        raise ValueError("Unix socket path must name a socket file without '..' segments")
 
     parent = sock_path.parent
-    getuid = getattr(os, "getuid", None)
+    geteuid = getattr(os, "geteuid", getattr(os, "getuid", None))
     try:
         parent_info = os.lstat(parent)
     except FileNotFoundError:
-        parent.mkdir(parents=True, mode=0o700, exist_ok=True)
-        os.chmod(parent, 0o700)
+        missing: list[Path] = []
+        cursor = parent
+        while True:
+            try:
+                os.lstat(cursor)
+                break
+            except FileNotFoundError:
+                missing.append(cursor)
+                if cursor.parent == cursor:
+                    break
+                cursor = cursor.parent
+        open_flags = (
+            os.O_RDONLY
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_DIRECTORY", 0)
+        )
+        for directory in reversed(missing):
+            os.mkdir(directory, 0o700)
+            if os.name != "nt":
+                fd = os.open(directory, open_flags)
+                try:
+                    os.fchmod(fd, 0o700)
+                finally:
+                    os.close(fd)
         parent_info = os.lstat(parent)
     if stat.S_ISLNK(parent_info.st_mode):
         raise ValueError(f"Unix socket parent directory must not be a symlink: {parent}")
     if not stat.S_ISDIR(parent_info.st_mode):
         raise ValueError(f"Unix socket parent is not a directory: {parent}")
-    if os.name != "nt" and callable(getuid) and parent_info.st_uid != getuid():
+    if os.name != "nt" and callable(geteuid) and parent_info.st_uid != geteuid():
         raise PermissionError(f"Unix socket parent directory must be owned by current user: {parent}")
-    os.chmod(parent, 0o700)
-    parent_info = os.lstat(parent)
     if os.name != "nt" and (parent_info.st_mode & 0o077):
-        raise PermissionError(f"Unix socket parent directory must be 0700: {parent}")
+        raise PermissionError(
+            "Unix socket parent directory must already have 0700 (owner-only) "
+            f"permissions, got {oct(stat.S_IMODE(parent_info.st_mode))}: {parent}"
+        )
 
     try:
         target_info = os.lstat(sock_path)
@@ -323,7 +355,7 @@ def _prepare_unix_socket_path(raw_path: str) -> Path:
         raise ValueError(f"refusing to bind Unix socket at symlink path: {sock_path}")
     if not stat.S_ISSOCK(target_info.st_mode):
         raise ValueError(f"refusing to replace non-socket path with Unix socket: {sock_path}")
-    if os.name != "nt" and callable(getuid) and target_info.st_uid != getuid():
+    if os.name != "nt" and callable(geteuid) and target_info.st_uid != geteuid():
         raise PermissionError(f"refusing to replace Unix socket owned by another user: {sock_path}")
 
     # Refuse to steal a socket that currently has an active listener.
@@ -374,14 +406,21 @@ if hasattr(socketserver, "UnixStreamServer"):
             )
 
         def server_bind(self) -> None:
-            super().server_bind()
+            # Restrict umask across bind() so the AF_UNIX inode is created
+            # with 0600 permissions immediately, avoiding a bind->chmod window.
+            with _UMASK_LOCK:
+                old_umask = os.umask(0o177)
+                try:
+                    super().server_bind()
+                finally:
+                    os.umask(old_umask)
             os.chmod(self._socket_path, 0o600)
             info = os.lstat(self._socket_path)
-            getuid = getattr(os, "getuid", None)
+            geteuid = getattr(os, "geteuid", getattr(os, "getuid", None))
             if (
                 stat.S_ISLNK(info.st_mode)
                 or not stat.S_ISSOCK(info.st_mode)
-                or (os.name != "nt" and callable(getuid) and info.st_uid != getuid())
+                or (os.name != "nt" and callable(geteuid) and info.st_uid != geteuid())
                 or (os.name != "nt" and (info.st_mode & 0o077))
             ):
                 raise PermissionError(

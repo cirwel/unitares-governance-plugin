@@ -18,6 +18,7 @@ import json
 import os
 import socket
 import stat
+import struct
 import sys
 import tempfile
 import threading
@@ -394,7 +395,8 @@ def _unix_socket_config() -> tuple[bool, str | None, str | None]:
 
     ``UNITARES_LEASE_PLANE_UNIX_SOCKET`` takes precedence over HTTP base URLs.
     Alternatively, ``LEASE_PLANE_BASE_URL`` or ``UNITARES_LEASE_PLANE_URL`` may
-    specify a ``unix:///absolute/path`` URL.
+    specify a ``unix:///absolute/path`` URL. Relative socket paths are refused
+    fail-closed so hook CWD changes cannot redirect transport.
     """
     raw_socket = (os.environ.get("UNITARES_LEASE_PLANE_UNIX_SOCKET") or "").strip()
     if raw_socket:
@@ -402,7 +404,12 @@ def _unix_socket_config() -> tuple[bool, str | None, str | None]:
             expanded = os.path.expanduser(raw_socket)
         except Exception:
             return True, None, "invalid_unix_socket"
-        if not expanded or "\x00" in expanded:
+        if (
+            not expanded
+            or "\x00" in expanded
+            or not os.path.isabs(expanded)
+            or ".." in Path(expanded).parts
+        ):
             return True, None, "invalid_unix_socket"
         return True, expanded, None
 
@@ -424,6 +431,7 @@ def _unix_socket_config() -> tuple[bool, str | None, str | None]:
             or not parsed.path.startswith("/")
             or len(parsed.path) <= 1
             or "\x00" in parsed.path
+            or ".." in Path(parsed.path).parts
         ):
             return True, None, "invalid_unix_socket"
         return True, parsed.path, None
@@ -431,21 +439,105 @@ def _unix_socket_config() -> tuple[bool, str | None, str | None]:
     return False, None, None
 
 
+def _current_effective_uid() -> int | None:
+    geteuid = getattr(os, "geteuid", getattr(os, "getuid", None))
+    return geteuid() if callable(geteuid) else None
+
+
+def _verify_unix_peer_uid(sock: socket.socket) -> None:
+    """Verify the connected AF_UNIX peer's effective UID before sending secrets."""
+    expected_uid = _current_effective_uid()
+    if expected_uid is None:
+        raise UnixSocketValidationError(
+            "unix_socket_unsupported",
+            "cannot determine current UID for Unix socket peer verification",
+        )
+    if sys.platform == "darwin":
+        sol_local = getattr(socket, "SOL_LOCAL", 0)
+        local_peercred = getattr(socket, "LOCAL_PEERCRED", 0x001)
+        try:
+            raw = sock.getsockopt(sol_local, local_peercred, struct.calcsize("=IIh2x16I"))
+        except OSError as exc:
+            raise UnixSocketValidationError(
+                "insecure_unix_socket",
+                f"could not read Unix socket peer credentials: {exc}",
+            ) from exc
+        cr_version, peer_uid = struct.unpack_from("=II", raw, 0)
+        if cr_version != 0 or peer_uid != expected_uid:
+            raise UnixSocketValidationError(
+                "insecure_unix_socket",
+                "Unix socket peer UID does not match the current user",
+            )
+        return
+    so_peercred = getattr(
+        socket, "SO_PEERCRED", 17 if sys.platform.startswith("linux") else None
+    )
+    if so_peercred is not None:
+        try:
+            raw = sock.getsockopt(socket.SOL_SOCKET, so_peercred, struct.calcsize("=iII"))
+        except OSError as exc:
+            raise UnixSocketValidationError(
+                "insecure_unix_socket",
+                f"could not read Unix socket peer credentials: {exc}",
+            ) from exc
+        _pid, peer_uid, _gid = struct.unpack("=iII", raw)
+        if peer_uid != expected_uid:
+            raise UnixSocketValidationError(
+                "insecure_unix_socket",
+                "Unix socket peer UID does not match the current user",
+            )
+        return
+    raise UnixSocketValidationError(
+        "unix_socket_unsupported",
+        "Unix socket peer credential verification is unavailable on this platform",
+    )
+
+
 def _validate_unix_socket(socket_path: str) -> str:
     """Validate a lease-plane Unix domain socket fail-closed before connecting.
 
-    Requires an existing, non-symlink AF_UNIX socket owned by the current UID
-    with no group or world permission bits (``st_mode & 0o077 == 0``).
+    Requires an absolute, existing, non-symlink AF_UNIX socket owned by the
+    current effective UID with no group or world permission bits
+    (``st_mode & 0o077 == 0``), inside a non-symlink parent directory that is
+    not group- or world-writable without the sticky bit.
     """
     if not hasattr(socket, "AF_UNIX"):
         raise UnixSocketValidationError(
             "unix_socket_unsupported",
             "Unix domain sockets are not supported on this platform",
         )
-    if not socket_path or "\x00" in socket_path:
+    if (
+        not socket_path
+        or "\x00" in socket_path
+        or not os.path.isabs(socket_path)
+        or ".." in Path(socket_path).parts
+    ):
         raise UnixSocketValidationError(
             "invalid_unix_socket",
-            "invalid Unix socket path",
+            "Unix socket path must be an absolute path without '..' segments",
+        )
+    parent = os.path.dirname(socket_path)
+    try:
+        parent_info = os.lstat(parent)
+    except FileNotFoundError as exc:
+        raise UnixSocketValidationError(
+            "unreachable",
+            f"Unix socket parent directory not found: {parent}",
+        ) from exc
+    except OSError as exc:
+        raise UnixSocketValidationError(
+            "invalid_unix_socket",
+            f"cannot stat Unix socket parent directory {parent}: {exc}",
+        ) from exc
+    if stat.S_ISLNK(parent_info.st_mode) or not stat.S_ISDIR(parent_info.st_mode):
+        raise UnixSocketValidationError(
+            "insecure_unix_socket",
+            f"Unix socket parent must be a real directory: {parent}",
+        )
+    if (parent_info.st_mode & 0o022) and not (parent_info.st_mode & stat.S_ISVTX):
+        raise UnixSocketValidationError(
+            "insecure_unix_socket",
+            f"Unix socket parent directory is group- or world-writable without sticky bit: {parent}",
         )
     try:
         info = os.lstat(socket_path)
@@ -469,8 +561,8 @@ def _validate_unix_socket(socket_path: str) -> str:
             "insecure_unix_socket",
             f"Unix socket path is not a socket: {socket_path}",
         )
-    getuid = getattr(os, "getuid", None)
-    if not callable(getuid) or info.st_uid != getuid():
+    expected_uid = _current_effective_uid()
+    if expected_uid is None or info.st_uid != expected_uid:
         raise UnixSocketValidationError(
             "insecure_unix_socket",
             f"Unix socket is not owned by the current user: {socket_path}",
@@ -497,6 +589,7 @@ class _UnixHTTPConnection(http.client.HTTPConnection):
             if self.timeout is not None:
                 sock.settimeout(self.timeout)
             sock.connect(validated)
+            _verify_unix_peer_uid(sock)
         except BaseException:
             sock.close()
             raise

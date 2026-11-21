@@ -1126,3 +1126,70 @@ def test_unix_socket_mode_refuses_insecure_existing_socket(
     assert result == 125
     assert seen_auth == []
     assert "u-run:" in capsys.readouterr().err
+
+
+def test_relative_sidecar_socket_is_refused(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    result = u_run.main(
+        [
+            "--server-url",
+            SERVER_URL,
+            "--sidecar-socket",
+            "relative/sidecar.sock",
+            "--workspace",
+            str(tmp_path),
+            "--",
+            sys.executable,
+            "-c",
+            "raise SystemExit(0)",
+        ]
+    )
+    assert result == 125
+    assert "absolute path" in capsys.readouterr().err
+
+
+def test_explicit_cli_sidecar_url_overrides_env_sidecar_socket(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("UNITARES_SIDECAR_SOCKET", "/nonexistent/ignored.sock")
+    monkeypatch.setenv("UNITARES_SIDECAR_CAPABILITY", CAPABILITY)
+    monkeypatch.setenv("UNITARES_SIDECAR_STARTUP_SECRET", STARTUP_SECRET)
+    calls: list[tuple[str, dict[str, Any]]] = []
+    server, thread, sidecar_url = _serve(_sidecar_handler(tmp_path, calls))
+    output = tmp_path / "override-env.json"
+    child = (
+        "import json, os, pathlib, sys; "
+        "pathlib.Path(sys.argv[1]).write_text(json.dumps({"
+        "'url': os.environ.get('UNITARES_SIDECAR_URL'), "
+        "'socket': os.environ.get('UNITARES_SIDECAR_SOCKET')}))"
+    )
+    try:
+        result = u_run.main(
+            [
+                "--server-url",
+                SERVER_URL,
+                "--sidecar-url",
+                sidecar_url,
+                "--workspace",
+                str(tmp_path),
+                "--slot",
+                "plain-cli",
+                "--",
+                sys.executable,
+                "-c",
+                child,
+                str(output),
+            ]
+        )
+    finally:
+        _stop_server(server, thread)
+
+    assert result == 0
+    assert json.loads(output.read_text(encoding="utf-8")) == {
+        "url": sidecar_url,
+        "socket": None,
+    }
+    assert [path for path, _body in calls] == ["/session/start", "/turn/stop"]

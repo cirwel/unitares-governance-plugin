@@ -213,10 +213,15 @@ python3 scripts/identity_sidecar.py \
   --port 8768
 ```
 
-For full local isolation on POSIX hosts, pass `--unix-socket <path>` (or set
-`UNITARES_SIDECAR_SOCKET`) instead of `--port`: the sidecar enforces a `0o700`
-owner-only parent directory, refuses symlinks, binds a `0o600` `AF_UNIX`
-socket, and unlinks it on exit.
+For full local isolation on POSIX hosts, pass an absolute `--unix-socket <path>`
+(or set `UNITARES_SIDECAR_SOCKET`) instead of `--port`: the sidecar creates any
+missing parent directories with `0o700` permissions, refuses pre-existing parent
+directories that have group/world access bits (without mutating them), refuses
+symlinks, binds a `0o600` `AF_UNIX` socket atomically under a restrictive umask,
+and unlinks it on exit. Clients (`u-run` and `scripts/sidecar_client.py`) verify
+the socket metadata, parent directory safety, and connected peer UID
+(`LOCAL_PEERCRED` on macOS, `SO_PEERCRED` on Linux) before presenting
+`UNITARES_SIDECAR_CAPABILITY`.
 
 Every operational route, including `/health`, requires
 `Authorization: Bearer $UNITARES_SIDECAR_CAPABILITY`. The capability is bound
@@ -360,9 +365,10 @@ Class selection is deliberately explicit. Passing `--class X` uses exactly
 `X`; omitting it uses the neutral literal `u-run`. The wrapper never guesses a
 calibration class from the command name, process name, or working directory.
 Configuration defaults to `UNITARES_SERVER_URL` and `UNITARES_SIDECAR_URL`, or
-to `http://localhost:8767` and `http://127.0.0.1:8768` respectively; pass
-`--sidecar-socket` or set `UNITARES_SIDECAR_SOCKET` to use an owner-only Unix
-domain socket instead of loopback TCP.
+to `http://localhost:8767` and `http://127.0.0.1:8768` respectively; pass an
+absolute `--sidecar-socket` or set `UNITARES_SIDECAR_SOCKET` to use an
+owner-only Unix domain socket instead of loopback TCP (an explicit CLI
+`--sidecar-url` overrides env `UNITARES_SIDECAR_SOCKET`).
 
 ### Repo Boundary
 

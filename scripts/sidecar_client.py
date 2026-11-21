@@ -31,6 +31,7 @@ import os
 import secrets
 import socket
 import stat
+import struct
 import sys
 import threading
 import time
@@ -110,12 +111,62 @@ def sidecar_bind(sidecar_url: str) -> tuple[str, int, str]:
     return bind_host, port, base
 
 
+def _current_effective_uid() -> int | None:
+    geteuid = getattr(os, "geteuid", getattr(os, "getuid", None))
+    return geteuid() if callable(geteuid) else None
+
+
+def _verify_unix_peer_uid(sock: socket.socket) -> None:
+    """Verify the connected AF_UNIX peer's effective UID before sending secrets."""
+    expected_uid = _current_effective_uid()
+    if expected_uid is None:
+        raise SidecarClientError(
+            "cannot determine current UID for Unix socket peer verification"
+        )
+    if sys.platform == "darwin":
+        sol_local = getattr(socket, "SOL_LOCAL", 0)
+        local_peercred = getattr(socket, "LOCAL_PEERCRED", 0x001)
+        try:
+            raw = sock.getsockopt(sol_local, local_peercred, struct.calcsize("=IIh2x16I"))
+        except OSError as exc:
+            raise ListenerNotProven(
+                f"could not verify sidecar Unix socket peer credentials: {exc}"
+            ) from exc
+        cr_version, peer_uid = struct.unpack_from("=II", raw, 0)
+        if cr_version != 0 or peer_uid != expected_uid:
+            raise ListenerNotProven(
+                "sidecar Unix socket peer UID does not match the current user"
+            )
+        return
+    so_peercred = getattr(
+        socket, "SO_PEERCRED", 17 if sys.platform.startswith("linux") else None
+    )
+    if so_peercred is not None:
+        try:
+            raw = sock.getsockopt(socket.SOL_SOCKET, so_peercred, struct.calcsize("=iII"))
+        except OSError as exc:
+            raise ListenerNotProven(
+                f"could not verify sidecar Unix socket peer credentials: {exc}"
+            ) from exc
+        _pid, peer_uid, _gid = struct.unpack("=iII", raw)
+        if peer_uid != expected_uid:
+            raise ListenerNotProven(
+                "sidecar Unix socket peer UID does not match the current user"
+            )
+        return
+    raise SidecarClientError(
+        "Unix socket peer credential verification is unavailable on this platform"
+    )
+
+
 def validate_unix_socket(socket_path: str) -> str:
     """Validate a sidecar Unix domain socket fail-closed before connecting.
 
-    Raises ``SidecarUnavailable`` if the socket file does not yet exist, and
-    ``ListenerNotProven`` if the path is a symlink, not a socket, owned by
-    another user, or accessible to group/other users (``st_mode & 0o077 != 0``).
+    Raises ``SidecarUnavailable`` if the socket (or its parent directory) does
+    not yet exist, and ``ListenerNotProven`` if the path is relative, contains
+    ``..``, is a symlink, is not a socket, is owned by another user, is
+    accessible to group/other users (``st_mode & 0o077 != 0``), or sits inside
+    a symlinked or group/world-writable non-sticky parent directory.
     """
     if not hasattr(socket, "AF_UNIX"):
         raise SidecarClientError("Unix domain sockets are not supported on this platform")
@@ -123,6 +174,27 @@ def validate_unix_socket(socket_path: str) -> str:
     if not cleaned or "\x00" in cleaned:
         raise ListenerNotProven("sidecar Unix socket path is invalid")
     expanded = os.path.expanduser(cleaned)
+    if not os.path.isabs(expanded) or ".." in Path(expanded).parts:
+        raise ListenerNotProven(
+            f"sidecar Unix socket path must be absolute without '..' segments: {socket_path!r}"
+        )
+    parent = os.path.dirname(expanded)
+    try:
+        parent_info = os.lstat(parent)
+    except FileNotFoundError as exc:
+        raise SidecarUnavailable(f"unix://{expanded} is unavailable: {exc}") from exc
+    except OSError as exc:
+        raise ListenerNotProven(
+            f"cannot inspect sidecar Unix socket parent {parent}: {exc}"
+        ) from exc
+    if stat.S_ISLNK(parent_info.st_mode) or not stat.S_ISDIR(parent_info.st_mode):
+        raise ListenerNotProven(
+            f"sidecar Unix socket parent must be a real directory: {parent}"
+        )
+    if (parent_info.st_mode & 0o022) and not (parent_info.st_mode & stat.S_ISVTX):
+        raise ListenerNotProven(
+            f"sidecar Unix socket parent directory is group- or world-writable without sticky bit: {parent}"
+        )
     try:
         info = os.lstat(expanded)
     except FileNotFoundError as exc:
@@ -135,8 +207,8 @@ def validate_unix_socket(socket_path: str) -> str:
         raise ListenerNotProven(f"sidecar Unix socket must not be a symlink: {expanded}")
     if not stat.S_ISSOCK(info.st_mode):
         raise ListenerNotProven(f"sidecar Unix socket path is not a socket: {expanded}")
-    getuid = getattr(os, "getuid", None)
-    if not callable(getuid) or info.st_uid != getuid():
+    expected_uid = _current_effective_uid()
+    if expected_uid is None or info.st_uid != expected_uid:
         raise ListenerNotProven(
             f"sidecar Unix socket is not owned by the current user: {expanded}"
         )
@@ -161,6 +233,7 @@ class _UnixHTTPConnection(http.client.HTTPConnection):
             if self.timeout is not None:
                 sock.settimeout(self.timeout)
             sock.connect(validated)
+            _verify_unix_peer_uid(sock)
         except BaseException:
             sock.close()
             raise
@@ -282,6 +355,10 @@ def _prove_listener(
             f"{url} returned a malformed startup-proof response: "
             f"{type(exc).__name__}"
         ) from exc
+    if response.status == 503:
+        raise SidecarUnavailable(
+            f"{url} is temporarily unavailable (HTTP 503) during startup challenge"
+        )
     if response.status != 200:
         raise ListenerNotProven(
             f"{url} answered the startup challenge with HTTP {response.status}"
