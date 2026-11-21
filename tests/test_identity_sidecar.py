@@ -3106,17 +3106,22 @@ def test_unix_socket_cleans_stale_socket_and_enforces_worker_cap_503(
             # On AF_UNIX the server can write 503 and close before the client
             # finishes writing its request (yielding BrokenPipeError on sendall
             # while the 503 response sits in the client's recv buffer).
-            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as overflow:
-                overflow.settimeout(5)
-                overflow.connect(str(sock_path))
-                try:
-                    overflow.sendall(
-                        b"GET /overflow HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
-                    )
-                except (BrokenPipeError, ConnectionResetError):
-                    pass
-                reply = _read_reply(overflow, within=2.0)
-            assert b" 503 " in reply
+            # Exercise both a small overflow request and a >8 KB buffered
+            # overflow request so Linux non-blocking drain handles >4 KB cleanly.
+            for padding in (b"", b"X-Pad: " + b"a" * 10_000 + b"\r\n"):
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as overflow:
+                    overflow.settimeout(5)
+                    overflow.connect(str(sock_path))
+                    try:
+                        overflow.sendall(
+                            b"GET /overflow HTTP/1.1\r\nHost: localhost\r\n"
+                            + padding
+                            + b"Connection: close\r\n\r\n"
+                        )
+                    except (BrokenPipeError, ConnectionResetError):
+                        pass
+                    reply = _read_reply(overflow, within=2.0)
+                assert b" 503 " in reply
         finally:
             release.set()
             first.join(timeout=2)

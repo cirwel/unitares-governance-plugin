@@ -221,8 +221,13 @@ def _send_503_and_close(server: Any, request: Any) -> None:
             # closing the socket on Linux does not emit ECONNRESET and discard
             # the 503 response from the peer's receive buffer.
             request.setblocking(False)
+            drained = 0
             try:
-                request.recv(4096)
+                while drained < 65_536:
+                    chunk = request.recv(4096)
+                    if not chunk:
+                        break
+                    drained += len(chunk)
             except (BlockingIOError, OSError):
                 pass
         except OSError:
