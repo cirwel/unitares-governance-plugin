@@ -200,8 +200,8 @@ case "${REVIEWER}" in
         # Fail closed unless the installed gemini CLI advertises explicit
         # read-only enforcement (--approval-mode plan + --sandbox).
         GEMINI_HELP="$(gemini --help 2>&1 || true)"
-        if grep -q -- '--approval-mode' <<<"${GEMINI_HELP}" \
-            && grep -q -- '--sandbox' <<<"${GEMINI_HELP}"; then
+        if grep -qE -- '(^|[^[:alnum:]_-])--approval-mode([^[:alnum:]_-]|$)' <<<"${GEMINI_HELP}" \
+            && grep -qE -- '(^|[^[:alnum:]_-])--sandbox([^[:alnum:]_-]|$)' <<<"${GEMINI_HELP}"; then
             CMD=(gemini -p "${REVIEW_PROMPT}" --approval-mode plan --sandbox)
             [[ -n "${MODEL}" ]] && CMD+=(-m "${MODEL}")
             git diff "${DIFF_MODE}" | "${CMD[@]}"
@@ -211,10 +211,11 @@ case "${REVIEWER}" in
         ;;
     antigravity|agy)
         command -v agy >/dev/null 2>&1 || die "agy CLI not found on PATH"
-        # Fail closed unless this agy binary advertises --mode and --sandbox.
+        # Fail closed unless this agy binary advertises exact --mode and --sandbox flags
+        # (boundary-checked so --model does not falsely satisfy --mode).
         AGY_HELP="$(agy --help 2>&1 || true)"
-        if grep -q -- '--mode' <<<"${AGY_HELP}" \
-            && grep -q -- '--sandbox' <<<"${AGY_HELP}"; then
+        if grep -qE -- '(^|[^[:alnum:]_-])--mode([^[:alnum:]_-]|$)' <<<"${AGY_HELP}" \
+            && grep -qE -- '(^|[^[:alnum:]_-])--sandbox([^[:alnum:]_-]|$)' <<<"${AGY_HELP}"; then
             CMD=(agy -p --mode plan --sandbox --disable-slash-commands)
             [[ -n "${MODEL}" ]] && CMD+=(--model "${MODEL}")
             build_input | "${CMD[@]}"

@@ -980,10 +980,10 @@ def test_advisory_review_script_help_dry_run_and_cli_invocation(tmp_path):
     for tok in ("exec", "-s", "read-only"):
         assert tok in codex_argv
 
-    # agy shim lacking --mode/--sandbox in --help fails closed with exit 2
+    # agy shim with --model + --sandbox (NO --mode!) must fail closed with exit 2
     agy_shim = shim_dir / "agy"
     agy_shim.write_text(
-        "#!/usr/bin/env bash\nif [[ \"${1:-}\" == \"--help\" ]]; then echo 'usage: agy -p'; exit 0; fi\necho 'SHOULD_NOT_RUN'\n",
+        "#!/usr/bin/env bash\nif [[ \"${1:-}\" == \"--help\" ]]; then echo 'flags: --model --sandbox'; exit 0; fi\necho 'SHOULD_NOT_RUN'\n",
         encoding="utf-8",
     )
     agy_shim.chmod(0o755)
@@ -1572,6 +1572,72 @@ def test_failed_first_mint_allows_retry_in_same_turn_without_marker_lockout(
     call3["toolCall"]["id"] = "toolu_attempt_3"
     call3["transcriptPath"] = str(tx_path)
     assert _run_inject_agy(call3, home_dir=fake_home)["decision"] == "deny"
+
+
+def test_prior_failed_identity_resume_does_not_allow_parallel_double_start_session(
+    tmp_path, monkeypatch
+):
+    """An earlier failed identity(resume=true) in the same turn sets baseline_failed_count=1
+    so parallel unparented start_session calls A and B allow A and deny B."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+
+    slot = "slot-prior-failed-identity"
+    tx_path = tmp_path / "prior_identity_fail.jsonl"
+    _write_transcript(
+        tx_path,
+        [
+            {"step_index": 0, "type": "USER_INPUT", "content": "resume then mint"},
+            {
+                "step_index": 1,
+                "type": "PLANNER_RESPONSE",
+                "status": "DONE",
+                "tool_calls": [
+                    {
+                        "id": "toolu_resume_fail",
+                        "name": "call_mcp_tool",
+                        "args": {
+                            "ServerName": '"unitares-governance"',
+                            "ToolName": '"identity"',
+                            "Arguments": json.dumps({"resume": True}),
+                        },
+                    }
+                ],
+            },
+            {
+                "step_index": 2,
+                "type": "GENERIC",
+                "status": "DONE",
+                "content": json.dumps({"success": False, "error": "no matching identity"}),
+            },
+        ],
+    )
+
+    call_a = _agy_pre_tool_payload(
+        slot,
+        args={
+            "ServerName": "unitares-governance",
+            "ToolName": "start_session",
+            "Arguments": {"force_new": True},
+        },
+    )
+    call_a["toolCall"]["id"] = "toolu_start_a"
+    call_a["transcriptPath"] = str(tx_path)
+
+    call_b = _agy_pre_tool_payload(
+        slot,
+        args={
+            "ServerName": "unitares-governance",
+            "ToolName": "start_session",
+            "Arguments": {"force_new": True},
+        },
+    )
+    call_b["toolCall"]["id"] = "toolu_start_b"
+    call_b["transcriptPath"] = str(tx_path)
+
+    assert _run_inject_agy(call_a, home_dir=fake_home) == {"decision": "allow"}
+    assert _run_inject_agy(call_b, home_dir=fake_home)["decision"] == "deny"
 
 
 def test_live_slot_denies_mismatched_parent_agent_id_and_non_session_proof_and_longest_alias(

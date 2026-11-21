@@ -473,7 +473,6 @@ def _agy_claim_turn_mint_guard(
         fcntl.flock(fd, fcntl.LOCK_EX)
         os.lseek(fd, 0, os.SEEK_SET)
         raw_existing = os.read(fd, 8192).decode("utf-8", errors="replace").strip()
-        next_attempt_count = 1
         if raw_existing:
             try:
                 existing = json.loads(raw_existing)
@@ -490,9 +489,9 @@ def _agy_claim_turn_mint_guard(
                 )
                 prev_call_id = str(existing.get("tool_call_id") or "").strip()
                 same_call = bool(call_id and prev_call_id and call_id == prev_call_id)
-                prev_attempts = existing.get("attempt_count")
-                if not isinstance(prev_attempts, int) or prev_attempts < 1:
-                    prev_attempts = 1
+                prev_baseline = existing.get("baseline_failed_count")
+                if not isinstance(prev_baseline, int) or prev_baseline < 0:
+                    prev_baseline = 0
                 failed_ids = {
                     str(item.get("call_id") or "").strip()
                     for item in failed_attempts
@@ -502,7 +501,7 @@ def _agy_claim_turn_mint_guard(
                     failed_attempts
                     and (
                         (prev_call_id and prev_call_id in failed_ids)
-                        or len(failed_attempts) >= prev_attempts
+                        or len(failed_attempts) > prev_baseline
                     )
                 )
                 if fresh and not new_turn and not same_call and not prior_failed:
@@ -513,16 +512,12 @@ def _agy_claim_turn_mint_guard(
                         "call's client_session_id, or pass spawn_reason=\"subagent\" only "
                         "when spawning a separate subagent."
                     )
-                if fresh and not new_turn:
-                    next_attempt_count = (
-                        prev_attempts if same_call else prev_attempts + 1
-                    )
         record = json.dumps(
             {
                 "tool_call_id": call_id,
                 "step_idx": step_idx,
                 "turn_boundary_step": turn_boundary_step,
-                "attempt_count": next_attempt_count,
+                "baseline_failed_count": len(failed_attempts),
                 "ts": now,
             },
             separators=(",", ":"),
