@@ -224,7 +224,7 @@ def _send_503_and_close(server: Any, request: Any) -> None:
             drained = 0
             try:
                 while drained < 65_536:
-                    chunk = request.recv(4096)
+                    chunk = request.recv(min(4096, 65_536 - drained))
                     if not chunk:
                         break
                     drained += len(chunk)
