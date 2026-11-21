@@ -88,16 +88,19 @@ agent-asserted proof — the agent never typed the token.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import re
+import stat
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _http_auth import is_secure_governance_url
-from governance_tool_name import governance_tool_suffix
+from governance_tool_name import governance_server_aliases, governance_tool_suffix
 
 # Tag normalization (formatting-only, fail-open) is folded into this single
 # hook on purpose: a second PreToolUse hook emitting its own updatedInput for
@@ -273,7 +276,9 @@ def _proofless_identity_reason(tool_input: dict, raw: str) -> str:
     )
 
 
-def _deny_output(reason: str) -> dict:
+def _deny_output(reason: str, host: str = "claude") -> dict:
+    if host == "agy":
+        return {"decision": "deny", "reason": reason}
     return {"hookSpecificOutput": {
         "hookEventName": "PreToolUse",
         "permissionDecision": "deny",
@@ -281,8 +286,21 @@ def _deny_output(reason: str) -> dict:
     }}
 
 
-def _hook_output(updated: dict, host: str) -> dict:
+def _hook_output(
+    updated: dict,
+    host: str,
+    *,
+    is_call_mcp_tool: bool = False,
+    args_was_str: bool = False,
+) -> dict:
     """Build the host-specific PreToolUse rewrite envelope."""
+    if host == "agy":
+        overwrite: dict[str, object] = (
+            {"Arguments": json.dumps(updated) if args_was_str else updated}
+            if is_call_mcp_tool
+            else updated
+        )
+        return {"decision": "allow", "overwrite": overwrite}
     specific: dict[str, object] = {
         "hookEventName": "PreToolUse",
         "updatedInput": updated,
@@ -291,6 +309,463 @@ def _hook_output(updated: dict, host: str) -> dict:
         # Codex ignores updatedInput unless the hook explicitly allows it.
         specific["permissionDecision"] = "allow"
     return {"hookSpecificOutput": specific}
+
+
+def _unwrap_agy_scalar(value: object) -> str:
+    """Decode plain or JSON-quoted string values in Antigravity toolCall.args."""
+    if not isinstance(value, str):
+        return ""
+    text = value.strip()
+    if len(text) >= 2 and text[0] == '"' and text[-1] == '"':
+        try:
+            decoded = json.loads(text)
+            if isinstance(decoded, str):
+                return decoded
+        except ValueError:
+            return text
+    return text
+
+
+def _agy_direct_mcp_suffix(tool_name: str) -> str | None:
+    """Resolve a direct Antigravity MCP tool name (mcp__ or mcp_ prefix)."""
+    suffix = governance_tool_suffix(tool_name, host="agy")
+    if suffix is not None:
+        return suffix
+    lowered = tool_name.strip().casefold()
+    if lowered.startswith("mcp_"):
+        rest = lowered[4:]
+        for server in sorted(governance_server_aliases("agy"), key=len, reverse=True):
+            prefix = f"{server}_"
+            if rest.startswith(prefix) and len(rest) > len(prefix):
+                return rest[len(prefix):]
+    return None
+
+
+def _extract_agy_call(
+    data: dict,
+) -> tuple[str | None, dict | None, bool, bool]:
+    """Extract ``(suffix, tool_input, is_call_mcp_tool, args_was_str)`` for agy PreToolUse."""
+    tool_call = data.get("toolCall")
+    if not isinstance(tool_call, dict):
+        return None, None, False, False
+    name = str(tool_call.get("name") or "").strip()
+    raw_args = tool_call.get("args")
+    if raw_args is None:
+        raw_args = {}
+    if not isinstance(raw_args, dict):
+        return None, None, False, False
+    if name == "call_mcp_tool":
+        server = _unwrap_agy_scalar(raw_args.get("ServerName")).strip().casefold()
+        tool = _unwrap_agy_scalar(raw_args.get("ToolName")).strip().casefold()
+        if not server or not tool or server not in governance_server_aliases("agy"):
+            return None, None, True, False
+        raw_inner = raw_args.get("Arguments")
+        if raw_inner is None:
+            return tool, {}, True, False
+        if isinstance(raw_inner, dict):
+            return tool, raw_inner, True, False
+        if isinstance(raw_inner, str):
+            if not raw_inner.strip():
+                return tool, {}, True, True
+            try:
+                parsed = json.loads(raw_inner)
+            except ValueError:
+                return None, None, True, False
+            if isinstance(parsed, dict):
+                return tool, parsed, True, True
+        return None, None, True, False
+    suffix = _agy_direct_mcp_suffix(name)
+    if suffix is None:
+        return None, None, False, False
+    return suffix, dict(raw_args), False, False
+
+
+_AGY_TURN_MINT_TTL_S = 1800.0
+
+
+def _has_slot_bound_proof(tool_input: dict) -> bool:
+    """True if the caller supplied a real session proof (client_session_id/continuity_token)."""
+    for field in SLOT_BOUND_PROOF_FIELDS:
+        value = tool_input.get(field)
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        return True
+    return False
+
+
+def _agy_claim_turn_mint_guard(
+    data: dict, raw: str, *, kind: str
+) -> str:
+    """Block a second unparented start_session/onboard mint within the same unbound turn.
+
+    Checks both the current turn's transcript (catching completed in-turn mints
+    before Stop writes the slot cache, and allowing retries when an earlier
+    marked attempt already finished without returning a usable binding) and a
+    per-slot flock-guarded turn marker (catching parallel or pre-flush double
+    mints).
+    """
+    turn_boundary_step: int | None = None
+    failed_attempts: list[dict] = []
+    try:
+        from stop_hook_event import (
+            _agy_turn_mint_marker_path,
+            inspect_current_turn_agy_onboards,
+        )
+
+        candidates, failed_attempts, turn_boundary_step = inspect_current_turn_agy_onboards(
+            data
+        )
+        if candidates:
+            first_cand, _ = candidates[0]
+            first_uuid = str(first_cand.get("uuid") or "").strip()
+            first_csid = str(first_cand.get("client_session_id") or "").strip()
+            if first_uuid and first_csid:
+                return (
+                    f"This Antigravity turn already minted governance identity "
+                    f"agent_uuid {first_uuid} (client_session_id={first_csid}). "
+                    f"A second {kind} mint in the same turn would create a duplicate "
+                    f"identity. Reuse client_session_id={first_csid} on governance "
+                    'calls, or pass spawn_reason="subagent" only when spawning a '
+                    "separate subagent."
+                )
+    except Exception:
+        _agy_turn_mint_marker_path = None  # type: ignore[assignment]
+
+    try:
+        from _session_lookup import _extract_slot
+
+        slot = _extract_slot(raw)
+    except Exception:
+        slot = None
+    if not slot:
+        return ""
+
+    if _agy_turn_mint_marker_path is not None:
+        marker_path = _agy_turn_mint_marker_path(slot)
+    else:
+        safe = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in slot)[:64]
+        marker_path = Path.home() / ".unitares" / f".agy-turn-mint-{safe}.json"
+
+    tool_call = data.get("toolCall") if isinstance(data.get("toolCall"), dict) else {}
+    call_id = str(tool_call.get("id") or "").strip()
+    step_idx = data.get("stepIdx")
+    now = time.time()
+
+    try:
+        marker_path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(
+            str(marker_path),
+            os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+    except OSError:
+        return ""
+
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            return ""
+        getuid = getattr(os, "getuid", None)
+        if callable(getuid) and st.st_uid != getuid():
+            return ""
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        os.lseek(fd, 0, os.SEEK_SET)
+        raw_existing = os.read(fd, 8192).decode("utf-8", errors="replace").strip()
+        if raw_existing:
+            try:
+                existing = json.loads(raw_existing)
+            except ValueError:
+                existing = None
+            if isinstance(existing, dict):
+                prev_ts = existing.get("ts")
+                fresh = isinstance(prev_ts, (int, float)) and (now - prev_ts) < _AGY_TURN_MINT_TTL_S
+                prev_boundary = existing.get("turn_boundary_step")
+                new_turn = (
+                    turn_boundary_step is not None
+                    and prev_boundary is not None
+                    and turn_boundary_step != prev_boundary
+                )
+                prev_call_id = str(existing.get("tool_call_id") or "").strip()
+                same_call = bool(call_id and prev_call_id and call_id == prev_call_id)
+                prev_baseline = existing.get("baseline_failed_count")
+                if not isinstance(prev_baseline, int) or prev_baseline < 0:
+                    prev_baseline = 0
+                mint_failed = [
+                    item
+                    for item in failed_attempts
+                    if item.get("tool") in ANCHORED_MINT_SUFFIXES
+                ]
+                failed_ids = {
+                    str(item.get("call_id") or "").strip()
+                    for item in mint_failed
+                    if item.get("call_id")
+                }
+                if prev_call_id:
+                    # When the pending marker has a call ID, require the failed
+                    # mint attempt in the transcript to match that exact call ID
+                    # so an unrelated failure (e.g. identity(resume=true) or a
+                    # different call) cannot unlock a concurrent duplicate mint.
+                    prior_failed = prev_call_id in failed_ids
+                else:
+                    prior_failed = len(mint_failed) > prev_baseline
+                if fresh and not new_turn and not same_call and not prior_failed:
+                    return (
+                        "An unparented start_session/onboard mint is already in progress "
+                        f"in this Antigravity turn. A second {kind} mint would create a "
+                        "duplicate identity before Stop caches the first. Reuse the first "
+                        "call's client_session_id, or pass spawn_reason=\"subagent\" only "
+                        "when spawning a separate subagent."
+                    )
+        mint_failed_count = sum(
+            1 for item in failed_attempts if item.get("tool") in ANCHORED_MINT_SUFFIXES
+        )
+        record = json.dumps(
+            {
+                "tool_call_id": call_id,
+                "step_idx": step_idx,
+                "turn_boundary_step": turn_boundary_step,
+                "baseline_failed_count": mint_failed_count,
+                "ts": now,
+            },
+            separators=(",", ":"),
+        ).encode("utf-8")
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.ftruncate(fd, 0)
+        os.write(fd, record)
+    except OSError:
+        return ""
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+    return ""
+
+
+def _agy_duplicate_mint_reason(
+    tool_input: dict, data: dict, raw: str, *, anchor: str
+) -> str:
+    """Why a start_session/onboard mint would split an agy slot."""
+    reason = str(tool_input.get("spawn_reason") or "").strip().lower()
+    if reason == "subagent":
+        return ""
+    parent_raw = tool_input.get("parent_agent_id")
+    parent = parent_raw.strip() if isinstance(parent_raw, str) else ""
+    has_parent = bool(parent)
+    has_deliberate_reason = reason in DELIBERATE_SPAWN_REASONS
+    is_force_new = _truthy(tool_input.get("force_new"))
+    # On start_session/onboard, only client_session_id or continuity_token
+    # proves session resume; agent_id/agent_uuid alone still mints/name-claims.
+    has_session_proof = _has_slot_bound_proof(tool_input)
+    is_anchor_resume = bool(
+        anchor
+        and not is_force_new
+        and not _has_proof_field(tool_input)
+        and not has_parent
+        and not reason
+        and "orchestrated" not in tool_input
+        and "resume" not in tool_input
+    )
+    kind = "force_new" if is_force_new else "bare start_session/onboard"
+    sess = _current_slot_binding(raw, idle_is_inherited=True)
+    uuid = str(sess.get("uuid") or "").strip()
+    csid = str(sess.get("client_session_id") or "").strip()
+    if uuid and csid:
+        origin = str(sess.get("onboard_origin") or "").strip() or "unknown"
+        if has_parent and parent != uuid:
+            return (
+                f"This Antigravity slot is already bound to governance as agent_uuid {uuid} "
+                f"(onboard_origin={origin}), so parent_agent_id={parent} does not match "
+                f"the active slot owner. Reuse client_session_id={csid} on governance calls "
+                '(or omit it so the hook injects it). Pass spawn_reason="subagent" only '
+                "when spawning a separate subagent."
+            )
+        if has_parent and parent == uuid and has_deliberate_reason:
+            return ""
+        if not is_force_new and (has_session_proof or is_anchor_resume):
+            return ""
+        return (
+            f"This Antigravity slot is already bound to governance as agent_uuid {uuid} "
+            f"(onboard_origin={origin}). A {kind} mint would create a second identity for "
+            f"the same conversation. Reuse client_session_id={csid} (or omit it and let "
+            "the hook inject it on governance calls). Only pass "
+            'spawn_reason="subagent" when spawning a separate subagent.'
+        )
+    if has_parent and has_deliberate_reason:
+        return ""
+    if not is_force_new and (has_session_proof or is_anchor_resume):
+        return ""
+    return _agy_claim_turn_mint_guard(data, raw, kind=kind)
+
+
+def _handle_agy_mint_call(
+    mint_args: dict, data: dict, raw: str
+) -> tuple[dict | None, dict | None]:
+    """Evaluate a direct or use_tool-wrapped start_session/onboard call for agy.
+
+    Returns ``(deny_output, updated_mint_args)``.
+    """
+    mismatch = _foreign_slot_proof_reason(mint_args, raw)
+    if mismatch:
+        return _deny_output(mismatch, host="agy"), None
+    anchor = _env_anchor()
+    duplicate = _agy_duplicate_mint_reason(mint_args, data, raw, anchor=anchor)
+    if duplicate:
+        return _deny_output(duplicate, host="agy"), None
+    if (
+        anchor
+        and not _truthy(mint_args.get("force_new"))
+        and not _has_proof_field(mint_args)
+        and not mint_args.get("parent_agent_id")
+        and not mint_args.get("spawn_reason")
+        and "orchestrated" not in mint_args
+        and "resume" not in mint_args
+    ):
+        updated_mint = dict(mint_args)
+        updated_mint["client_session_id"] = anchor
+        updated_mint["orchestrated"] = True
+        return None, updated_mint
+    return None, None
+
+
+def _parse_agy_gateway_args(tool_input: dict) -> tuple[dict | None, bool, str]:
+    """Parse ``use_tool``'s nested ``arguments``/``args`` payload.
+
+    Returns ``(parsed_dict_or_None, was_json_str, field_key)``.
+    """
+    field_key = "arguments" if "arguments" in tool_input or "args" not in tool_input else "args"
+    raw_inner = tool_input.get(field_key)
+    if raw_inner is None:
+        return {}, False, field_key
+    if isinstance(raw_inner, dict):
+        return raw_inner, False, field_key
+    if isinstance(raw_inner, str):
+        if not raw_inner.strip():
+            return {}, True, field_key
+        try:
+            parsed = json.loads(raw_inner)
+        except ValueError:
+            return None, True, field_key
+        if isinstance(parsed, dict):
+            return parsed, True, field_key
+    return None, False, field_key
+
+
+def _decide_agy(data: dict, raw: str) -> dict:
+    """Return Antigravity PreToolUse JSON output (always includes decision)."""
+    allow = {"decision": "allow"}
+    suffix, tool_input, is_call_mcp_tool, args_was_str = _extract_agy_call(data)
+    if suffix is None or tool_input is None:
+        return allow
+    if (
+        suffix not in INJECT_SUFFIXES
+        and suffix not in ANCHORED_MINT_SUFFIXES
+        and suffix not in IDENTITY_ASSERT_SUFFIXES
+    ):
+        return allow
+
+    if suffix in GATEWAY_SUFFIXES:
+        inner_tool = str(
+            tool_input.get("tool_name") or tool_input.get("name") or ""
+        ).strip().casefold()
+        inner_args, inner_was_str, inner_key = _parse_agy_gateway_args(tool_input)
+        if inner_tool in ANCHORED_MINT_SUFFIXES:
+            if inner_args is None:
+                return _deny_output(
+                    "Refusing use_tool identity mint with unparseable arguments.",
+                    host="agy",
+                )
+            deny_resp, updated_mint = _handle_agy_mint_call(inner_args, data, raw)
+            if deny_resp is not None:
+                return deny_resp
+            if updated_mint is not None:
+                updated_outer = dict(tool_input)
+                updated_outer[inner_key] = (
+                    json.dumps(updated_mint) if inner_was_str else updated_mint
+                )
+                return _hook_output(
+                    updated_outer,
+                    "agy",
+                    is_call_mcp_tool=is_call_mcp_tool,
+                    args_was_str=args_was_str,
+                )
+            return allow
+        if inner_tool in IDENTITY_ASSERT_SUFFIXES:
+            if inner_args is None:
+                return _deny_output(
+                    "Refusing use_tool identity call with unparseable arguments.",
+                    host="agy",
+                )
+            mismatch = _foreign_slot_proof_reason(inner_args, raw)
+            if mismatch:
+                return _deny_output(mismatch, host="agy")
+            duplicate = _proofless_identity_reason(inner_args, raw)
+            if duplicate:
+                return _deny_output(duplicate, host="agy")
+            return allow
+        if not _gateway_target_injectable(tool_input):
+            mismatch = (
+                _foreign_slot_proof_reason(inner_args, raw)
+                if isinstance(inner_args, dict)
+                else None
+            )
+            if mismatch:
+                return _deny_output(mismatch, host="agy")
+            return allow
+
+    if suffix in IDENTITY_ASSERT_SUFFIXES:
+        mismatch = _foreign_slot_proof_reason(tool_input, raw)
+        if mismatch:
+            return _deny_output(mismatch, host="agy")
+        duplicate = _proofless_identity_reason(tool_input, raw)
+        if duplicate:
+            return _deny_output(duplicate, host="agy")
+        return allow
+
+    if suffix in ANCHORED_MINT_SUFFIXES:
+        deny_resp, updated_mint = _handle_agy_mint_call(tool_input, data, raw)
+        if deny_resp is not None:
+            return deny_resp
+        if updated_mint is not None:
+            return _hook_output(
+                updated_mint,
+                "agy",
+                is_call_mcp_tool=is_call_mcp_tool,
+                args_was_str=args_was_str,
+            )
+        return allow
+
+    mismatch = _foreign_slot_proof_reason(tool_input, raw)
+    if mismatch:
+        return _deny_output(mismatch, host="agy")
+
+    updated = dict(tool_input)
+    changed = False
+
+    if suffix in TAG_BEARING_SUFFIXES:
+        try:
+            if normalize_call_tags(updated):
+                changed = True
+        except Exception:
+            updated = dict(tool_input)
+
+    if not _has_proof_field(tool_input):
+        sess = _current_slot_binding(raw, idle_is_inherited=True)
+        sid = str(sess.get("client_session_id") or "").strip()
+        if sid:
+            updated["client_session_id"] = sid
+            changed = True
+
+    if not changed:
+        return allow
+    return _hook_output(
+        updated,
+        "agy",
+        is_call_mcp_tool=is_call_mcp_tool,
+        args_was_str=args_was_str,
+    )
 
 
 def _has_proof_field(tool_input: dict) -> bool:
@@ -614,18 +1089,31 @@ def _decide(host: str, data: dict, raw: str) -> dict | None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Normalize a governance PreToolUse call")
-    parser.add_argument("--host", choices=("claude", "codex"), default="claude")
+    parser.add_argument("--host", choices=("claude", "codex", "agy"), default="claude")
     args = parser.parse_args(argv)
 
     try:
         raw = sys.stdin.read()
         data = json.loads(raw or "{}")
     except Exception:
+        if args.host == "agy":
+            print(json.dumps({"decision": "allow"}))
+            return 0
         unreadable = _unreadable_call_reason(args.host)
         if unreadable:
             print(json.dumps(_deny_output(unreadable)))
         return 0
     if not isinstance(data, dict):
+        if args.host == "agy":
+            print(json.dumps({"decision": "allow"}))
+        return 0
+
+    if args.host == "agy":
+        try:
+            output = _decide_agy(data, raw)
+        except Exception:
+            output = {"decision": "allow"}
+        print(json.dumps(output))
         return 0
 
     try:

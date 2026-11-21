@@ -784,7 +784,11 @@ def test_agy_session_start_binds_orchestrated_anchor_only_and_guards_subagents(t
             check=False,
         )
         assert res_orch.returncode == 0
-        assert res_orch.stdout == "{}\n"
+        orch_out = json.loads(res_orch.stdout)
+        assert "injectSteps" in orch_out
+        orch_msg = orch_out["injectSteps"][0]["systemMessage"]["systemMessage"]
+        assert "11111111-2222-4333-8444-555555555555" in orch_msg
+        assert "agent-11111111-222" in orch_msg
         assert [c.get("name") for c in LazyOnboardHandler.calls] == ["onboard"]
         assert (
             LazyOnboardHandler.calls[0]["arguments"]["client_session_id"]
@@ -895,8 +899,10 @@ def test_agy_session_start_binds_orchestrated_anchor_only_and_guards_subagents(t
             f2 = pool.submit(_invoke_run_hook, race_b)
             r1, r2 = f1.result(), f2.result()
 
-        assert r1.returncode == 0 and r1.stdout == "{}\n"
-        assert r2.returncode == 0 and r2.stdout == "{}\n"
+        assert r1.returncode == 0 and r2.returncode == 0
+        race_outputs = [json.loads(r1.stdout), json.loads(r2.stdout)]
+        assert sum(1 for out in race_outputs if "injectSteps" in out) == 1
+        assert sum(1 for out in race_outputs if out == {}) == 1
         onboards = [c for c in LazyOnboardHandler.calls if c.get("name") == "onboard"]
         assert len(onboards) == 1
     finally:

@@ -23,7 +23,7 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
-[[ "${HOOK_HOST}" == "claude" || "${HOOK_HOST}" == "codex" ]] || exit 0
+[[ "${HOOK_HOST}" == "claude" || "${HOOK_HOST}" == "codex" || "${HOOK_HOST}" == "agy" ]] || exit 0
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PLUGIN_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -32,9 +32,21 @@ HOOK_INPUT=""
 if [[ ! -t 0 ]]; then
   HOOK_INPUT=$(cat 2>/dev/null) || true
 fi
-[[ -z "${HOOK_INPUT}" ]] && exit 0
 
 HELPER="${PLUGIN_ROOT}/scripts/governance_call_inject.py"
+if [[ "${HOOK_HOST}" == "agy" ]]; then
+  if [[ -n "${HOOK_INPUT}" && -f "${HELPER}" ]]; then
+    AGY_OUT=$(printf '%s' "${HOOK_INPUT}" | python3 "${HELPER}" --host agy 2>/dev/null || true)
+    if [[ -n "${AGY_OUT}" ]]; then
+      printf '%s\n' "${AGY_OUT}"
+      exit 0
+    fi
+  fi
+  printf '{"decision":"allow"}\n'
+  exit 0
+fi
+
+[[ -z "${HOOK_INPUT}" ]] && exit 0
 [[ -f "${HELPER}" ]] || exit 0
 
 # A manual check-in acknowledges the milestone revision that existed before
