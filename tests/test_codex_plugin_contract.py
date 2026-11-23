@@ -38,6 +38,28 @@ def test_codex_manifest_declares_host_specific_mcp_and_hooks():
     assert (ROOT / manifest["hooks"]).is_file()
 
 
+# Codex turns commands/*.md into `source-command-<name>` skills at install
+# time, and silently skips a command that is too large. `cirwel
+# plugin-rollout` refuses a package unless these three migrate. Observed with
+# codex-cli 0.169/0.171: diagnose.md migrated at 3,675 and 3,697 bytes and was
+# skipped at 4,042 and 4,865 bytes (v0.4.27 #355, and v0.4.35). The exact
+# cutoff is not documented, so the budget is the largest size verified to
+# migrate. A file that needs more room must be re-verified with
+# `cirwel plugin-rollout --snapshot <export>` preflight before this is raised.
+CODEX_MIGRATED_COMMANDS = ("diagnose", "dialectic", "dialectic-respond")
+CODEX_COMMAND_BYTE_BUDGET = 3697
+
+
+def test_codex_migrated_commands_stay_within_verified_size():
+    for name in CODEX_MIGRATED_COMMANDS:
+        size = (ROOT / "commands" / f"{name}.md").stat().st_size
+        assert size <= CODEX_COMMAND_BYTE_BUDGET, (
+            f"commands/{name}.md is {size} bytes; Codex has only been verified to "
+            f"migrate commands up to {CODEX_COMMAND_BYTE_BUDGET} bytes. Shorten it, "
+            "or re-verify with a cirwel plugin-rollout preflight and raise the budget."
+        )
+
+
 def test_claude_hooks_avoid_codex_default_discovery_path():
     manifest = _load(".claude-plugin/plugin.json")
 

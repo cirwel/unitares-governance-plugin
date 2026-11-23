@@ -1,2 +1,5 @@
 # Keep the hook package LF; its Bash entrypoints include the Windows polyglot wrapper.
 hooks/* text eol=lf
+# Codex migrates commands into skills only below a size verified on LF bytes
+# (tests/test_codex_plugin_contract.py); CRLF would add a byte per line.
+commands/*.md text eol=lf
