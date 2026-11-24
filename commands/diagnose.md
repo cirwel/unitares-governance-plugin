@@ -59,9 +59,8 @@ owns their inputs, interpretations, and evidence limits.
 Use `health_check()` only if system health may be involved; report overall
 status, degraded checks, and the first operator action.
 
-If live identity differs from the slot cache, report it. The post-identity
-hook rewrites this process's slot; never edit a cache by hand or cache
-`continuity_token`.
+If live identity differs from the slot cache, report it. Never edit a cache by
+hand, and never cache `continuity_token`.
 
 For a local audit, run `python3 scripts/audit_identity_contract.py --workspace "$PWD"`.
 `error` means a cache contract violation; `warning` flags weak resolution,
