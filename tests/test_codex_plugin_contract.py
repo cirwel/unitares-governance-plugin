@@ -38,6 +38,44 @@ def test_codex_manifest_declares_host_specific_mcp_and_hooks():
     assert (ROOT / manifest["hooks"]).is_file()
 
 
+# Codex turns commands/*.md into `source-command-<name>` skills at install
+# time, and silently skips one whose generated SKILL.md is too large.
+# `cirwel plugin-rollout` refuses a package unless these three migrate.
+# Measured with codex-cli 0.171.0 preflights on padded copies of diagnose.md
+# (2026-11-23): source 3,750 and 3,800 bytes migrated (generated 3,912 and
+# 3,962); 3,850, 3,900 and 4,042 did not. The generated skill repeats the
+# command name, so the budget charges each name 3 bytes per character over
+# "diagnose". Raise CODEX_VERIFIED_DIAGNOSE_BYTES only after a preflight on an
+# exported snapshot shows the larger size migrating.
+CODEX_MIGRATED_COMMANDS = ("diagnose", "dialectic", "dialectic-respond")
+CODEX_VERIFIED_DIAGNOSE_BYTES = 3800
+
+
+def _codex_command_budget(name: str) -> int:
+    return CODEX_VERIFIED_DIAGNOSE_BYTES - 3 * max(0, len(name) - len("diagnose"))
+
+
+def test_codex_migrated_commands_stay_within_verified_size():
+    for name in CODEX_MIGRATED_COMMANDS:
+        raw = (ROOT / "commands" / f"{name}.md").read_bytes()
+        # The measured budget assumes the usual frontmatter, which Codex copies
+        # into the generated skill; a missing or reshaped description changes it.
+        assert raw.startswith(b'---\ndescription: "'), f"commands/{name}.md frontmatter changed"
+        assert b"\r" not in raw, f"commands/{name}.md must be LF only; .gitattributes pins it"
+        budget = _codex_command_budget(name)
+        assert len(raw) <= budget, (
+            f"commands/{name}.md is {len(raw)} bytes, over its {budget}-byte budget "
+            f"(measured for diagnose at {CODEX_VERIFIED_DIAGNOSE_BYTES}, adjusted for "
+            "name length). Shorten it, or re-verify with a cirwel plugin-rollout "
+            "preflight and raise the budget."
+        )
+
+
+def test_command_files_are_pinned_to_lf():
+    attributes = (ROOT / ".gitattributes").read_text(encoding="utf-8").splitlines()
+    assert "commands/*.md text eol=lf" in attributes
+
+
 def test_claude_hooks_avoid_codex_default_discovery_path():
     manifest = _load(".claude-plugin/plugin.json")
 

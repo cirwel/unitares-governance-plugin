@@ -59,11 +59,8 @@ owns their inputs, interpretations, and evidence limits.
 Use `health_check()` only if system health may be involved; report overall
 status, degraded checks, and the first operator action.
 
-If live identity differs from the slot cache, refresh that slot with the latest
-identity fields:
-`scripts/session_cache.py set session --slot=<client_session_id> --merge --stamp --json '{"uuid":"<uuid>","client_session_id":"<client_session_id>","schema_version":2}'`.
-Keep `--json`: without it, the helper refuses new slots and only bumps
-`updated_at` on existing ones. Never cache `continuity_token`.
+If live identity differs from the slot cache, report it. Never edit a cache by
+hand, and never cache `continuity_token`.
 
 For a local audit, run `python3 scripts/audit_identity_contract.py --workspace "$PWD"`.
 `error` means a cache contract violation; `warning` flags weak resolution,
