@@ -18,7 +18,7 @@ configuration, and the day-to-day workflow, start with the
 | Chat bridges and orchestrators | [`orchestrators.md`](./orchestrators.md) | Give a conversation one identity when every turn is a new CLI process |
 | Contributing | [`CONTRIBUTING.md`](../CONTRIBUTING.md) | Branch/PR convention and review standard |
 | Design notes | this directory | Why the plugin is shaped the way it is, and what it deliberately does not build |
-| Skills | [`../skills/`](../skills/) | Agent-facing capability docs (governance fundamentals, lifecycle, dialectic, knowledge graph, Discord bridge) |
+| Skills | [`../skills/`](../skills/) | Agent-facing capability docs (`governance-fundamentals`, `governance-lifecycle`, `dialectic-reasoning`, `knowledge-graph`, `unitares-dashboard`, `unitares-governance`) |
 | Claude commands | [`../commands/`](../commands/) | Claude Code-only `/governance-start`, `/checkin`, `/diagnose`, `/dialectic`, `/dialectic-respond` |
 
 ## Design notes
