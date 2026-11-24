@@ -58,6 +58,9 @@ def _codex_command_budget(name: str) -> int:
 def test_codex_migrated_commands_stay_within_verified_size():
     for name in CODEX_MIGRATED_COMMANDS:
         raw = (ROOT / "commands" / f"{name}.md").read_bytes()
+        # The measured budget assumes the usual frontmatter, which Codex copies
+        # into the generated skill; a missing or reshaped description changes it.
+        assert raw.startswith(b'---\ndescription: "'), f"commands/{name}.md frontmatter changed"
         assert b"\r" not in raw, f"commands/{name}.md must be LF only; .gitattributes pins it"
         budget = _codex_command_budget(name)
         assert len(raw) <= budget, (

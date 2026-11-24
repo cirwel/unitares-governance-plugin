@@ -28,7 +28,7 @@ which declares a cached UUID as a parent only for a deliberate handoff from an
 exited process.
 
 Read `get_governance_metrics` with this process's own binding, never one taken
-from a cache. This does not
+from a cache; without it, report identity unknown. This does not
 advance EISV through a new check-in. Use `verbosity="standard"` or `"full"` if
 the compact view lacks needed source or lifecycle detail.
 
