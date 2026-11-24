@@ -58,12 +58,13 @@ def _codex_command_budget(name: str) -> int:
 def test_codex_migrated_commands_stay_within_verified_size():
     for name in CODEX_MIGRATED_COMMANDS:
         raw = (ROOT / "commands" / f"{name}.md").read_bytes()
-        assert b"\r\n" not in raw, f"commands/{name}.md must be LF; .gitattributes pins it"
+        assert b"\r" not in raw, f"commands/{name}.md must be LF only; .gitattributes pins it"
         budget = _codex_command_budget(name)
         assert len(raw) <= budget, (
-            f"commands/{name}.md is {len(raw)} bytes; Codex has only been verified to "
-            f"migrate it up to {budget} bytes. Shorten it, or re-verify with a "
-            "cirwel plugin-rollout preflight and raise the budget."
+            f"commands/{name}.md is {len(raw)} bytes, over its {budget}-byte budget "
+            f"(measured for diagnose at {CODEX_VERIFIED_DIAGNOSE_BYTES}, adjusted for "
+            "name length). Shorten it, or re-verify with a cirwel plugin-rollout "
+            "preflight and raise the budget."
         )
 
 
