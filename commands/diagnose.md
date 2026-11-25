@@ -2,7 +2,10 @@
 description: "Show current UNITARES governance state and operator-relevant diagnostics"
 ---
 
-Inventory workspace session caches with this plugin's helpers:
+Helper paths are relative to the plugin root (`${CLAUDE_PLUGIN_ROOT}` in
+Claude Code).
+
+Inventory workspace session caches:
 
 - `scripts/session_cache.py list --workspace "$PWD"` lists slots newest-first.
 - `scripts/session_cache.py get session --slot=<slot>` reads one slot as lineage context only.
@@ -56,7 +59,7 @@ policy classifications. The
 [computation reference](https://github.com/cirwel/unitares/blob/master/docs/EISV_COMPUTATION.md)
 owns their inputs, interpretations, and evidence limits.
 
-Use `health_check()` only if system health may be involved; report overall
+Use `health_check()` only if health may be involved; report overall
 status, degraded checks, and the first operator action.
 
 If live identity differs from the slot cache, report it. Never edit a cache by
@@ -66,4 +69,4 @@ For a local audit, run `python3 scripts/audit_identity_contract.py --workspace "
 `error` means a cache contract violation; `warning` flags weak resolution,
 legacy flat caches, floor observations, or delivery failure for the operator.
 
-Give a short interpreted summary; dump raw JSON only if explicitly requested.
+Give a short interpreted summary; raw JSON only if asked.
