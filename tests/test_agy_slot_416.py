@@ -1791,3 +1791,111 @@ def test_live_slot_denies_mismatched_parent_agent_id_and_non_session_proof_and_l
     )
     assert out_direct["decision"] == "allow"
     assert out_direct["overwrite"]["client_session_id"] == CSID_A
+
+
+# ---------------------------------------------------------------------------
+# 6. Antigravity decision contract (#445)
+# ---------------------------------------------------------------------------
+#
+# Antigravity's hook reference documents `allow` as deferring to the next hook
+# or the default policy, and `auto_approve` as the value that skips a prompt.
+# The agy path must only ever print `allow`, `allow` + `overwrite`, or `deny`.
+
+_AGY_ALLOWED_DECISIONS = {"allow", "deny"}
+_AGY_FORBIDDEN_KEYS = {"permissionOverrides", "permissionDecision", "hookSpecificOutput"}
+
+
+def _assert_agy_contract(out: dict) -> None:
+    assert isinstance(out, dict), out
+    assert out.get("decision") in _AGY_ALLOWED_DECISIONS, out
+    assert not (_AGY_FORBIDDEN_KEYS & set(out)), out
+    assert "auto_approve" not in json.dumps(out), out
+    assert set(out) <= {"decision", "reason", "overwrite"}, out
+    if "overwrite" in out:
+        assert out["decision"] == "allow", out
+    if out["decision"] == "deny":
+        assert isinstance(out.get("reason"), str) and out["reason"], out
+
+
+def test_agy_pre_tool_use_never_emits_auto_approve_or_permission_overrides(tmp_path):
+    home_dir = tmp_path / "home"
+    conv_id = "agy-conv-contract"
+    _write_slot_cache(home_dir, conv_id, uuid=UUID_A, csid=CSID_A)
+
+    def mcp(server: str, tool: str, arguments: object) -> dict:
+        return _agy_pre_tool_payload(
+            conv_id,
+            args={"ServerName": server, "ToolName": tool, "Arguments": arguments},
+        )
+
+    payloads: list[dict | str] = [
+        "",
+        "not json",
+        "[]",
+        "{}",
+        json.dumps({"toolCall": "not-a-dict"}),
+        _agy_pre_tool_payload(conv_id, tool_name="run_command", args={"CommandLine": "ls"}),
+        mcp("github", "create_issue", {"title": "x"}),
+        mcp("unitares-governance-shadow", "start_session", {"force_new": True}),
+        mcp("unitares-governance", "sync_state", {"response_text": "ok"}),
+        mcp("unitares-governance", "sync_state", json.dumps({"response_text": "ok"})),
+        mcp("unitares-governance", "sync_state", {"client_session_id": CSID_A}),
+        mcp("unitares-governance", "sync_state", {"client_session_id": CSID_B}),
+        mcp("unitares-governance", "start_session", {}),
+        mcp("unitares-governance", "start_session", "{not json"),
+        mcp("unitares-governance", "identity", {}),
+        mcp("unitares-governance", "unknown_tool", {"x": 1}),
+    ]
+    for payload in payloads:
+        for via_hook in (False, True):
+            out = _run_inject_agy(payload, home_dir=home_dir, via_hook=via_hook)
+            _assert_agy_contract(out)
+
+    # The rewrite keeps every unrelated argument (overwrite is a shallow merge
+    # into toolCall.args, so Arguments is replaced wholesale).
+    rewrite = _run_inject_agy(
+        mcp("unitares-governance", "sync_state", {"response_text": "r", "complexity": 0.2}),
+        home_dir=home_dir,
+    )
+    assert rewrite["overwrite"]["Arguments"] == {
+        "response_text": "r",
+        "complexity": 0.2,
+        "client_session_id": CSID_A,
+    }
+
+
+@pytest.mark.parametrize("helper", ["missing", "silent", "crash"])
+def test_agy_wrapper_fallback_prints_plain_allow(tmp_path, helper):
+    """The shell wrapper prints `allow` itself when the helper gives nothing."""
+    root = tmp_path / "plugin"
+    (root / "hooks").mkdir(parents=True)
+    (root / "scripts").mkdir()
+    wrapper = root / "hooks" / "pre-governance-call"
+    wrapper.write_text(
+        (PLUGIN_ROOT / "hooks" / "pre-governance-call").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    wrapper.chmod(0o755)
+    helper_path = root / "scripts" / "governance_call_inject.py"
+    if helper == "silent":
+        helper_path.write_text("", encoding="utf-8")
+    elif helper == "crash":
+        helper_path.write_text("raise SystemExit(3)\n", encoding="utf-8")
+
+    payload = _agy_pre_tool_payload(
+        "agy-conv-wrapper",
+        args={"ServerName": "github", "ToolName": "create_issue", "Arguments": {}},
+    )
+    res = subprocess.run(
+        [str(wrapper), "--host", "agy"],
+        input=json.dumps(payload),
+        env={"PATH": "/usr/bin:/bin:/usr/local/bin", "HOME": str(tmp_path / "home")},
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+    assert res.returncode == 0, res.stderr
+    out = json.loads(res.stdout)
+    assert out == {"decision": "allow"}
+    _assert_agy_contract(out)
