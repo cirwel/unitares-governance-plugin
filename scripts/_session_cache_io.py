@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import tempfile
 import time
 from contextlib import contextmanager
@@ -39,51 +40,81 @@ def ensure_cache_dir_ignored(directory: Path) -> None:
     """Give a workspace ``.unitares/`` a self-ignoring ``.gitignore``.
 
     Only a real directory named ``.unitares`` (not a symlink) that is not
-    ``~/.unitares`` (the home mirror, outside any project) gets one. The caches here carry the session's ``client_session_id``; without this a
-    routine ``git add -A`` in the user's project commits them. Never replaces
-    an existing file, never follows a symlink and never leaves a partial file.
+    ``~/.unitares`` (the home mirror, outside any project) gets one. The caches
+    here carry the session's ``client_session_id``; without this a routine
+    ``git add -A`` in the user's project commits them.
+
+    The directory is opened without following a symlink and the file is
+    created relative to that handle, so a directory swapped in after the
+    checks is not written into. The file is created exclusively and never
+    follows a symlink. An existing ``.gitignore`` is never replaced or
+    deleted: it is only completed when it is a regular file holding a strict
+    prefix of this content, which is what an interrupted earlier write leaves.
     Best effort: any failure leaves the cache write itself unaffected.
     """
     try:
-        if directory.name != _CACHE_DIR_NAME:
-            return
-        # A symlinked .unitares would carry the rule into its target (for
-        # example `.unitares -> src`), ignoring that directory's new files.
-        if os.path.islink(directory):
+        if directory.name != _CACHE_DIR_NAME or os.path.islink(directory):
             return
         if os.path.realpath(directory) == os.path.realpath(Path.home() / _CACHE_DIR_NAME):
             return
-        target = os.path.join(directory, ".gitignore")
-        # O_CREAT|O_EXCL refuses any existing entry (file, symlink, FIFO) and
-        # never follows one; the content goes through this descriptor only,
-        # so no later path lookup can be redirected. No hard links needed.
-        flags = (os.O_CREAT | os.O_EXCL | os.O_WRONLY
-                 | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0))
+        # O_BINARY: on Windows a plain os.open is text mode and would write CRLF.
+        nofollow = (getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+                    | getattr(os, "O_BINARY", 0))
+        dir_fd = None
+        if os.open in os.supports_dir_fd and hasattr(os, "O_DIRECTORY"):
+            try:
+                dir_fd = os.open(str(directory), os.O_RDONLY | os.O_DIRECTORY | nofollow)
+            except OSError:
+                return
         try:
-            fd = os.open(target, flags, 0o644)
-        except OSError:
-            return
-        remaining = memoryview(_CACHE_IGNORE)
-        try:
-            while remaining:
-                written = os.write(fd, remaining)
-                if written <= 0:
-                    break
-                remaining = remaining[written:]
-        except OSError:
-            pass
+            def _open(flags: int) -> int:
+                if dir_fd is not None:
+                    return os.open(".gitignore", flags, 0o644, dir_fd=dir_fd)
+                return os.open(os.path.join(directory, ".gitignore"), flags, 0o644)
+
+            try:
+                fd = _open(os.O_CREAT | os.O_EXCL | os.O_WRONLY | nofollow)
+                done = 0
+            except FileExistsError:
+                try:
+                    fd = _open(os.O_RDWR | getattr(os, "O_NONBLOCK", 0) | nofollow)
+                except OSError:
+                    return
+                existing = None
+                size = -1
+                try:
+                    info = os.fstat(fd)
+                    if stat.S_ISREG(info.st_mode):
+                        size = info.st_size
+                        existing = os.read(fd, len(_CACHE_IGNORE))
+                except OSError:
+                    existing = None
+                if (existing is None or len(existing) != size
+                        or len(existing) >= len(_CACHE_IGNORE)
+                        or not _CACHE_IGNORE.startswith(existing)):
+                    os.close(fd)
+                    return
+                done = len(existing)
+            except OSError:
+                return
+            try:
+                os.lseek(fd, done, os.SEEK_SET)
+                remaining = memoryview(_CACHE_IGNORE)[done:]
+                while remaining:
+                    written = os.write(fd, remaining)
+                    if written <= 0:
+                        break
+                    remaining = remaining[written:]
+            except OSError:
+                pass
+            finally:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
         finally:
-            try:
-                os.close(fd)
-            except OSError:
-                pass
-        if remaining:
-            # A short or failed write: remove our partial file so a later call
-            # can write it whole instead of keeping a truncated rule forever.
-            try:
-                os.unlink(target)
-            except OSError:
-                pass
+            if dir_fd is not None:
+                os.close(dir_fd)
     except Exception:
         return
 

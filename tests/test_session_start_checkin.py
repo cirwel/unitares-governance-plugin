@@ -1562,7 +1562,8 @@ class TestWorkspaceCoordinationBriefing:
 def test_session_start_marker_write_gives_workspace_cache_its_ignore(tmp_path):
     # The real hook, from a project directory that is not HOME: the nudge
     # marker it writes into <project>/.unitares/ comes with a self-ignoring
-    # .gitignore. Removing either marker branch's call fails this.
+    # .gitignore. This covers the nudge branch; the next test covers the
+    # KG-recall branch on its own.
     project = tmp_path / "project"
     project.mkdir()
     stdout, _calls = _serve_and_run(
@@ -1575,3 +1576,20 @@ def test_session_start_marker_write_gives_workspace_cache_its_ignore(tmp_path):
     assert marker.exists(), stdout
     ignore = project / ".unitares" / ".gitignore"
     assert ignore.read_text().splitlines()[-1] == "*"
+
+
+def test_session_start_kg_recall_marker_alone_gives_the_ignore(tmp_path):
+    # The KG-recall branch as the only writer: the nudge was already shown (its
+    # marker exists, no .gitignore), so only that branch's call can create it.
+    project = tmp_path / "project"
+    cache = project / ".unitares"
+    cache.mkdir(parents=True)
+    (cache / "session-start-nudge-kg-slot.json").write_text('{"shown_at": "x"}\n')
+    stdout, _calls = _serve_and_run(
+        tmp_path,
+        cwd=project,
+        claude_session_id="kg-slot",
+        extra_env={"UNITARES_AUTO_ONBOARD": None, "UNITARES_HOOK_KG_RECALL": "hint"},
+    )
+    assert (cache / "session-start-kg-recall-kg-slot.json").exists(), stdout
+    assert (cache / ".gitignore").read_text().splitlines()[-1] == "*"

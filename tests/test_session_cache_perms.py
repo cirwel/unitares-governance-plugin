@@ -261,7 +261,9 @@ def test_symlinked_ignore_is_never_written_through(tmp_path: Path) -> None:
     assert os.readlink(cache_dir / ".gitignore") == str(target)
 
 
-def test_short_write_leaves_no_partial_ignore(tmp_path: Path, monkeypatch) -> None:
+def test_short_write_is_completed_by_the_next_call(tmp_path: Path, monkeypatch) -> None:
+    # Nothing is ever deleted (another writer may own the name by then); the
+    # partial prefix this content left is completed on the next call.
     io = _io_module()
     cache_dir = tmp_path / ".unitares"
     cache_dir.mkdir()
@@ -274,10 +276,30 @@ def test_short_write_leaves_no_partial_ignore(tmp_path: Path, monkeypatch) -> No
 
     monkeypatch.setattr(io.os, "write", short)
     io.ensure_cache_dir_ignored(cache_dir)  # must not raise
-    assert not (cache_dir / ".gitignore").exists()
+    assert (cache_dir / ".gitignore").read_bytes() == io._CACHE_IGNORE[:8]
     monkeypatch.setattr(io.os, "write", real_write)
-    io.ensure_cache_dir_ignored(cache_dir)  # a later call writes it whole
+    io.ensure_cache_dir_ignored(cache_dir)
     assert (cache_dir / ".gitignore").read_bytes() == io._CACHE_IGNORE
+
+
+def test_interrupted_write_left_by_a_killed_process_is_repaired(tmp_path: Path) -> None:
+    io = _io_module()
+    cache_dir = tmp_path / ".unitares"
+    cache_dir.mkdir()
+    for partial in (b"", io._CACHE_IGNORE[:8], io._CACHE_IGNORE[:-1]):
+        (cache_dir / ".gitignore").write_bytes(partial)
+        io.ensure_cache_dir_ignored(cache_dir)
+        assert (cache_dir / ".gitignore").read_bytes() == io._CACHE_IGNORE
+
+
+def test_a_foreign_or_longer_ignore_is_never_touched(tmp_path: Path) -> None:
+    io = _io_module()
+    cache_dir = tmp_path / ".unitares"
+    cache_dir.mkdir()
+    for content in (b"# Written by hand\n", b"node_modules/\n", io._CACHE_IGNORE + b"extra\n"):
+        (cache_dir / ".gitignore").write_bytes(content)
+        io.ensure_cache_dir_ignored(cache_dir)
+        assert (cache_dir / ".gitignore").read_bytes() == content
 
 
 def test_cli_atomic_writer_alone_ignores_its_directory(tmp_path: Path, monkeypatch) -> None:
