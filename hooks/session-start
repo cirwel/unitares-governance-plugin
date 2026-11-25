@@ -1280,8 +1280,9 @@ ESCAPED_CONTEXT="$(escape_for_json "${CONTEXT}")"
 # file is never replaced.
 ensure_workspace_cache_ignored() {
   # One implementation for every writer: the Python helper creates the file
-  # with O_CREAT|O_EXCL|O_NOFOLLOW, so a symlink or FIFO is never written
-  # through, a short write is removed, and the resolved home mirror is skipped.
+  # with O_CREAT|O_EXCL|O_NOFOLLOW relative to the opened directory, so a
+  # symlink or FIFO is never written through; it completes a partial file an
+  # interrupted write left, and skips a symlinked directory and the home mirror.
   python3 "${PLUGIN_ROOT}/scripts/_session_cache_io.py" ensure-ignored "$1" \
     </dev/null >/dev/null 2>&1 || true
 }

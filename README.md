@@ -76,9 +76,10 @@ export LEASE_PLANE_BASE_URL=http://127.0.0.1:18788
 Hooks keep small session caches in `.unitares/` in your project; they carry
 the session's `client_session_id`. When the plugin creates that directory it
 also writes `.unitares/.gitignore` (`*`), so new caches stay out of your
-commits. It never replaces a `.gitignore` already there, and an ignore rule
-does not untrack files you committed before, so check `git status` if
-`.unitares/` already existed.
+commits. It keeps any `.gitignore` it finds there, only completing one that an
+interrupted earlier write left partial, and an ignore rule does not untrack
+files you committed before, so check `git status` if `.unitares/` already
+existed.
 
 ### Codex
 

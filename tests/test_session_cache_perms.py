@@ -353,3 +353,39 @@ def test_ensure_ignored_cli_rejects_misuse(tmp_path: Path) -> None:
         result = subprocess.run([sys.executable, str(script), *argv], capture_output=True, text=True)
         assert result.returncode == 2
         assert "usage:" in result.stderr
+
+
+def test_a_hard_linked_partial_ignore_is_not_completed(tmp_path: Path) -> None:
+    # A prefix shared through a hard link belongs to a file outside the
+    # cache directory too; completing it would write into that file.
+    io = _io_module()
+    cache_dir = tmp_path / ".unitares"
+    cache_dir.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_bytes(io._CACHE_IGNORE[:8])
+    os.link(outside, cache_dir / ".gitignore")
+    io.ensure_cache_dir_ignored(cache_dir)
+    assert outside.read_bytes() == io._CACHE_IGNORE[:8]
+
+
+def test_repair_is_skipped_without_o_nofollow(tmp_path: Path, monkeypatch) -> None:
+    io = _io_module()
+    cache_dir = tmp_path / ".unitares"
+    cache_dir.mkdir()
+    (cache_dir / ".gitignore").write_bytes(io._CACHE_IGNORE[:8])
+    monkeypatch.delattr(io.os, "O_NOFOLLOW")
+    io.ensure_cache_dir_ignored(cache_dir)
+    assert (cache_dir / ".gitignore").read_bytes() == io._CACHE_IGNORE[:8]
+
+
+def test_repair_never_writes_through_a_symlinked_ignore(tmp_path: Path) -> None:
+    # The repair open must not follow a symlink: here it points at a file
+    # outside holding a prefix of the content, which O_NOFOLLOW must refuse.
+    io = _io_module()
+    cache_dir = tmp_path / ".unitares"
+    cache_dir.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_bytes(io._CACHE_IGNORE[:8])
+    (cache_dir / ".gitignore").symlink_to(outside)
+    io.ensure_cache_dir_ignored(cache_dir)
+    assert outside.read_bytes() == io._CACHE_IGNORE[:8]

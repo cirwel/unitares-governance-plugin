@@ -55,8 +55,13 @@ def ensure_cache_dir_ignored(directory: Path) -> None:
     try:
         if directory.name != _CACHE_DIR_NAME or os.path.islink(directory):
             return
-        if os.path.realpath(directory) == os.path.realpath(Path.home() / _CACHE_DIR_NAME):
-            return
+        try:
+            # Same file, not same spelling: case-insensitive volumes and
+            # symlinked homes spell one directory several ways.
+            if os.path.samefile(directory, Path.home() / _CACHE_DIR_NAME):
+                return
+        except OSError:
+            pass  # no home mirror (or no directory): nothing to compare
         # O_BINARY: on Windows a plain os.open is text mode and would write CRLF.
         nofollow = (getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
                     | getattr(os, "O_BINARY", 0))
@@ -76,6 +81,9 @@ def ensure_cache_dir_ignored(directory: Path) -> None:
                 fd = _open(os.O_CREAT | os.O_EXCL | os.O_WRONLY | nofollow)
                 done = 0
             except FileExistsError:
+                # Repair only where the open cannot follow a symlink.
+                if not hasattr(os, "O_NOFOLLOW"):
+                    return
                 try:
                     fd = _open(os.O_RDWR | getattr(os, "O_NONBLOCK", 0) | nofollow)
                 except OSError:
@@ -84,7 +92,9 @@ def ensure_cache_dir_ignored(directory: Path) -> None:
                 size = -1
                 try:
                     info = os.fstat(fd)
-                    if stat.S_ISREG(info.st_mode):
+                    # A hard-linked file is shared with a path outside this
+                    # directory, so it is not ours to complete.
+                    if stat.S_ISREG(info.st_mode) and info.st_nlink == 1:
                         size = info.st_size
                         existing = os.read(fd, len(_CACHE_IGNORE))
                 except OSError:
