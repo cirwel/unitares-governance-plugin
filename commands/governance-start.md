@@ -20,7 +20,23 @@ If a candidate is found:
 - treat `uuid` as a lineage candidate (the predecessor this fresh process declares it inherits from)
 - ignore any `continuity_token` field on disk — pre-S11 caches may carry one; v2 caches do not, and either way the helper does not use it for resume
 
-Then call UNITARES using the strongest honest posture for the situation:
+First check whether **this process** is already bound. It is when this
+conversation already shows it: SessionStart context saying "this claude process
+is already bound to governance" with an `agent_uuid`, an earlier
+`start_session`/`onboard` call in this conversation that returned one, or a
+pre-governance-call refusal saying "This process is already bound". A slot
+cache in the workspace is not that evidence: it may be another process's.
+
+If this process is already bound, do not mint again. A second
+`force_new=true` mint gives one process two identities that lineage can never
+join, and the hook refuses it unless the call declares lineage or a deliberate
+`spawn_reason`. Call `check_working_state()` with the bound
+`client_session_id` (the hook adds it when installed) and
+report that identity as the result of this command. Mint again only when the
+user explicitly asks for a new identity in this process, and then pass
+`spawn_reason="explicit"` as the refusal says, never a bare `force_new=true`.
+
+Otherwise call UNITARES using the strongest honest posture for the situation:
 
 - fresh process → `onboard(force_new=true)`, **whether or not a prior slot cache exists**. A cache left in the workspace shows co-location, not lineage: the process that wrote it may still be running, and you are not its continuation just because you share a directory.
 - deliberate handoff: declare the cached uuid only when that process has **exited** and the user (or the task) says you are continuing its work → `onboard(force_new=true, parent_agent_id=<cached uuid>, spawn_reason="explicit")`. Declaring a still-live process is rejected (`lineage_coincidental_rejected`), unless `spawn_reason` marks a dispatched child (`subagent`, `dispatch`, `dialectic_reviewer`) or a `compaction` continuation: those relationships expect the parent to still be live, and the dispatcher usually sets them rather than this command. Do not use `spawn_reason="new_session"`: the server treats it as the legacy co-location reason, not intentional lineage.
@@ -62,7 +78,8 @@ After a successful response:
 
 When reporting back:
 
-- say whether the identity was freshly created or created with declared lineage
+- say whether the identity was freshly created, created with declared lineage,
+  or already bound to this process before the command ran
 - if lineage was declared, name the parent UUID prefix
 - show the resolved display name or agent id
 - mention the next useful command:
