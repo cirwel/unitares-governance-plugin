@@ -188,3 +188,18 @@ def test_prompt_recall_marker_dir_ignores_itself(tmp_path: Path, monkeypatch) ->
     prompt_recall.write_marker(marker, "flaky upload retry")
     assert marker.exists()
     assert (marker.parent / ".gitignore").read_text().splitlines()[-1] == "*"
+
+
+def test_session_start_helper_skips_the_home_mirror_through_a_symlink(tmp_path: Path) -> None:
+    # The hook compares physical paths, so a symlinked HOME is still the home.
+    hook = SCRIPT.parents[1] / "hooks" / "session-start"
+    real_home = tmp_path / "real-home"
+    (real_home / ".unitares").mkdir(parents=True)
+    link_home = tmp_path / "link-home"
+    link_home.symlink_to(real_home)
+    script = (
+        f"eval \"$(sed -n '/^ensure_workspace_cache_ignored()/,/^}}/p' '{hook}')\"\n"
+        f"ensure_workspace_cache_ignored '{real_home}/.unitares'\n"
+    )
+    subprocess.run(["bash", "-c", script], check=True, env={**os.environ, "HOME": str(link_home)})
+    assert not (real_home / ".unitares" / ".gitignore").exists()
