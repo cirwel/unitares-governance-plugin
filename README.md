@@ -96,9 +96,10 @@ hooks; installing the plugin alone does not authorize them. See the
 
 The bundled [Codex MCP transport](.codex-mcp.json) points to unauthenticated
 `http://localhost:8767/mcp/`. It does **not** read the Claude transport's URL or
-bearer-token settings. For a hosted or authenticated server, follow
-[Server connections](docs/configuration.md#server-connections) to disable the
-bundled transport and register an authenticated `unitares-governance` server.
+bearer-token settings. For a hosted or authenticated server, or a local one on
+another port, follow [Server connections](docs/configuration.md#server-connections)
+to disable the bundled transport and register your own `unitares-governance`
+server.
 
 [CODEX_START.md](CODEX_START.md) covers explicit use, hook behavior, and the
 local continuity cache. Hook scripts must exist in the client's execution

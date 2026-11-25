@@ -65,6 +65,17 @@ codex mcp add unitares-governance \
   --bearer-token-env-var UNITARES_HTTP_API_TOKEN
 ```
 
+For a local, unauthenticated server on another port (for example a Docker
+stack moved with `GOVERNANCE_HOST_PORT`), disable the bundled transport the same
+way and register the local URL without a token. Codex hooks follow
+`UNITARES_SERVER_URL`, so set it too, or MCP calls and hook traffic reach
+different servers:
+
+```bash
+export UNITARES_SERVER_URL=http://127.0.0.1:18767
+codex mcp add unitares-governance --url "${UNITARES_SERVER_URL%/}/mcp/"
+```
+
 Codex hooks trust only the bare `unitares-governance` server alias. Claude's
 plugin-scoped alias is host-specific and is not accepted at the Codex hook
 boundary.
