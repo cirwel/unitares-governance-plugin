@@ -72,11 +72,15 @@ Contract:
   `permissionOverrides`. `overwrite` is merged shallowly into the tool args,
   so a call_mcp_tool rewrite returns the whole updated `Arguments` object, in
   its original dict or JSON-string form. Fail-open is not fail-closed for
-  identity: when a call_mcp_tool's `Arguments` does not decode to an object,
-  _extract_agy_call drops the server/tool it has already matched and the
-  call is allowed, even for start_session. The use_tool gateway route denies
-  the same case. The manifest matches only `call_mcp_tool`, so
-  eagerly loaded `mcp_<server>_<tool>` calls never reach this hook (#445).
+  identity in general: an unexpected exception still yields `allow`. A
+  call_mcp_tool to a governance server for start_session, onboard, identity
+  or use_tool whose `Arguments` cannot be read as an object is denied, as
+  the use_tool gateway route already did for unreadable inner arguments
+  (#445). Antigravity loads MCP tools lazily through `call_mcp_tool` or
+  eagerly as `mcp_<server>_<tool>`, falling back to eager when it cannot
+  write schema files. The manifest matcher (AGY_PRE_TOOL_USE_MATCHER) is an
+  anchored pattern covering `call_mcp_tool` and only the eager names for the
+  agy governance aliases and the suffixes handled here.
 
 Known residual (KNOWINGLY ACCEPTED, council-reviewed 2026-06-12): both this
 guard and server #604 key on spawn_reason=="subagent" being DECLARED, and a
@@ -385,6 +389,8 @@ def _extract_agy_call(
                 parsed = json.loads(raw_inner)
             except ValueError:
                 return None, None, True, False
+            if parsed is None:
+                return tool, {}, True, True
             if isinstance(parsed, dict):
                 return tool, parsed, True, True
         return None, None, True, False
@@ -392,6 +398,26 @@ def _extract_agy_call(
     if suffix is None:
         return None, None, False, False
     return suffix, dict(raw_args), False, False
+
+
+def agy_pre_tool_use_matcher() -> str:
+    """The anchored PreToolUse matcher hooks/agy-hooks.json must carry.
+
+    It covers the lazy `call_mcp_tool` route and the eager
+    `mcp_<server>_<tool>` names for exactly the agy governance aliases and
+    the suffixes this helper acts on. Lazy calls to other servers still reach
+    the helper (they share the outer name) and get the neutral `allow`.
+    """
+    # Plain characters only: the host's regex dialect is not documented, and
+    # an escaped `\-` is a syntax error in some (JavaScript with /u).
+    names = set(governance_server_aliases("agy"))
+    handled = INJECT_SUFFIXES | ANCHORED_MINT_SUFFIXES | IDENTITY_ASSERT_SUFFIXES
+    for part in names | handled:
+        if not re.fullmatch(r"[a-z0-9_-]+", part):
+            raise ValueError(f"matcher part needs escaping: {part!r}")
+    servers = "|".join(sorted(names))
+    suffixes = "|".join(sorted(handled))
+    return f"^(?:call_mcp_tool|mcp_(?:{servers})_(?:{suffixes}))$"
 
 
 _AGY_TURN_MINT_TTL_S = 1800.0
@@ -667,11 +693,48 @@ def _parse_agy_gateway_args(tool_input: dict) -> tuple[dict | None, bool, str]:
     return None, False, field_key
 
 
+_AGY_UNREADABLE_DENY_SUFFIXES = ANCHORED_MINT_SUFFIXES | IDENTITY_ASSERT_SUFFIXES | GATEWAY_SUFFIXES
+
+
+def _agy_unreadable_identity_reason(data: dict) -> str | None:
+    """Why a call_mcp_tool identity call whose ``Arguments`` can't be read is denied.
+
+    _extract_agy_call returns no target when ``Arguments`` is not an object
+    (or JSON text of one), so without this check such a call would fall
+    through to plain ``allow`` with its mint/identity guards skipped. The
+    use_tool gateway route already denies unparseable inner arguments; this
+    gives a direct call_mcp_tool the same treatment. use_tool itself is
+    included because its target cannot be seen. Other governance tools and
+    other servers keep the neutral path.
+    """
+    tool_call = data.get("toolCall")
+    if not isinstance(tool_call, dict):
+        return None
+    if str(tool_call.get("name") or "").strip() != "call_mcp_tool":
+        return None
+    raw_args = tool_call.get("args")
+    if not isinstance(raw_args, dict):
+        return None
+    server = _unwrap_agy_scalar(raw_args.get("ServerName")).strip().casefold()
+    tool = _unwrap_agy_scalar(raw_args.get("ToolName")).strip().casefold()
+    if server not in governance_server_aliases("agy"):
+        return None
+    if tool not in _AGY_UNREADABLE_DENY_SUFFIXES:
+        return None
+    return (
+        f"Refusing {tool} with unreadable Arguments: the identity guards cannot "
+        "inspect it. Pass Arguments as a JSON object."
+    )
+
+
 def _decide_agy(data: dict, raw: str) -> dict:
     """Return Antigravity PreToolUse JSON output (always includes decision)."""
     allow = {"decision": "allow"}
     suffix, tool_input, is_call_mcp_tool, args_was_str = _extract_agy_call(data)
     if suffix is None or tool_input is None:
+        unreadable = _agy_unreadable_identity_reason(data)
+        if unreadable:
+            return _deny_output(unreadable, host="agy")
         return allow
     if (
         suffix not in INJECT_SUFFIXES

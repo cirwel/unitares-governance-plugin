@@ -843,10 +843,12 @@ def test_agy_hooks_manifest_matches_antigravity_schema_and_avoids_local_paths():
     assert isinstance(entry["SessionStart"], list) and len(entry["SessionStart"]) == 1
     assert "post-stop --host agy --session-start" in entry["SessionStart"][0]["command"]
 
-    # PreToolUse is grouped with matcher == "call_mcp_tool"
+    # PreToolUse is grouped under the anchored matcher the helper derives
     assert isinstance(entry["PreToolUse"], list) and len(entry["PreToolUse"]) == 1
     pre = entry["PreToolUse"][0]
-    assert pre["matcher"] == "call_mcp_tool"
+    from governance_call_inject import agy_pre_tool_use_matcher
+
+    assert pre["matcher"] == agy_pre_tool_use_matcher()
     assert "pre-governance-call --host agy" in pre["hooks"][0]["command"]
 
     # Stop is flat list of handler objects
@@ -1424,7 +1426,7 @@ def test_install_agy_hooks_merges_into_user_hooks_json_without_claude_collision(
     resolved_root = str(PLUGIN_ROOT.resolve())
     assert resolved_root in ug["SessionStart"][0]["command"]
     assert "${PLUGIN_ROOT" not in ug["SessionStart"][0]["command"]
-    assert ug["PreToolUse"][0]["matcher"] == "call_mcp_tool"
+    assert ug["PreToolUse"][0]["matcher"] == pre_manifest_matcher()
     assert resolved_root in ug["PreToolUse"][0]["hooks"][0]["command"]
     assert resolved_root in ug["Stop"][0]["command"]
     assert "UNITARES_AUTO_ONBOARD=" not in ug["Stop"][0]["command"]
@@ -1920,3 +1922,134 @@ def test_agy_wrapper_fallback_prints_plain_allow(tmp_path, helper):
     out = json.loads(res.stdout)
     assert out == {"decision": "allow"}
     _assert_agy_contract(out)
+
+
+def pre_manifest_matcher() -> str:
+    manifest = json.loads((PLUGIN_ROOT / "hooks" / "agy-hooks.json").read_text(encoding="utf-8"))
+    return manifest["unitares-governance"]["PreToolUse"][0]["matcher"]
+
+
+# ---------------------------------------------------------------------------
+# 7. Eager MCP dispatch coverage and unreadable identity Arguments (#445)
+# ---------------------------------------------------------------------------
+
+
+def test_agy_matcher_covers_eager_governance_names_and_rejects_lookalikes():
+    import re
+
+    from governance_call_inject import (
+        ANCHORED_MINT_SUFFIXES,
+        IDENTITY_ASSERT_SUFFIXES,
+        INJECT_SUFFIXES,
+        _agy_direct_mcp_suffix,
+        agy_pre_tool_use_matcher,
+    )
+    from governance_tool_name import governance_server_aliases
+
+    matcher = pre_manifest_matcher()
+    assert matcher == agy_pre_tool_use_matcher()
+    assert "\\" not in matcher  # plain characters only
+    pattern = re.compile(matcher)
+    handled = INJECT_SUFFIXES | ANCHORED_MINT_SUFFIXES | IDENTITY_ASSERT_SUFFIXES
+
+    assert pattern.search("call_mcp_tool")
+    # Every eager name the matcher admits resolves, in the helper, to the
+    # same handled suffix: the manifest and the handler agree.
+    for server in governance_server_aliases("agy"):
+        for suffix in handled:
+            name = f"mcp_{server}_{suffix}"
+            assert pattern.search(name), name
+            assert _agy_direct_mcp_suffix(name) == suffix, name
+
+    for name in (
+        "run_command",
+        "xcall_mcp_tool",
+        "call_mcp_tool_x",
+        "mcp_github_create_issue",
+        "mcp_anima_get_state",
+        "mcp_unitares-governance-shadow_sync_state",
+        "mcp_unitares-governance_sync_statex",
+        "mcp_unitares-governance_delete_everything",
+        "mcp__unitares-governance__sync_state",
+        "xmcp_unitares-governance_sync_state",
+    ):
+        assert not pattern.search(name), name
+
+
+def test_agy_eager_mint_on_bound_slot_is_denied(tmp_path):
+    home_dir = tmp_path / "home"
+    conv_id = "agy-conv-eager"
+    _write_slot_cache(home_dir, conv_id, uuid=UUID_A, csid=CSID_A)
+    out = _run_inject_agy(
+        _agy_pre_tool_payload(
+            conv_id, tool_name="mcp_unitares-governance_start_session", args={}
+        ),
+        home_dir=home_dir,
+        via_hook=True,
+    )
+    assert out["decision"] == "deny", out
+
+
+@pytest.mark.parametrize("tool", ["start_session", "onboard", "identity", "use_tool"])
+@pytest.mark.parametrize("arguments", ["{not json", "[1, 2]", "42", ["list"]])
+@pytest.mark.parametrize("bound", [True, False])
+def test_agy_unreadable_identity_arguments_are_denied(tmp_path, tool, arguments, bound):
+    home_dir = tmp_path / "home"
+    conv_id = "agy-conv-unreadable"
+    if bound:
+        _write_slot_cache(home_dir, conv_id, uuid=UUID_A, csid=CSID_A)
+    out = _run_inject_agy(
+        _agy_pre_tool_payload(
+            conv_id,
+            args={"ServerName": "unitares-governance", "ToolName": tool, "Arguments": arguments},
+        ),
+        home_dir=home_dir,
+        via_hook=True,
+    )
+    assert out["decision"] == "deny", out
+    assert "unreadable Arguments" in out["reason"]
+    _assert_agy_contract(out)
+
+
+def test_agy_unreadable_arguments_keep_neutral_path_off_identity(tmp_path):
+    home_dir = tmp_path / "home"
+    conv_id = "agy-conv-unreadable-neutral"
+    _write_slot_cache(home_dir, conv_id, uuid=UUID_A, csid=CSID_A)
+    for server, tool in (
+        ("unitares-governance", "sync_state"),
+        ("unitares-governance", "unknown_tool"),
+        ("github", "start_session"),
+        ("unitares-governance-shadow", "start_session"),
+    ):
+        out = _run_inject_agy(
+            _agy_pre_tool_payload(
+                conv_id,
+                args={"ServerName": server, "ToolName": tool, "Arguments": "{not json"},
+            ),
+            home_dir=home_dir,
+        )
+        assert out == {"decision": "allow"}, (server, tool, out)
+
+
+def test_agy_json_null_arguments_behave_like_absent_arguments(tmp_path):
+    home_dir = tmp_path / "home"
+    conv_id = "agy-conv-null-args"
+    unbound = _run_inject_agy(
+        _agy_pre_tool_payload(
+            conv_id,
+            args={"ServerName": "unitares-governance", "ToolName": "start_session", "Arguments": "null"},
+        ),
+        home_dir=home_dir,
+    )
+    _assert_agy_contract(unbound)
+    assert unbound["decision"] == "allow", unbound
+
+    _write_slot_cache(home_dir, conv_id, uuid=UUID_A, csid=CSID_A)
+    bound = _run_inject_agy(
+        _agy_pre_tool_payload(
+            conv_id,
+            args={"ServerName": "unitares-governance", "ToolName": "start_session", "Arguments": "null"},
+        ),
+        home_dir=home_dir,
+    )
+    assert bound["decision"] == "deny", bound
