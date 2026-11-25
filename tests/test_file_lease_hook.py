@@ -2706,3 +2706,25 @@ def test_unix_socket_malformed_url_and_missing_socket_fail_closed(
     assert status["state"] == "off"
     assert status["reason"] == "unreachable"
     assert status["url"] == f"unix://{missing}"
+
+
+def test_required_mode_names_the_transport_not_a_missing_token(tmp_path, monkeypatch, capsys):
+    # #453: with the token set and a cleartext loopback lease plane, the
+    # refusal used to say "missing LEASE_PLANE_BEARER_TOKEN".
+    monkeypatch.setenv("UNITARES_FILE_LEASES_REQUIRED", "1")
+    monkeypatch.setenv("LEASE_PLANE_BEARER_TOKEN", "unitares-local-lease-plane")
+    monkeypatch.setenv("LEASE_PLANE_BASE_URL", "http://127.0.0.1:18788")
+    monkeypatch.delenv("UNITARES_ALLOW_INSECURE_LOOPBACK_LEASE_HTTP", raising=False)
+    monkeypatch.delenv("UNITARES_LEASE_PLANE_UNIX_SOCKET", raising=False)
+    monkeypatch.setenv("UNITARES_SECRETS_ENV", str(tmp_path / "missing.env"))
+
+    rc = file_lease_hook.main(
+        ["pre-edit", "--workspace", str(tmp_path)],
+        stdin_text=_payload(tool_use_id="toolu_insecure_transport"),
+    )
+
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "missing LEASE_PLANE_BEARER_TOKEN" not in err
+    assert "is set but is not sent over this transport" in err
+    assert "UNITARES_ALLOW_INSECURE_LOOPBACK_LEASE_HTTP=1" in err
