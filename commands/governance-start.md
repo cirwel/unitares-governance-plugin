@@ -1,5 +1,5 @@
 ---
-description: "Create or declare lineage for a UNITARES session in Codex (fresh process-instance posture)"
+description: "Create or declare lineage for this UNITARES session (fresh process-instance posture)"
 ---
 
 Under the UNITARES identity ontology v2, a fresh process-instance mints fresh governance-identity. Lineage is declared via `parent_agent_id`, not resumed via token. This command starts a session in that posture.

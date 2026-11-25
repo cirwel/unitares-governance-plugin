@@ -1530,7 +1530,9 @@ def _cmd_pre_edit_locked(args: argparse.Namespace, stdin_text: str) -> int:
                 f"  Path: {file_path}\n"
                 f"  Surface: {result.get('surface_id') or surface_id}\n"
                 f"  Blocking lease: {result.get('blocking_lease_id', '?')}\n"
-                f"  Held by: {result.get('held_by_uuid', '?')}\n"
+                # The holder is the other edit's per-call lease identity, not an
+                # agent UUID that can be looked up in governance (#453).
+                f"  Held by (another edit's lease holder): {result.get('held_by_uuid', '?')}\n"
                 f"  Expires: {expires_at}{_self_heal_eta(expires_at)}\n"
                 "This lease self-heals: file leases auto-expire at the time above even if the "
                 "holding session died without releasing.\n"
