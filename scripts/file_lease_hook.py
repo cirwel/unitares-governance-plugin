@@ -1293,8 +1293,19 @@ def _cmd_pre_edit_locked(args: argparse.Namespace, stdin_text: str) -> int:
             "cannot be correlated safely"
         )
 
-    token = _bearer_token()
+    token, source = _bearer_token_with_source()
     if not token:
+        if source == "insecure_transport":
+            # A configured bearer is never sent over cleartext HTTP or an
+            # invalid Unix socket; "missing" sent operators looking for a token
+            # they had already set (#453).
+            return _fail_open_or_block(
+                "LEASE_PLANE_BEARER_TOKEN is set but is not sent over this "
+                "transport: use an https:// lease plane or a valid "
+                "UNITARES_LEASE_PLANE_UNIX_SOCKET, or set "
+                "UNITARES_ALLOW_INSECURE_LOOPBACK_LEASE_HTTP=1 for a loopback "
+                "development lease plane"
+            )
         return _fail_open_or_block("missing LEASE_PLANE_BEARER_TOKEN")
 
     try:
@@ -1966,8 +1977,9 @@ def _status_line(status: dict[str, Any]) -> str:
         else:
             why = f"the configured bearer would cross unauthenticated HTTP at {url}"
             fix = (
-                "Use HTTPS (recommended), local authenticated IPC, or explicitly opt in "
-                "to insecure loopback development transport."
+                "Use HTTPS (recommended) or local authenticated IPC "
+                "(UNITARES_LEASE_PLANE_UNIX_SOCKET), or for a loopback development "
+                "lease plane set UNITARES_ALLOW_INSECURE_LOOPBACK_LEASE_HTTP=1."
             )
     elif reason == "not_a_lease_plane":
         why = f"the service at {url} does not answer as a v1 lease plane"
