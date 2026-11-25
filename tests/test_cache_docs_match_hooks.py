@@ -83,3 +83,24 @@ def test_checkin_doc_states_only_what_post_checkin_keeps_exact() -> None:
         not in text
     )
     assert "the milestone's revision still equals the one in the snapshot" not in text
+
+
+def test_no_command_tells_the_agent_to_write_the_session_cache() -> None:
+    # hooks/post-identity keys the session slot by the host session id and
+    # stores client_session_id inside the record (tests/test_post_identity_hook.py).
+    # An agent knows only its client_session_id, so a hand `set session` lands
+    # under a second key and leaves the slot the hooks read unchanged.
+    offenders = [
+        path.name
+        for path in sorted((ROOT / "commands").glob("*.md"))
+        if re.search(r"session_cache\.py\s+set\s+session", _flat(path))
+    ]
+    assert offenders == [], (
+        f"commands telling the agent to write the session cache: {offenders}"
+    )
+
+
+def test_governance_start_leaves_the_slot_write_to_the_hook() -> None:
+    text = _flat(ROOT / "commands" / "governance-start.md")
+    assert "do not write the session cache yourself" in text
+    assert "--slot=<client_session_id>" not in text

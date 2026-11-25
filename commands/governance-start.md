@@ -47,22 +47,18 @@ Do not use `identity(agent_uuid=<uuid>, ...)` from a fresh process. Bare-UUID re
 
 After a successful response:
 
-- record the session in slot-scoped form using the just-returned `client_session_id` as the slot:
-  - `${CLAUDE_PLUGIN_ROOT}/scripts/session_cache.py set session --slot=<client_session_id> --merge --stamp --json '{"schema_version":2,"uuid":"<uuid>","agent_id":"<agent_id>","display_name":"<display_name>","client_session_id":"<client_session_id>"}'`
-  - pass the payload with `--json`: without it the helper has nothing to write and refuses a new slot
-- the helper rejects slotless writes at v2 (S20.1) — passing `--slot` is required
-- include in the JSON payload:
-  - `schema_version: 2`
-  - `server_url` when known
-  - `uuid`
-  - `agent_id`
-  - `display_name`
-  - `client_session_id`
-  - `parent_agent_id` when lineage was declared
-  - `session_resolution_source`
-  - `updated_at` (`--stamp` sets it)
-- do **not** persist `continuity_token` itself. The helper rejects payloads containing it at v2 (S20.1). v2 cache schema is lineage-only.
-- do not persist `continuity_token_supported` from this command (S20.3): read it from the live response. `scripts/onboard_helper.py` does not cache it either. The Claude `hooks/post-identity` slot write leaves it out too.
+- do not write the session cache yourself. The `post-identity` hook records
+  this process's session under its **host session** slot, the key every other
+  hook reads, and stores `client_session_id` inside that record. A write keyed
+  by `client_session_id` would add a second entry and leave the slot the hooks
+  read unchanged.
+- if the hook is not installed, leave the cache alone: you do not know the
+  host session id the hooks key by, and a slot written under any other key
+  only shows up later as a misleading lineage candidate.
+- if a later slot read disagrees with the live identity, report it (`/diagnose`).
+  Never edit a cache by hand.
+- never persist `continuity_token`, and read `continuity_token_supported` from
+  the live response: the v2 cache is lineage context only and holds neither.
 
 When reporting back:
 
