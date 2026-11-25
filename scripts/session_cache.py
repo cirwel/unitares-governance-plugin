@@ -117,6 +117,31 @@ def _read_json(path: Path) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+_CACHE_IGNORE = b"# Written by the UNITARES plugin: these session caches stay out of git.\n*\n"
+
+
+def _ensure_cache_dir_ignored(directory: Path) -> None:
+    """Give a workspace ``.unitares/`` a self-ignoring ``.gitignore``.
+
+    The caches carry the session's ``client_session_id``; without this a
+    routine ``git add -A`` in the user's project commits them. Never replaces
+    an existing file and never follows a symlink; best effort. Kept in step
+    with the twin in ``_session_cache_io.py`` (this module stays
+    dependency-free).
+    """
+    if directory.name != CACHE_DIR:
+        return
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(str(directory / ".gitignore"), flags, 0o644)
+    except OSError:
+        return
+    try:
+        os.write(fd, _CACHE_IGNORE)
+    finally:
+        os.close(fd)
+
+
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     """Atomic write with mode 0600.
 
@@ -131,6 +156,7 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
     than left as a turd in the cache directory.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_cache_dir_ignored(path.parent)
     data = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
     try:

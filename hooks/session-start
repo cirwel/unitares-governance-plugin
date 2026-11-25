@@ -1277,6 +1277,18 @@ ESCAPED_CONTEXT="$(escape_for_json "${CONTEXT}")"
 # Persist delivery state only after stdout accepts the serialized response. If
 # the host kills SessionStart or closes the pipe first, the next run must still
 # show the full first-turn nudge.
+# The workspace .unitares/ holds session caches that carry this session's
+# client_session_id. A self-ignoring .gitignore keeps them out of the user's
+# commits without asking anyone to edit their own ignore files. An existing
+# file is never replaced.
+ensure_workspace_cache_ignored() {
+  local dir="$1"
+  [[ -d "${dir}" && ! -e "${dir}/.gitignore" && ! -L "${dir}/.gitignore" ]] || return 0
+  ( set -o noclobber
+    printf '# Written by the UNITARES plugin: these session caches stay out of git.\n*\n' \
+      >"${dir}/.gitignore" ) 2>/dev/null || true
+}
+
 if cat <<ENDJSON
 {
   "hookSpecificOutput": {
@@ -1288,10 +1300,12 @@ ENDJSON
 then
   if [[ "${SHOULD_WRITE_NUDGE_MARKER}" == "1" && -n "${NUDGE_MARKER}" ]]; then
     mkdir -p "$(dirname "${NUDGE_MARKER}")" 2>/dev/null || true
+    ensure_workspace_cache_ignored "$(dirname "${NUDGE_MARKER}")"
     printf '{"shown_at":"%s"}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"${NUDGE_MARKER}" 2>/dev/null || true
   fi
   if [[ "${SHOULD_WRITE_KG_RECALL_MARKER}" == "1" && -n "${KG_RECALL_MARKER}" ]]; then
     mkdir -p "$(dirname "${KG_RECALL_MARKER}")" 2>/dev/null || true
+    ensure_workspace_cache_ignored "$(dirname "${KG_RECALL_MARKER}")"
     printf '{"shown_at":"%s"}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"${KG_RECALL_MARKER}" 2>/dev/null || true
   fi
 fi

@@ -29,8 +29,12 @@ the server owns storage, review, and governance policy.
 
 ### Prerequisites
 
-You need a running UNITARES server and Python 3.12+ available to hook commands
-as `python3`. Windows also requires Git Bash from Git for Windows.
+You need a running UNITARES server and a `python3` in the system path. Hooks
+reset `PATH` to `/usr/bin:/bin:/usr/sbin:/sbin` so a workspace directory can
+never supply an interpreter, which means a Python installed elsewhere (Homebrew,
+pyenv) is not the one they run. On macOS that is the Command Line Tools Python:
+if `/usr/bin/python3 --version` fails, run `xcode-select --install`. Windows
+also requires Git Bash from Git for Windows.
 
 For a new server, follow the [verified-release Docker quickstart](https://github.com/cirwel/unitares/blob/master/docs/manual/02-install.md#21-docker-quickstart).
 The local stack exposes MCP at `http://localhost:8767/mcp/` and the dashboard
@@ -56,6 +60,20 @@ The bundled transport is unauthenticated and defaults to
 `http://localhost:8767`. For a remote or authenticated deployment, disable it
 and register an HTTPS MCP server as described in
 [Server connections](docs/configuration.md#server-connections).
+
+If your local server is on another port (for example a Docker stack moved with
+`GOVERNANCE_HOST_PORT` and `LEASE_PLANE_HOST_PORT`), set the base URLs in the
+environment you start `claude` from. Both the MCP client and the hooks read
+them:
+
+```sh
+export UNITARES_SERVER_URL=http://127.0.0.1:18767    # no /mcp/ suffix
+export LEASE_PLANE_BASE_URL=http://127.0.0.1:18788
+```
+
+Hooks keep small session caches in `.unitares/` in your project. The plugin
+gives that directory its own `.gitignore`, so the caches, which carry the
+session's `client_session_id`, stay out of your commits.
 
 ### Codex
 

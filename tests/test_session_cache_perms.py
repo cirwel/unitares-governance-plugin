@@ -69,3 +69,27 @@ def test_set_session_overwrite_tightens_loose_mode(tmp_path: Path) -> None:
         tmp_path,
     )
     assert _stat.S_IMODE(os.stat(legacy).st_mode) == 0o600
+
+
+def test_workspace_cache_dir_ignores_itself(tmp_path: Path) -> None:
+    # The caches carry client_session_id; a stranger's `git add -A` must not
+    # commit them, whatever their own ignore files say.
+    _run(["bump-edit", "--file-path", "/w/a.py"], tmp_path)
+    ignore = tmp_path / ".unitares" / ".gitignore"
+    assert ignore.read_text().splitlines()[-1] == "*"
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env["GIT_CONFIG_GLOBAL"] = os.devnull  # no operator-wide excludes
+    status = subprocess.run(
+        ["git", "-C", str(tmp_path), "status", "--porcelain", "--untracked-files=all"],
+        capture_output=True, text=True, check=True, env=env,
+    ).stdout
+    assert ".unitares" not in status
+
+
+def test_existing_cache_ignore_file_is_left_alone(tmp_path: Path) -> None:
+    cache_dir = tmp_path / ".unitares"
+    cache_dir.mkdir()
+    (cache_dir / ".gitignore").write_text("mine\n")
+    _run(["bump-edit", "--file-path", "/w/a.py"], tmp_path)
+    assert (cache_dir / ".gitignore").read_text() == "mine\n"
