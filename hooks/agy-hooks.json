@@ -9,7 +9,7 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "call_mcp_tool",
+        "matcher": "^(?:call_mcp_tool|mcp_(?:governance|unitares|unitares-governance|unitares_governance)_(?:agent|archive_orphan_agents|calibration|check_working_state|config|consult|describe_tool|dialectic|export|get_governance_metrics|health_check|identity|knowledge|leave_note|list_tools|observe|onboard|outcome_event|process_agent_update|record_result|request_review|search_shared_memory|self_recovery|start_session|store_finding|sync_state|update_finding|use_tool))$",
         "hooks": [
           {
             "type": "command",
