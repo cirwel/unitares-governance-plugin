@@ -113,18 +113,23 @@ def _scratch_name(kind: str) -> str:
     return f"{_IGNORE_NAME}.{secrets.token_hex(8)}.{kind}"
 
 
-def _holds_partial_ignore(fd: int) -> bool:
-    """True when ``fd`` is a single-link regular file holding a strict prefix
-    of the plugin's content, which is what an interrupted write leaves."""
-    info = os.fstat(fd)
+def _is_repair_candidate(info: os.stat_result) -> bool:
     # A hard-linked file is shared with a path outside this directory, so it
     # is not ours to complete.
-    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
-        return False
-    if info.st_size >= len(_CACHE_IGNORE):
-        return False
+    return (stat.S_ISREG(info.st_mode) and info.st_nlink == 1
+            and info.st_size < len(_CACHE_IGNORE))
+
+
+def _read_partial_ignore(fd: int, info: os.stat_result) -> bytes | None:
+    """The file's bytes when ``fd`` is a single-link regular file holding a
+    strict prefix of the plugin's content, which is what an interrupted write
+    leaves; otherwise None."""
+    if not _is_repair_candidate(info):
+        return None
     existing = os.pread(fd, len(_CACHE_IGNORE), 0)
-    return len(existing) == info.st_size and _CACHE_IGNORE.startswith(existing)
+    if len(existing) != info.st_size or not _CACHE_IGNORE.startswith(existing):
+        return None
+    return existing
 
 
 def _create_in_place(cache_dir: _CacheDir, flags: int) -> None:
@@ -145,35 +150,48 @@ def _repair_partial_ignore(cache_dir: _CacheDir, staged: str, flags: int) -> Non
 
     Nothing is written into the existing file. It is moved aside by one
     rename, which takes exactly whatever holds the name at that instant, and
-    is then checked again through the handle opened before. Only when it is
-    still the same single-link partial is the staged full copy linked into
-    place. Otherwise the moved file is linked back. A link never replaces an
-    entry, so a file someone else saved in the meantime always wins.
+    is then checked again through the handle opened before: same inode, same
+    size and modification time, same bytes. Only then is the staged full copy
+    linked into place. Otherwise the moved entry is put back. A link never
+    replaces an entry, so a file someone else saved in the meantime wins.
     """
     if cache_dir.fd is None or not hasattr(os, "O_NOFOLLOW"):
         return
     try:
-        fd = cache_dir.open(_IGNORE_NAME, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | flags)
+        # O_RDWR although nothing is written: a file the user cannot write,
+        # such as a read-only opt-out, is left as it is.
+        fd = cache_dir.open(_IGNORE_NAME, os.O_RDWR | getattr(os, "O_NONBLOCK", 0) | flags)
     except OSError:
         return
     try:
-        if not _holds_partial_ignore(fd):
-            return
         checked = os.fstat(fd)
-        # The file is only moved when it can be linked back afterwards.
+        content = _read_partial_ignore(fd, checked)
+        if content is None:
+            return
+        # Move the entry only once it is known it can be linked back. Probing
+        # the entry itself also covers filesystems without hard links and
+        # Linux's fs.protected_hardlinks.
         probe = _scratch_name("probe")
         try:
-            cache_dir.link(staged, probe)
+            cache_dir.link(_IGNORE_NAME, probe)
         except OSError:
             return
-        cache_dir.unlink_quietly(probe)
+        try:
+            probed = cache_dir.lstat(probe)
+        finally:
+            cache_dir.unlink_quietly(probe)
+        if (probed.st_dev, probed.st_ino) != (checked.st_dev, checked.st_ino):
+            return
         _race_point("repair-checked")
         aside = _scratch_name("aside")
         cache_dir.rename(_IGNORE_NAME, aside)
         _race_point("repair-captured")
         moved = cache_dir.lstat(aside)
+        now = os.fstat(fd)
+        # ctime is not compared: the rename itself changes it.
         still_ours = ((moved.st_dev, moved.st_ino) == (checked.st_dev, checked.st_ino)
-                      and _holds_partial_ignore(fd))
+                      and (now.st_size, now.st_mtime_ns) == (checked.st_size, checked.st_mtime_ns)
+                      and _read_partial_ignore(fd, now) == content)
         if still_ours:
             try:
                 cache_dir.link(staged, _IGNORE_NAME)
@@ -183,11 +201,20 @@ def _repair_partial_ignore(cache_dir: _CacheDir, staged: str, flags: int) -> Non
                 still_ours = False
         if not still_ours:
             # Put back exactly what the rename took. If the name was taken
-            # again meanwhile, the moved file stays under its scratch name
+            # again meanwhile, the moved entry stays under its scratch name
             # rather than being deleted.
             try:
                 cache_dir.link(aside, _IGNORE_NAME)
+            except FileExistsError:
+                return
             except OSError:
+                # A directory cannot be hard-linked. Renaming one back never
+                # replaces a file or a non-empty directory.
+                if stat.S_ISDIR(moved.st_mode):
+                    try:
+                        cache_dir.rename(aside, _IGNORE_NAME)
+                    except OSError:
+                        pass
                 return
         cache_dir.unlink_quietly(aside)
     finally:
@@ -224,6 +251,9 @@ def ensure_cache_dir_ignored(directory: Path) -> None:
     - A writer that opened the partial file before the repair and writes
       through that handle after the repair's final check. Its bytes go to the
       moved-aside copy. Closing that window needs a lock every editor honours.
+    - An entry that cannot be hard-linked (another user's file under
+      ``fs.protected_hardlinks``) swapped in between the repair's probe and
+      its rename. It is kept under a ``.gitignore.*.aside`` name, not deleted.
 
     Best effort: any failure leaves the cache write itself unaffected.
     """
@@ -259,6 +289,12 @@ def ensure_cache_dir_ignored(directory: Path) -> None:
         try:
             _race_point("dir-opened")
             cache_dir = _CacheDir(directory, dir_fd)
+            try:
+                present = cache_dir.lstat(_IGNORE_NAME)
+            except FileNotFoundError:
+                present = None
+            if present is not None and not _is_repair_candidate(present):
+                return  # the usual case, a complete file: nothing is written
             staged = _scratch_name("tmp")
             fd = cache_dir.open(staged, os.O_CREAT | os.O_EXCL | os.O_WRONLY | flags)
             try:

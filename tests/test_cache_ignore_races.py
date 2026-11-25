@@ -101,19 +101,104 @@ def test_an_in_place_edit_during_repair_is_never_interleaved(tmp_path: Path, mon
     assert _scratch(cache_dir) == []
 
 
-def test_an_edit_that_keeps_a_prefix_still_is_not_overwritten(tmp_path: Path, monkeypatch) -> None:
-    # Growing the partial into a longer prefix is still a change by someone
-    # else after the check: the swap must back off, not replace it.
+@pytest.mark.parametrize("edit", ["longer-prefix", "shorter-prefix", "truncated"])
+def test_an_edit_that_leaves_a_prefix_is_still_not_overwritten(tmp_path: Path, monkeypatch, edit: str) -> None:
+    # Growing, shrinking or truncating the partial (an editor's O_TRUNC before
+    # its write) is still a change by someone else after the check, though
+    # the result is again a prefix: the swap must back off, not replace it.
     io = _io()
     cache_dir = tmp_path / ".unitares"
     cache_dir.mkdir()
     ignore = cache_dir / ".gitignore"
     ignore.write_bytes(io._CACHE_IGNORE[:8])
-    _at(io, monkeypatch, "repair-checked",
-        lambda: ignore.write_bytes(io._CACHE_IGNORE[:8] + b"user\n"))
+    edited = {"longer-prefix": io._CACHE_IGNORE[:16], "shorter-prefix": io._CACHE_IGNORE[:4],
+              "truncated": b""}[edit]
+
+    def edit_in_place() -> None:
+        with open(ignore, "r+b") as f:
+            f.truncate(0)
+            f.write(edited)
+
+    _at(io, monkeypatch, "repair-checked", edit_in_place)
     io.ensure_cache_dir_ignored(cache_dir)
-    assert ignore.read_bytes() == io._CACHE_IGNORE[:8] + b"user\n"
+    assert ignore.read_bytes() == edited
     assert _scratch(cache_dir) == []
+
+
+def test_a_directory_swapped_in_before_the_swap_is_put_back(tmp_path: Path, monkeypatch) -> None:
+    # A directory cannot be hard-linked back; it is renamed back instead.
+    io = _io()
+    cache_dir = tmp_path / ".unitares"
+    cache_dir.mkdir()
+    ignore = cache_dir / ".gitignore"
+    ignore.write_bytes(io._CACHE_IGNORE[:8])
+
+    def to_directory() -> None:
+        ignore.unlink()
+        ignore.mkdir()
+        (ignore / "keep").write_bytes(b"x")
+
+    _at(io, monkeypatch, "repair-checked", to_directory)
+    io.ensure_cache_dir_ignored(cache_dir)
+    assert (ignore / "keep").read_bytes() == b"x"
+    assert _scratch(cache_dir) == []
+
+
+@pytest.mark.skipif(os.name != "posix" or os.geteuid() == 0, reason="needs a non-root POSIX user")
+def test_a_read_only_partial_is_left_as_it_is(tmp_path: Path) -> None:
+    # An empty read-only .gitignore is how a user would opt out; the repair
+    # needs write permission on the file, as it did before #460.
+    io = _io()
+    cache_dir = tmp_path / ".unitares"
+    cache_dir.mkdir()
+    ignore = cache_dir / ".gitignore"
+    ignore.write_bytes(b"")
+    ignore.chmod(0o444)
+    inode = os.stat(ignore).st_ino
+    io.ensure_cache_dir_ignored(cache_dir)
+    assert ignore.read_bytes() == b""
+    assert os.stat(ignore).st_ino == inode
+    assert _scratch(cache_dir) == []
+
+
+def test_a_partial_that_cannot_be_linked_is_left_in_place(tmp_path: Path, monkeypatch) -> None:
+    # Linux fs.protected_hardlinks refuses links to another user's file. The
+    # probe links the entry itself, so such a file is never moved aside.
+    io = _io()
+    cache_dir = tmp_path / ".unitares"
+    cache_dir.mkdir()
+    ignore = cache_dir / ".gitignore"
+    ignore.write_bytes(io._CACHE_IGNORE[:8])
+    real_link = os.link
+
+    def protected(src, dst, **kwargs):
+        if os.fspath(src).endswith(".gitignore"):
+            raise PermissionError(1, "Operation not permitted")
+        return real_link(src, dst, **kwargs)
+
+    monkeypatch.setattr(io.os, "link", protected)
+    inode = os.stat(ignore).st_ino
+    io.ensure_cache_dir_ignored(cache_dir)
+    assert ignore.read_bytes() == io._CACHE_IGNORE[:8]
+    assert os.stat(ignore).st_ino == inode
+    assert _scratch(cache_dir) == []
+
+
+def test_a_complete_ignore_costs_no_write(tmp_path: Path, monkeypatch) -> None:
+    # The steady state: no scratch file is created, the directory is not
+    # modified, so file watchers see nothing and a kill leaves nothing.
+    io = _io()
+    cache_dir = tmp_path / ".unitares"
+    cache_dir.mkdir()
+    io.ensure_cache_dir_ignored(cache_dir)
+    before = os.stat(cache_dir).st_mtime_ns
+    seen = []
+    monkeypatch.setattr(io, "_race_hook", seen.append)
+    for _ in range(3):
+        io.ensure_cache_dir_ignored(cache_dir)
+    assert seen == ["dir-opened"] * 3
+    assert os.stat(cache_dir).st_mtime_ns == before
+    assert os.listdir(cache_dir) == [".gitignore"]
 
 
 def test_a_file_saved_by_rename_before_the_swap_is_restored(tmp_path: Path, monkeypatch) -> None:
