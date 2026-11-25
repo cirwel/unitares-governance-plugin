@@ -8,7 +8,7 @@ Start by surfacing prior workspace state as a **lineage candidate** (not a resum
 
 Use the shared helper:
 
-- `scripts/session_cache.py list --workspace "$PWD"` — slot inventory sorted by recency (S20.1)
+- `${CLAUDE_PLUGIN_ROOT}/scripts/session_cache.py list --workspace "$PWD"` — slot inventory sorted by recency (S20.1)
 
 If the helper is unavailable, start fresh without a candidate. Recency of a
 workspace file is not lineage, and a cached `client_session_id` is never yours
@@ -48,7 +48,7 @@ Do not use `identity(agent_uuid=<uuid>, ...)` from a fresh process. Bare-UUID re
 After a successful response:
 
 - record the session in slot-scoped form using the just-returned `client_session_id` as the slot:
-  - `scripts/session_cache.py set session --slot=<client_session_id> --merge --stamp --json '{"schema_version":2,"uuid":"<uuid>","agent_id":"<agent_id>","display_name":"<display_name>","client_session_id":"<client_session_id>"}'`
+  - `${CLAUDE_PLUGIN_ROOT}/scripts/session_cache.py set session --slot=<client_session_id> --merge --stamp --json '{"schema_version":2,"uuid":"<uuid>","agent_id":"<agent_id>","display_name":"<display_name>","client_session_id":"<client_session_id>"}'`
   - pass the payload with `--json`: without it the helper has nothing to write and refuses a new slot
 - the helper rejects slotless writes at v2 (S20.1) — passing `--slot` is required
 - include in the JSON payload:

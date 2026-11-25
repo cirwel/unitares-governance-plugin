@@ -4,7 +4,8 @@ description: "Inspect and respond to an existing UNITARES dialectic session"
 
 Start by checking the local workspace cache inventory.
 
-Use the shared helper:
+Use the shared helper (relative to the plugin root, `${CLAUDE_PLUGIN_ROOT}` in
+Claude Code):
 
 - `scripts/session_cache.py list`
 
