@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import stat
 import tempfile
 import time
@@ -34,6 +35,163 @@ def read_cache_generation_unlocked(path: Path) -> int:
 
 _CACHE_DIR_NAME = ".unitares"
 _CACHE_IGNORE = b"# Written by the UNITARES plugin: these session caches stay out of git.\n*\n"
+_IGNORE_NAME = ".gitignore"
+
+# Test seam: called with a step name between the helper's filesystem steps, so
+# a test can run a concurrent writer at exactly that point. None in production.
+_race_hook: Callable[[str], None] | None = None
+
+
+def _race_point(step: str) -> None:
+    if _race_hook is not None:
+        _race_hook(step)
+
+
+class _CacheDir:
+    """Filesystem calls relative to one opened cache directory.
+
+    With a directory handle every call resolves names against the inode that
+    was opened and checked, never against the path again, so renaming the
+    directory or an ancestor afterwards cannot redirect a later step. Without
+    one (Windows) the calls fall back to joined paths.
+    """
+
+    def __init__(self, path: Path, fd: int | None) -> None:
+        self.path = path
+        self.fd = fd
+
+    def _name(self, name: str) -> str:
+        return name if self.fd is not None else os.path.join(self.path, name)
+
+    def open(self, name: str, flags: int) -> int:
+        if self.fd is not None:
+            return os.open(name, flags, 0o644, dir_fd=self.fd)
+        return os.open(self._name(name), flags, 0o644)
+
+    def link(self, src: str, dst: str) -> None:
+        """Hard-link ``src`` as ``dst``; never replaces an existing ``dst``."""
+        kwargs: dict[str, Any] = {}
+        if self.fd is not None:
+            kwargs.update(src_dir_fd=self.fd, dst_dir_fd=self.fd)
+        if os.link in os.supports_follow_symlinks:
+            kwargs["follow_symlinks"] = False
+        os.link(self._name(src), self._name(dst), **kwargs)
+
+    def rename(self, src: str, dst: str) -> None:
+        if self.fd is not None:
+            os.rename(src, dst, src_dir_fd=self.fd, dst_dir_fd=self.fd)
+        else:
+            os.rename(self._name(src), self._name(dst))
+
+    def lstat(self, name: str) -> os.stat_result:
+        if self.fd is not None:
+            return os.stat(name, dir_fd=self.fd, follow_symlinks=False)
+        return os.stat(self._name(name), follow_symlinks=False)
+
+    def unlink_quietly(self, name: str) -> None:
+        try:
+            if self.fd is not None:
+                os.unlink(name, dir_fd=self.fd)
+            else:
+                os.unlink(self._name(name))
+        except OSError:
+            pass
+
+
+def _write_all(fd: int, data: bytes) -> bool:
+    remaining = memoryview(data)
+    while remaining:
+        written = os.write(fd, remaining)
+        if written <= 0:
+            return False
+        remaining = remaining[written:]
+    return True
+
+
+def _scratch_name(kind: str) -> str:
+    # Inside .unitares, so the published `*` covers any a killed run leaves.
+    return f"{_IGNORE_NAME}.{secrets.token_hex(8)}.{kind}"
+
+
+def _holds_partial_ignore(fd: int) -> bool:
+    """True when ``fd`` is a single-link regular file holding a strict prefix
+    of the plugin's content, which is what an interrupted write leaves."""
+    info = os.fstat(fd)
+    # A hard-linked file is shared with a path outside this directory, so it
+    # is not ours to complete.
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        return False
+    if info.st_size >= len(_CACHE_IGNORE):
+        return False
+    existing = os.pread(fd, len(_CACHE_IGNORE), 0)
+    return len(existing) == info.st_size and _CACHE_IGNORE.startswith(existing)
+
+
+def _create_in_place(cache_dir: _CacheDir, flags: int) -> None:
+    """Fallback where hard links are unavailable: exclusive create, then write.
+
+    A run killed mid-write can leave a partial file here. Repair needs hard
+    links too, so on such a filesystem that partial stays as it is.
+    """
+    fd = cache_dir.open(_IGNORE_NAME, os.O_CREAT | os.O_EXCL | os.O_WRONLY | flags)
+    try:
+        _write_all(fd, _CACHE_IGNORE)
+    finally:
+        os.close(fd)
+
+
+def _repair_partial_ignore(cache_dir: _CacheDir, staged: str, flags: int) -> None:
+    """Replace an interrupted plugin write with the full content.
+
+    Nothing is written into the existing file. It is moved aside by one
+    rename, which takes exactly whatever holds the name at that instant, and
+    is then checked again through the handle opened before. Only when it is
+    still the same single-link partial is the staged full copy linked into
+    place. Otherwise the moved file is linked back. A link never replaces an
+    entry, so a file someone else saved in the meantime always wins.
+    """
+    if cache_dir.fd is None or not hasattr(os, "O_NOFOLLOW"):
+        return
+    try:
+        fd = cache_dir.open(_IGNORE_NAME, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | flags)
+    except OSError:
+        return
+    try:
+        if not _holds_partial_ignore(fd):
+            return
+        checked = os.fstat(fd)
+        # The file is only moved when it can be linked back afterwards.
+        probe = _scratch_name("probe")
+        try:
+            cache_dir.link(staged, probe)
+        except OSError:
+            return
+        cache_dir.unlink_quietly(probe)
+        _race_point("repair-checked")
+        aside = _scratch_name("aside")
+        cache_dir.rename(_IGNORE_NAME, aside)
+        _race_point("repair-captured")
+        moved = cache_dir.lstat(aside)
+        still_ours = ((moved.st_dev, moved.st_ino) == (checked.st_dev, checked.st_ino)
+                      and _holds_partial_ignore(fd))
+        if still_ours:
+            try:
+                cache_dir.link(staged, _IGNORE_NAME)
+            except FileExistsError:
+                pass  # a file saved at the name meanwhile wins
+            except OSError:
+                still_ours = False
+        if not still_ours:
+            # Put back exactly what the rename took. If the name was taken
+            # again meanwhile, the moved file stays under its scratch name
+            # rather than being deleted.
+            try:
+                cache_dir.link(aside, _IGNORE_NAME)
+            except OSError:
+                return
+        cache_dir.unlink_quietly(aside)
+    finally:
+        os.close(fd)
 
 
 def ensure_cache_dir_ignored(directory: Path) -> None:
@@ -44,12 +202,29 @@ def ensure_cache_dir_ignored(directory: Path) -> None:
     here carry the session's ``client_session_id``; without this a routine
     ``git add -A`` in the user's project commits them.
 
-    The directory is opened without following a symlink and the file is
-    created relative to that handle, so a directory swapped in after the
-    checks is not written into. The file is created exclusively and never
-    follows a symlink. An existing ``.gitignore`` is never replaced or
-    deleted: it is only completed when it is a regular file holding a strict
-    prefix of this content, which is what an interrupted earlier write leaves.
+    The directory is opened without following a symlink and every later step
+    is relative to that handle, so a directory or ancestor swapped in after the
+    open is not written into. The full content is written to a scratch file
+    first and published by a hard link, which never replaces an entry, so no
+    reader ever sees a partial ``.gitignore`` and a killed run leaves none.
+    Where hard links are unavailable it falls back to an exclusive create.
+
+    An existing ``.gitignore`` is never written into. It is replaced only when
+    it is a single-link regular file holding a strict prefix of this content,
+    which is what an interrupted write by an earlier version leaves, and only
+    by the compare-and-swap in ``_repair_partial_ignore``.
+
+    Deliberately not handled (issue #460):
+
+    - An ancestor swapped *before* the open. A symlinked ancestor is ordinary
+      (``/tmp`` and ``/var`` on macOS, projects on another volume), so walking
+      the path with ``O_NOFOLLOW`` would refuse real setups, and resolving it
+      first is itself the step such a swap races. The cache writers resolve
+      the same path, so the file lands beside the caches it covers.
+    - A writer that opened the partial file before the repair and writes
+      through that handle after the repair's final check. Its bytes go to the
+      moved-aside copy. Closing that window needs a lock every editor honours.
+
     Best effort: any failure leaves the cache write itself unaffected.
     """
     try:
@@ -63,12 +238,12 @@ def ensure_cache_dir_ignored(directory: Path) -> None:
         except OSError:
             pass  # no home mirror (or no directory): nothing to compare
         # O_BINARY: on Windows a plain os.open is text mode and would write CRLF.
-        nofollow = (getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
-                    | getattr(os, "O_BINARY", 0))
+        flags = (getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+                 | getattr(os, "O_BINARY", 0))
         dir_fd = None
         if os.open in os.supports_dir_fd and hasattr(os, "O_DIRECTORY"):
             try:
-                dir_fd = os.open(str(directory), os.O_RDONLY | os.O_DIRECTORY | nofollow)
+                dir_fd = os.open(str(directory), os.O_RDONLY | os.O_DIRECTORY | flags)
             except OSError:
                 return
             # Re-check the home mirror against the directory actually opened,
@@ -82,56 +257,26 @@ def ensure_cache_dir_ignored(directory: Path) -> None:
             except OSError:
                 pass
         try:
-            def _open(flags: int) -> int:
-                if dir_fd is not None:
-                    return os.open(".gitignore", flags, 0o644, dir_fd=dir_fd)
-                return os.open(os.path.join(directory, ".gitignore"), flags, 0o644)
-
+            _race_point("dir-opened")
+            cache_dir = _CacheDir(directory, dir_fd)
+            staged = _scratch_name("tmp")
+            fd = cache_dir.open(staged, os.O_CREAT | os.O_EXCL | os.O_WRONLY | flags)
             try:
-                fd = _open(os.O_CREAT | os.O_EXCL | os.O_WRONLY | nofollow)
-                done = 0
-            except FileExistsError:
-                # Repair only where the open cannot follow a symlink.
-                if not hasattr(os, "O_NOFOLLOW"):
-                    return
                 try:
-                    fd = _open(os.O_RDWR | getattr(os, "O_NONBLOCK", 0) | nofollow)
-                except OSError:
-                    return
-                existing = None
-                size = -1
-                try:
-                    info = os.fstat(fd)
-                    # A hard-linked file is shared with a path outside this
-                    # directory, so it is not ours to complete.
-                    if stat.S_ISREG(info.st_mode) and info.st_nlink == 1:
-                        size = info.st_size
-                        existing = os.read(fd, len(_CACHE_IGNORE))
-                except OSError:
-                    existing = None
-                if (existing is None or len(existing) != size
-                        or len(existing) >= len(_CACHE_IGNORE)
-                        or not _CACHE_IGNORE.startswith(existing)):
+                    complete = _write_all(fd, _CACHE_IGNORE)
+                finally:
                     os.close(fd)
+                if not complete:
                     return
-                done = len(existing)
-            except OSError:
-                return
-            try:
-                os.lseek(fd, done, os.SEEK_SET)
-                remaining = memoryview(_CACHE_IGNORE)[done:]
-                while remaining:
-                    written = os.write(fd, remaining)
-                    if written <= 0:
-                        break
-                    remaining = remaining[written:]
-            except OSError:
-                pass
+                _race_point("staged")
+                try:
+                    cache_dir.link(staged, _IGNORE_NAME)
+                except FileExistsError:
+                    _repair_partial_ignore(cache_dir, staged, flags)
+                except OSError:
+                    _create_in_place(cache_dir, flags)
             finally:
-                try:
-                    os.close(fd)
-                except OSError:
-                    pass
+                cache_dir.unlink_quietly(staged)
         finally:
             if dir_fd is not None:
                 os.close(dir_fd)
