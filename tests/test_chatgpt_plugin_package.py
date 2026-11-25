@@ -38,10 +38,25 @@ def _assert_skills_copied(package: Path) -> None:
     expected = {
         path.parent.name
         for path in (ROOT / "skills").glob("*/SKILL.md")
+        if not path.is_symlink() and not path.parent.is_symlink()
     } | {"setup-unitares"}
     actual = {path.parent.name for path in (package / "skills").glob("*/SKILL.md")}
     assert actual == expected
     assert not (package / "skills" / ".attestations").exists()
+    assert not (package / "skills" / "SKILLS_MANIFEST.sha256").exists()
+    expected_refs = {
+        path.relative_to(ROOT / "skills").as_posix()
+        for path in (ROOT / "skills").glob("*/references/*.md")
+        if path.is_file()
+        and not path.is_symlink()
+        and not path.parent.is_symlink()
+        and not path.parent.parent.is_symlink()
+    }
+    actual_refs = {
+        path.relative_to(package / "skills").as_posix()
+        for path in (package / "skills").glob("*/references/*.md")
+    }
+    assert actual_refs == expected_refs
 
 
 def test_builds_registered_chatgpt_app_reference(tmp_path: Path):
@@ -184,3 +199,98 @@ def test_rejects_existing_or_nested_archive_before_creating_output(tmp_path: Pat
     )
     assert result.returncode != 0
     assert not nested_package.exists()
+
+
+def test_copies_skill_references_and_skips_symlinks_and_non_markdown(tmp_path: Path, monkeypatch, capsys):
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("build_chatgpt_plugin", BUILDER)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    fake_root = tmp_path / "repo"
+    (fake_root / ".codex-plugin").mkdir(parents=True)
+    (fake_root / ".codex-plugin" / "plugin.json").write_bytes(
+        (ROOT / ".codex-plugin" / "plugin.json").read_bytes()
+    )
+    (fake_root / "LICENSE").write_text("license\n", encoding="utf-8")
+    (fake_root / "NOTICE").write_text("notice\n", encoding="utf-8")
+    setup_dst = fake_root / "packaging" / "chatgpt" / "skills" / "setup-unitares"
+    setup_dst.mkdir(parents=True)
+    (setup_dst / "SKILL.md").write_text("# Setup\n", encoding="utf-8")
+    secret = tmp_path / "secret.md"
+    secret.write_text("do-not-bundle\n", encoding="utf-8")
+    (setup_dst / "leak.md").symlink_to(secret)
+
+    # Split skill with references/, plus a symlink, nested dir, and non-.md file to skip.
+    split_skill = fake_root / "skills" / "governance-lifecycle"
+    refs = split_skill / "references"
+    refs.mkdir(parents=True)
+    (split_skill / "SKILL.md").write_text("# Lifecycle\n", encoding="utf-8")
+    (refs / "recovery.md").write_text("# Recovery\n", encoding="utf-8")
+    (refs / "notes.txt").write_text("ignored\n", encoding="utf-8")
+    (refs / "nested").mkdir()
+    (refs / "nested" / "deep.md").write_text("nested\n", encoding="utf-8")
+    (refs / "escape.md").symlink_to(secret)
+
+    # Skill whose references/ directory is itself a symlink.
+    sym_refs_skill = fake_root / "skills" / "sym-refs-skill"
+    sym_refs_skill.mkdir(parents=True)
+    (sym_refs_skill / "SKILL.md").write_text("# SymRefs\n", encoding="utf-8")
+    ext_refs = tmp_path / "external-refs"
+    ext_refs.mkdir()
+    (ext_refs / "outside.md").write_text("outside\n", encoding="utf-8")
+    (sym_refs_skill / "references").symlink_to(ext_refs)
+
+    # Symlinked skill directory and skill with symlinked SKILL.md must be skipped.
+    ext_skill = tmp_path / "external-skill"
+    ext_skill.mkdir()
+    (ext_skill / "SKILL.md").write_text("# External\n", encoding="utf-8")
+    (fake_root / "skills" / "sym-skill-dir").symlink_to(ext_skill)
+
+    sym_skill_file = fake_root / "skills" / "sym-skill-file"
+    sym_skill_file.mkdir(parents=True)
+    (sym_skill_file / "SKILL.md").symlink_to(secret)
+
+    # Flat skill and attestations/manifest that must not be bundled.
+    flat_skill = fake_root / "skills" / "flat-skill"
+    flat_skill.mkdir(parents=True)
+    (flat_skill / "SKILL.md").write_text("# Flat\n", encoding="utf-8")
+    (fake_root / "skills" / ".attestations" / "governance-lifecycle").mkdir(parents=True)
+    (fake_root / "skills" / ".attestations" / "governance-lifecycle" / "a.json").write_text("{}\n")
+    (fake_root / "skills" / "SKILLS_MANIFEST.sha256").write_text("# manifest\n")
+
+    monkeypatch.setattr(module, "ROOT", fake_root)
+    package = tmp_path / "out"
+    archive = tmp_path / "out.zip"
+    module.build(
+        package,
+        app_id="plugin_asdk_app_example123",
+        server_url=None,
+        archive=archive,
+    )
+    stderr = capsys.readouterr().err
+
+    assert (package / "skills" / "governance-lifecycle" / "references" / "recovery.md").read_text(
+        encoding="utf-8"
+    ) == "# Recovery\n"
+    assert not (package / "skills" / "governance-lifecycle" / "references" / "notes.txt").exists()
+    assert not (package / "skills" / "governance-lifecycle" / "references" / "escape.md").exists()
+    assert not (package / "skills" / "governance-lifecycle" / "references" / "nested").exists()
+    assert not (package / "skills" / "sym-refs-skill" / "references").exists()
+    assert not (package / "skills" / "sym-skill-dir").exists()
+    assert not (package / "skills" / "sym-skill-file").exists()
+    assert not (package / "skills" / "setup-unitares" / "leak.md").exists()
+    assert not (package / "skills" / "flat-skill" / "references").exists()
+    assert not (package / "skills" / ".attestations").exists()
+    assert not (package / "skills" / "SKILLS_MANIFEST.sha256").exists()
+    assert "warning: skipping unsupported skill reference entry" in stderr
+    assert "warning: skipping non-directory or symlinked references path" in stderr
+
+    with zipfile.ZipFile(archive) as bundle:
+        names = set(bundle.namelist())
+    assert "skills/governance-lifecycle/references/recovery.md" in names
+    assert "skills/governance-lifecycle/references/escape.md" not in names
+    assert "skills/governance-lifecycle/references/notes.txt" not in names
+    assert "skills/setup-unitares/leak.md" not in names
