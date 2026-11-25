@@ -137,6 +137,7 @@ def test_session_start_helper_writes_and_respects_existing(tmp_path: Path) -> No
     cache_dir = tmp_path / ".unitares"
     cache_dir.mkdir()
     script = (
+        f"PLUGIN_ROOT='{SCRIPT.parents[1]}'\n"
         f"eval \"$(sed -n '/^ensure_workspace_cache_ignored()/,/^}}/p' '{hook}')\"\n"
         f"ensure_workspace_cache_ignored '{cache_dir}'\n"
     )
@@ -170,6 +171,7 @@ def test_session_start_helper_skips_the_home_mirror(tmp_path: Path) -> None:
     home = tmp_path / "home"
     (home / ".unitares").mkdir(parents=True)
     script = (
+        f"PLUGIN_ROOT='{SCRIPT.parents[1]}'\n"
         f"eval \"$(sed -n '/^ensure_workspace_cache_ignored()/,/^}}/p' '{hook}')\"\n"
         f"ensure_workspace_cache_ignored '{home}/.unitares'\n"
     )
@@ -198,8 +200,90 @@ def test_session_start_helper_skips_the_home_mirror_through_a_symlink(tmp_path: 
     link_home = tmp_path / "link-home"
     link_home.symlink_to(real_home)
     script = (
+        f"PLUGIN_ROOT='{SCRIPT.parents[1]}'\n"
         f"eval \"$(sed -n '/^ensure_workspace_cache_ignored()/,/^}}/p' '{hook}')\"\n"
         f"ensure_workspace_cache_ignored '{real_home}/.unitares'\n"
     )
     subprocess.run(["bash", "-c", script], check=True, env={**os.environ, "HOME": str(link_home)})
     assert not (real_home / ".unitares" / ".gitignore").exists()
+
+
+def _cli_module():
+    import importlib
+    scripts = str(SCRIPT.parent)
+    if scripts not in sys.path:
+        sys.path.insert(0, scripts)
+    return importlib.import_module("session_cache")
+
+
+def test_shared_atomic_write_ignores_its_directory(tmp_path: Path, monkeypatch) -> None:
+    # The shared writer itself, not just the helper: removing its call fails this.
+    io = _io_module()
+    monkeypatch.setenv("HOME", str(tmp_path / "h"))
+    cache = tmp_path / "proj" / ".unitares" / "session-s1.json"
+    io.write_json_dict_unlocked(cache, {"uuid": "x"})
+    assert (cache.parent / ".gitignore").read_text().splitlines()[-1] == "*"
+
+
+def test_shared_lock_alone_ignores_its_directory(tmp_path: Path, monkeypatch) -> None:
+    io = _io_module()
+    monkeypatch.setenv("HOME", str(tmp_path / "h"))
+    cache = tmp_path / "proj" / ".unitares" / "session-s1.json"
+    with io.session_cache_lock(cache):
+        pass
+    assert (cache.parent / ".gitignore").exists()
+    assert not cache.exists()
+
+
+def test_cli_lock_alone_ignores_its_directory(tmp_path: Path, monkeypatch) -> None:
+    sc = _cli_module()
+    monkeypatch.setenv("HOME", str(tmp_path / "h"))
+    cache = tmp_path / "proj" / ".unitares" / "last-milestone.json"
+    with sc._cache_lock(cache, timeout_s=1.0, label="test"):
+        pass
+    assert (cache.parent / ".gitignore").exists()
+    assert not cache.exists()
+
+
+def test_symlinked_ignore_to_a_device_is_left_alone(tmp_path: Path) -> None:
+    # A symlink (here to /dev/null) already holds the name: nothing is written
+    # through it and nothing replaces it.
+    io = _io_module()
+    cache_dir = tmp_path / ".unitares"
+    cache_dir.mkdir()
+    (cache_dir / ".gitignore").symlink_to("/dev/null")
+    io.ensure_cache_dir_ignored(cache_dir)
+    assert os.readlink(cache_dir / ".gitignore") == "/dev/null"
+
+
+def test_failed_publish_leaves_no_partial_or_temporary_file(tmp_path: Path, monkeypatch) -> None:
+    io = _io_module()
+    cache_dir = tmp_path / ".unitares"
+    cache_dir.mkdir()
+
+    def refuse(*_args, **_kwargs):
+        raise OSError("link refused")
+
+    monkeypatch.setattr(io.os, "link", refuse)
+    io.ensure_cache_dir_ignored(cache_dir)  # must not raise
+    assert list(cache_dir.iterdir()) == []
+
+
+def test_symlinked_home_mirror_directory_is_skipped(tmp_path: Path) -> None:
+    # ~/.unitares itself a symlink elsewhere: the hook (through the shared
+    # helper) compares the resolved mirror, so the target gets no .gitignore.
+    hook = SCRIPT.parents[1] / "hooks" / "session-start"
+    home = tmp_path / "home"
+    home.mkdir()
+    # Named .unitares so only the resolved-path comparison can skip it.
+    storage = tmp_path / "storage" / ".unitares"
+    storage.mkdir(parents=True)
+    (home / ".unitares").symlink_to(storage)
+    script = (
+        f"PLUGIN_ROOT='{SCRIPT.parents[1]}'\n"
+        f"eval \"$(sed -n '/^ensure_workspace_cache_ignored()/,/^}}/p' '{hook}')\"\n"
+        f"ensure_workspace_cache_ignored '{storage}'\n"
+        f"ensure_workspace_cache_ignored '{home}/.unitares'\n"
+    )
+    subprocess.run(["bash", "-c", script], check=True, env={**os.environ, "HOME": str(home)})
+    assert not (storage / ".gitignore").exists()

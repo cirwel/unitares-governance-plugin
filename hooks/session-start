@@ -1279,16 +1279,11 @@ ESCAPED_CONTEXT="$(escape_for_json "${CONTEXT}")"
 # commits without asking anyone to edit their own ignore files. An existing
 # file is never replaced.
 ensure_workspace_cache_ignored() {
-  local dir="$1"
-  [[ -d "${dir}" ]] || return 0
-  local real_dir real_home
-  real_dir="$(cd "${dir}" 2>/dev/null && pwd -P)" || return 0
-  real_home="$(cd "${HOME}" 2>/dev/null && pwd -P)" || real_home=""
-  [[ -z "${real_home}" || "${real_dir}" != "${real_home}/.unitares" ]] || return 0
-  [[ ! -e "${dir}/.gitignore" && ! -L "${dir}/.gitignore" ]] || return 0
-  ( set -o noclobber
-    printf '# Written by the UNITARES plugin: these session caches stay out of git.\n*\n' \
-      >"${dir}/.gitignore" ) 2>/dev/null || true
+  # One implementation for every writer: the Python helper publishes the file
+  # with an exclusive link(), so a symlink, FIFO or partial file is never
+  # written through or left behind, and it skips the resolved home mirror.
+  python3 "${PLUGIN_ROOT}/scripts/_session_cache_io.py" ensure-ignored "$1" \
+    </dev/null >/dev/null 2>&1 || true
 }
 
 # Persist delivery state only after stdout accepts the serialized response. If

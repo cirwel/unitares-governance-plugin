@@ -41,22 +41,33 @@ def ensure_cache_dir_ignored(directory: Path) -> None:
     Only a directory named ``.unitares`` that is not ``~/.unitares`` (the
     home mirror, outside any project) gets one. The caches here carry the session's ``client_session_id``; without this a
     routine ``git add -A`` in the user's project commits them. Never replaces
-    an existing file and never follows a symlink. Best effort: a failure
-    leaves the cache write itself unaffected.
+    an existing file, never follows a symlink and never leaves a partial file.
+    Best effort: any failure leaves the cache write itself unaffected.
     """
-    if directory.name != _CACHE_DIR_NAME:
-        return
-    if os.path.realpath(directory) == os.path.realpath(Path.home() / _CACHE_DIR_NAME):
-        return
-    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
-        fd = os.open(str(directory / ".gitignore"), flags, 0o644)
-    except OSError:
+        if directory.name != _CACHE_DIR_NAME:
+            return
+        if os.path.realpath(directory) == os.path.realpath(Path.home() / _CACHE_DIR_NAME):
+            return
+        target = os.path.join(directory, ".gitignore")
+        if os.path.lexists(target):
+            return
+        # Write the whole file under a temporary name, then publish it with
+        # link(): it fails if anything (a file, a symlink, a FIFO) already has
+        # the name, never follows one, and never leaves a partial file there.
+        fd, tmp = tempfile.mkstemp(dir=str(directory), prefix=".gitignore.", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(_CACHE_IGNORE)
+            os.chmod(tmp, 0o644)
+            os.link(tmp, target)
+        finally:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+    except Exception:
         return
-    try:
-        os.write(fd, _CACHE_IGNORE)
-    finally:
-        os.close(fd)
 
 
 def _atomic_write_bytes(path: Path, data: bytes) -> None:
@@ -588,3 +599,13 @@ def clear_session_cache(path: Path, *, home_path: Path | None = None) -> None:
                 pass
         advance_cache_generation_unlocked(path)
         path.unlink(missing_ok=True)
+
+
+if __name__ == "__main__":
+    # `python3 _session_cache_io.py ensure-ignored <dir>`: the SessionStart
+    # hook's entry to ensure_cache_dir_ignored, so bash shares one
+    # implementation instead of redirecting into the path itself.
+    import sys
+
+    if len(sys.argv) == 3 and sys.argv[1] == "ensure-ignored":
+        ensure_cache_dir_ignored(Path(sys.argv[2]))

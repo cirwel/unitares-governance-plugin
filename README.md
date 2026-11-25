@@ -34,7 +34,9 @@ reset `PATH` to `/usr/bin:/bin:/usr/sbin:/sbin` so a workspace directory can
 never supply an interpreter, which means a Python installed elsewhere (Homebrew,
 pyenv) is not the one they run. On macOS that is the Command Line Tools Python:
 if `/usr/bin/python3 --version` fails, run `xcode-select --install`. Windows
-also requires Git Bash from Git for Windows.
+also requires Git Bash from Git for Windows, and hooks run inside it with the
+same reset `PATH`: a Python from the standard Windows installer is outside it,
+so hooks find no `python3` unless one is reachable from Git Bash's `/usr/bin`.
 
 For a new server, follow the [verified-release Docker quickstart](https://github.com/cirwel/unitares/blob/master/docs/manual/02-install.md#21-docker-quickstart).
 The local stack exposes MCP at `http://localhost:8767/mcp/` and the dashboard
@@ -71,9 +73,12 @@ export UNITARES_SERVER_URL=http://127.0.0.1:18767    # no /mcp/ suffix
 export LEASE_PLANE_BASE_URL=http://127.0.0.1:18788
 ```
 
-Hooks keep small session caches in `.unitares/` in your project. The plugin
-gives that directory its own `.gitignore`, so the caches, which carry the
-session's `client_session_id`, stay out of your commits.
+Hooks keep small session caches in `.unitares/` in your project; they carry
+the session's `client_session_id`. When the plugin creates that directory it
+also writes `.unitares/.gitignore` (`*`), so new caches stay out of your
+commits. It never replaces a `.gitignore` already there, and an ignore rule
+does not untrack files you committed before, so check `git status` if
+`.unitares/` already existed.
 
 ### Codex
 

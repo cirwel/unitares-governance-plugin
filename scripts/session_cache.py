@@ -130,19 +130,30 @@ def _ensure_cache_dir_ignored(directory: Path) -> None:
     with the twin in ``_session_cache_io.py`` (this module stays
     dependency-free).
     """
-    if directory.name != CACHE_DIR:
-        return
-    if os.path.realpath(directory) == os.path.realpath(Path.home() / CACHE_DIR):
-        return
-    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
-        fd = os.open(str(directory / ".gitignore"), flags, 0o644)
-    except OSError:
+        if directory.name != CACHE_DIR:
+            return
+        if os.path.realpath(directory) == os.path.realpath(Path.home() / CACHE_DIR):
+            return
+        target = os.path.join(directory, ".gitignore")
+        if os.path.lexists(target):
+            return
+        # Write the whole file under a temporary name, then publish it with
+        # link(): it fails if anything (a file, a symlink, a FIFO) already has
+        # the name, never follows one, and never leaves a partial file there.
+        fd, tmp = tempfile.mkstemp(dir=str(directory), prefix=".gitignore.", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(_CACHE_IGNORE)
+            os.chmod(tmp, 0o644)
+            os.link(tmp, target)
+        finally:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+    except Exception:
         return
-    try:
-        os.write(fd, _CACHE_IGNORE)
-    finally:
-        os.close(fd)
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
