@@ -843,10 +843,12 @@ def test_agy_hooks_manifest_matches_antigravity_schema_and_avoids_local_paths():
     assert isinstance(entry["SessionStart"], list) and len(entry["SessionStart"]) == 1
     assert "post-stop --host agy --session-start" in entry["SessionStart"][0]["command"]
 
-    # PreToolUse is grouped with matcher == "call_mcp_tool"
+    # PreToolUse is grouped under the anchored matcher the helper derives
     assert isinstance(entry["PreToolUse"], list) and len(entry["PreToolUse"]) == 1
     pre = entry["PreToolUse"][0]
-    assert pre["matcher"] == "call_mcp_tool"
+    from governance_call_inject import agy_pre_tool_use_matcher
+
+    assert pre["matcher"] == agy_pre_tool_use_matcher()
     assert "pre-governance-call --host agy" in pre["hooks"][0]["command"]
 
     # Stop is flat list of handler objects
@@ -1007,8 +1009,9 @@ def test_advisory_review_script_help_dry_run_and_cli_invocation(tmp_path):
 
     # agy shim advertising --mode + --sandbox runs with full read-only flags
     agy_argv_file = tmp_path / "agy_argv.txt"
+    agy_home_file = tmp_path / "agy_home.txt"
     agy_shim.write_text(
-        f"#!/usr/bin/env bash\nif [[ \"${{1:-}}\" == \"--help\" ]]; then echo 'flags: --mode --sandbox'; exit 0; fi\nprintf '%s\\n' \"$@\" > {str(agy_argv_file)!r}\ncat >/dev/null\necho 'CLEAN'\n",
+        f"#!/usr/bin/env bash\nif [[ \"${{1:-}}\" == \"--help\" ]]; then echo 'flags: --mode --sandbox'; exit 0; fi\nprintf '%s\\0' \"$@\" > {str(agy_argv_file)!r}\nprintf '%s' \"$HOME\" > {str(agy_home_file)!r}\ncat >/dev/null\necho 'CLEAN'\n",
         encoding="utf-8",
     )
     res_agy_safe = subprocess.run(
@@ -1027,9 +1030,19 @@ def test_advisory_review_script_help_dry_run_and_cli_invocation(tmp_path):
         check=False,
     )
     assert res_agy_safe.returncode == 0
-    agy_argv = agy_argv_file.read_text(encoding="utf-8").splitlines()
-    for tok in ("-p", "--mode", "plan", "--sandbox", "--disable-slash-commands"):
-        assert tok in agy_argv
+    agy_argv = agy_argv_file.read_text(encoding="utf-8").split("\0")[:-1]
+    # The prompt rides on -p= itself: agy 1.5.16 reads a bare `-p --mode`
+    # as the prompt "--mode" and ignores the real one.
+    assert agy_argv[0].startswith("-p=Review this unitares-governance-plugin diff")
+    assert "=== git diff" in agy_argv[0]
+    assert "-p" not in agy_argv
+    assert agy_argv[1:4] == ["--mode", "plan", "--sandbox"]
+    # It turns plan mode off, so it must not come back.
+    assert "--disable-slash-commands" not in agy_argv
+    # The reviewer never sees the caller's HOME (its ~/.gemini grants and hooks).
+    agy_home = agy_home_file.read_text(encoding="utf-8")
+    assert agy_home and agy_home != str(tmp_path)
+    assert not Path(agy_home).exists()  # temporary HOME is removed afterwards
 
     # gemini shim lacking read-only flags in --help fails closed with exit 2
     gem_unsafe = shim_dir / "gemini"
@@ -1424,7 +1437,7 @@ def test_install_agy_hooks_merges_into_user_hooks_json_without_claude_collision(
     resolved_root = str(PLUGIN_ROOT.resolve())
     assert resolved_root in ug["SessionStart"][0]["command"]
     assert "${PLUGIN_ROOT" not in ug["SessionStart"][0]["command"]
-    assert ug["PreToolUse"][0]["matcher"] == "call_mcp_tool"
+    assert ug["PreToolUse"][0]["matcher"] == pre_manifest_matcher()
     assert resolved_root in ug["PreToolUse"][0]["hooks"][0]["command"]
     assert resolved_root in ug["Stop"][0]["command"]
     assert "UNITARES_AUTO_ONBOARD=" not in ug["Stop"][0]["command"]
@@ -1791,3 +1804,263 @@ def test_live_slot_denies_mismatched_parent_agent_id_and_non_session_proof_and_l
     )
     assert out_direct["decision"] == "allow"
     assert out_direct["overwrite"]["client_session_id"] == CSID_A
+
+
+# ---------------------------------------------------------------------------
+# 6. Antigravity decision contract (#445)
+# ---------------------------------------------------------------------------
+#
+# Antigravity's hook reference documents `allow` as deferring to the next hook
+# or the default policy, and `auto_approve` as the value that skips a prompt.
+# The agy path must only ever print `allow`, `allow` + `overwrite`, or `deny`.
+
+_AGY_ALLOWED_DECISIONS = {"allow", "deny"}
+_AGY_FORBIDDEN_KEYS = {"permissionOverrides", "permissionDecision", "hookSpecificOutput"}
+
+
+def _assert_agy_contract(out: dict) -> None:
+    assert isinstance(out, dict), out
+    assert out.get("decision") in _AGY_ALLOWED_DECISIONS, out
+    assert not (_AGY_FORBIDDEN_KEYS & set(out)), out
+    if out["decision"] == "deny":
+        assert set(out) == {"decision", "reason"}, out
+        assert isinstance(out["reason"], str) and out["reason"], out
+    else:
+        assert set(out) <= {"decision", "overwrite"}, out
+        if "overwrite" in out:
+            assert isinstance(out["overwrite"], dict) and out["overwrite"], out
+
+
+def test_agy_pre_tool_use_never_emits_auto_approve_or_permission_overrides(tmp_path):
+    home_dir = tmp_path / "home"
+    conv_id = "agy-conv-contract"
+    _write_slot_cache(home_dir, conv_id, uuid=UUID_A, csid=CSID_A)
+
+    def mcp(server: str, tool: str, arguments: object) -> dict:
+        return _agy_pre_tool_payload(
+            conv_id,
+            args={"ServerName": server, "ToolName": tool, "Arguments": arguments},
+        )
+
+    payloads: list[dict | str] = [
+        "",
+        "not json",
+        "[]",
+        "{}",
+        json.dumps({"toolCall": "not-a-dict"}),
+        _agy_pre_tool_payload(conv_id, tool_name="run_command", args={"CommandLine": "ls"}),
+        mcp("github", "create_issue", {"title": "x"}),
+        mcp("unitares-governance-shadow", "start_session", {"force_new": True}),
+        mcp("unitares-governance", "sync_state", {"response_text": "ok"}),
+        mcp("unitares-governance", "sync_state", json.dumps({"response_text": "ok"})),
+        mcp("unitares-governance", "sync_state", {"client_session_id": CSID_A}),
+        mcp("unitares-governance", "sync_state", {"client_session_id": CSID_B}),
+        mcp("unitares-governance", "start_session", {}),
+        mcp("unitares-governance", "start_session", "{not json"),
+        mcp("unitares-governance", "identity", {}),
+        mcp("unitares-governance", "unknown_tool", {"x": 1}),
+        mcp("unitares-governance", "use_tool", {"tool_name": "start_session", "arguments": {}}),
+        mcp("unitares-governance", "use_tool", {"tool_name": "start_session", "arguments": "{bad"}),
+        mcp("unitares-governance", "use_tool", {"tool_name": "sync_state", "arguments": {}}),
+        _agy_pre_tool_payload(
+            conv_id, tool_name="mcp_unitares-governance_sync_state", args={"response_text": "d"}
+        ),
+        _agy_pre_tool_payload(
+            conv_id, tool_name="mcp_unitares-governance_start_session", args={}
+        ),
+    ]
+    seen: set[str] = set()
+    for payload in payloads:
+        for via_hook in (False, True):
+            out = _run_inject_agy(payload, home_dir=home_dir, via_hook=via_hook)
+            _assert_agy_contract(out)
+            seen.add("overwrite" if "overwrite" in out else out["decision"])
+    # The sweep must reach every response shape, or it proves nothing.
+    assert seen == {"allow", "overwrite", "deny"}, seen
+
+    # The rewrite keeps every unrelated argument (overwrite is a shallow merge
+    # into toolCall.args, so Arguments is replaced wholesale).
+    rewrite = _run_inject_agy(
+        mcp("unitares-governance", "sync_state", {"response_text": "r", "complexity": 0.2}),
+        home_dir=home_dir,
+    )
+    assert rewrite["overwrite"]["Arguments"] == {
+        "response_text": "r",
+        "complexity": 0.2,
+        "client_session_id": CSID_A,
+    }
+
+
+@pytest.mark.parametrize("helper", ["missing", "silent", "crash"])
+def test_agy_wrapper_fallback_prints_plain_allow(tmp_path, helper):
+    """The shell wrapper prints `allow` itself when the helper gives nothing."""
+    root = tmp_path / "plugin"
+    (root / "hooks").mkdir(parents=True)
+    (root / "scripts").mkdir()
+    wrapper = root / "hooks" / "pre-governance-call"
+    wrapper.write_text(
+        (PLUGIN_ROOT / "hooks" / "pre-governance-call").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    wrapper.chmod(0o755)
+    helper_path = root / "scripts" / "governance_call_inject.py"
+    if helper == "silent":
+        helper_path.write_text("", encoding="utf-8")
+    elif helper == "crash":
+        helper_path.write_text("raise SystemExit(3)\n", encoding="utf-8")
+
+    # On a bound slot the real helper denies a bare start_session, so plain
+    # `allow` here can only come from the wrapper's own fallback.
+    home_dir = tmp_path / "home"
+    conv_id = "agy-conv-wrapper"
+    _write_slot_cache(home_dir, conv_id, uuid=UUID_A, csid=CSID_A)
+    payload = _agy_pre_tool_payload(
+        conv_id,
+        args={"ServerName": "unitares-governance", "ToolName": "start_session", "Arguments": {}},
+    )
+    real = _run_inject_agy(payload, home_dir=home_dir, via_hook=True)
+    assert real["decision"] == "deny", real
+    res = subprocess.run(
+        [str(wrapper), "--host", "agy"],
+        input=json.dumps(payload),
+        env={"PATH": "/usr/bin:/bin:/usr/local/bin", "HOME": str(home_dir)},
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+    assert res.returncode == 0, res.stderr
+    out = json.loads(res.stdout)
+    assert out == {"decision": "allow"}
+    _assert_agy_contract(out)
+
+
+def pre_manifest_matcher() -> str:
+    manifest = json.loads((PLUGIN_ROOT / "hooks" / "agy-hooks.json").read_text(encoding="utf-8"))
+    return manifest["unitares-governance"]["PreToolUse"][0]["matcher"]
+
+
+# ---------------------------------------------------------------------------
+# 7. Eager MCP dispatch coverage and unreadable identity Arguments (#445)
+# ---------------------------------------------------------------------------
+
+
+def test_agy_matcher_covers_eager_governance_names_and_rejects_lookalikes():
+    import re
+
+    from governance_call_inject import (
+        ANCHORED_MINT_SUFFIXES,
+        IDENTITY_ASSERT_SUFFIXES,
+        INJECT_SUFFIXES,
+        _agy_direct_mcp_suffix,
+        agy_pre_tool_use_matcher,
+    )
+    from governance_tool_name import governance_server_aliases
+
+    matcher = pre_manifest_matcher()
+    assert matcher == agy_pre_tool_use_matcher()
+    assert "\\" not in matcher  # plain characters only
+    pattern = re.compile(matcher)
+    handled = INJECT_SUFFIXES | ANCHORED_MINT_SUFFIXES | IDENTITY_ASSERT_SUFFIXES
+
+    assert pattern.search("call_mcp_tool")
+    # Every eager name the matcher admits resolves, in the helper, to the
+    # same handled suffix: the manifest and the handler agree.
+    for server in governance_server_aliases("agy"):
+        for suffix in handled:
+            name = f"mcp_{server}_{suffix}"
+            assert pattern.search(name), name
+            assert _agy_direct_mcp_suffix(name) == suffix, name
+
+    for name in (
+        "run_command",
+        "xcall_mcp_tool",
+        "call_mcp_tool_x",
+        "mcp_github_create_issue",
+        "mcp_anima_get_state",
+        "mcp_unitares-governance-shadow_sync_state",
+        "mcp_unitares-governance_sync_statex",
+        "mcp_unitares-governance_delete_everything",
+        "mcp__unitares-governance__sync_state",
+        "xmcp_unitares-governance_sync_state",
+    ):
+        assert not pattern.search(name), name
+
+
+def test_agy_eager_mint_on_bound_slot_is_denied(tmp_path):
+    home_dir = tmp_path / "home"
+    conv_id = "agy-conv-eager"
+    _write_slot_cache(home_dir, conv_id, uuid=UUID_A, csid=CSID_A)
+    out = _run_inject_agy(
+        _agy_pre_tool_payload(
+            conv_id, tool_name="mcp_unitares-governance_start_session", args={}
+        ),
+        home_dir=home_dir,
+        via_hook=True,
+    )
+    assert out["decision"] == "deny", out
+
+
+@pytest.mark.parametrize("tool", ["start_session", "onboard", "identity", "use_tool"])
+@pytest.mark.parametrize("arguments", ["{not json", "[1, 2]", "42", ["list"]])
+@pytest.mark.parametrize("bound", [True, False])
+def test_agy_unreadable_identity_arguments_are_denied(tmp_path, tool, arguments, bound):
+    home_dir = tmp_path / "home"
+    conv_id = "agy-conv-unreadable"
+    if bound:
+        _write_slot_cache(home_dir, conv_id, uuid=UUID_A, csid=CSID_A)
+    out = _run_inject_agy(
+        _agy_pre_tool_payload(
+            conv_id,
+            args={"ServerName": "unitares-governance", "ToolName": tool, "Arguments": arguments},
+        ),
+        home_dir=home_dir,
+        via_hook=True,
+    )
+    assert out["decision"] == "deny", out
+    assert "unreadable Arguments" in out["reason"]
+    _assert_agy_contract(out)
+
+
+def test_agy_unreadable_arguments_keep_neutral_path_off_identity(tmp_path):
+    home_dir = tmp_path / "home"
+    conv_id = "agy-conv-unreadable-neutral"
+    _write_slot_cache(home_dir, conv_id, uuid=UUID_A, csid=CSID_A)
+    for server, tool in (
+        ("unitares-governance", "sync_state"),
+        ("unitares-governance", "unknown_tool"),
+        ("github", "start_session"),
+        ("unitares-governance-shadow", "start_session"),
+    ):
+        out = _run_inject_agy(
+            _agy_pre_tool_payload(
+                conv_id,
+                args={"ServerName": server, "ToolName": tool, "Arguments": "{not json"},
+            ),
+            home_dir=home_dir,
+        )
+        assert out == {"decision": "allow"}, (server, tool, out)
+
+
+def test_agy_json_null_arguments_behave_like_absent_arguments(tmp_path):
+    home_dir = tmp_path / "home"
+    conv_id = "agy-conv-null-args"
+    unbound = _run_inject_agy(
+        _agy_pre_tool_payload(
+            conv_id,
+            args={"ServerName": "unitares-governance", "ToolName": "start_session", "Arguments": "null"},
+        ),
+        home_dir=home_dir,
+    )
+    _assert_agy_contract(unbound)
+    assert unbound["decision"] == "allow", unbound
+
+    _write_slot_cache(home_dir, conv_id, uuid=UUID_A, csid=CSID_A)
+    bound = _run_inject_agy(
+        _agy_pre_tool_payload(
+            conv_id,
+            args={"ServerName": "unitares-governance", "ToolName": "start_session", "Arguments": "null"},
+        ),
+        home_dir=home_dir,
+    )
+    assert bound["decision"] == "deny", bound
