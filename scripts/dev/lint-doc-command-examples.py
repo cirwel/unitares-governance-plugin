@@ -44,6 +44,9 @@ PARSERS = {
     "scripts/reconstruct_predecessor.py": lambda: _load_script_parser(
         "scripts/reconstruct_predecessor.py", "reconstruct_predecessor_for_lint"
     ),
+    "scripts/doctor.py": lambda: _load_script_parser(
+        "scripts/doctor.py", "doctor_for_lint"
+    ),
 }
 
 

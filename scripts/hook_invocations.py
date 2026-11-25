@@ -266,11 +266,11 @@ def _load(path: Path) -> list[dict[str, Any]]:
     return records
 
 
-def report(path: Path, *, json_output: bool) -> int:
+def summarize(path: Path) -> dict[str, Any] | None:
+    """Summarize observed schema-1 hook receipts for a single session log."""
     records = _load(path)
     if not records:
-        print("No Codex plugin hook invocations were observed for this session.")
-        return 1
+        return None
     starts = {r["invocation"]: r for r in records if r.get("phase") == "start" and r.get("invocation")}
     ends = {r["invocation"]: r for r in records if r.get("phase") == "end" and r.get("invocation")}
     counts: Counter[str] = Counter()
@@ -289,13 +289,21 @@ def report(path: Path, *, json_output: bool) -> int:
             f"{start.get('version', 'unknown')} "
             f"(definition {start.get('definition', 'unknown')}, code {start.get('code', 'unknown')})"
         )
-    summary = {
+    return {
         "session": path.stem.removeprefix("codex-"),
         "versions": sorted(versions),
         "counts": {name: counts[name] for name in ("fired", *RESULTS)},
         "hooks": {hook: dict(by_hook[hook]) for hook in sorted(by_hook)},
         "limits": "Only plugin hooks whose reporting runner started are observed. Skipped means an explicit hook no-op; Codex trust or matcher skips cannot be counted. Incomplete means no end was recorded yet; an active hook, host timeout, and crash are indistinguishable.",
     }
+
+
+def report(path: Path, *, json_output: bool) -> int:
+    summary = summarize(path)
+    if summary is None:
+        print("No Codex plugin hook invocations were observed for this session.")
+        return 1
+    counts = summary["counts"]
     if json_output:
         print(json.dumps(summary, indent=2, sort_keys=True))
     else:
@@ -303,7 +311,7 @@ def report(path: Path, *, json_output: bool) -> int:
         print("Plugin version / hook definition / direct code: " + ", ".join(summary["versions"]))
         print("  " + "  ".join(f"{name}={counts[name]}" for name in ("fired", *RESULTS)))
         for hook, hook_counts in summary["hooks"].items():
-            detail = ", ".join(f"{name}={hook_counts[name]}" for name in RESULTS if hook_counts[name])
+            detail = ", ".join(f"{name}={hook_counts[name]}" for name in RESULTS if hook_counts.get(name))
             print(f"  {hook}: {detail}")
         print(summary["limits"])
     return 0
