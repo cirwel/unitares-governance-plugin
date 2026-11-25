@@ -111,25 +111,6 @@ def _check(
     return item
 
 
-@contextmanager
-def _temp_env(overrides: dict[str, str | None]) -> Iterator[None]:
-    saved: dict[str, str | None] = {}
-    for key, val in overrides.items():
-        saved[key] = os.environ.get(key)
-        if val is None:
-            os.environ.pop(key, None)
-        else:
-            os.environ[key] = val
-    try:
-        yield
-    finally:
-        for key, prev in saved.items():
-            if prev is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = prev
-
-
 def check_system_python(*, python_path: Path | None = None) -> dict[str, Any]:
     if os.name == "nt" and python_path is None:
         return _check(
@@ -349,6 +330,14 @@ def check_server_health(
             detail={"url": safe_url},
             fix="Pass a full http://localhost:<port> or https://<host> URL.",
         )
+    if parsed.username is not None or parsed.password is not None:
+        return _check(
+            "server_health",
+            "fail",
+            f"invalid server URL ({safe_url}): URL must not contain embedded userinfo",
+            detail={"url": safe_url},
+            fix="Remove embedded credentials (`user:pass@`) from UNITARES_SERVER_URL.",
+        )
     normalized_path = _strip_mcp_suffix(parsed.path)
     base_no_query = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, normalized_path, "", ""))
     health_url = f"{base_no_query}/health"
@@ -428,6 +417,46 @@ def check_server_health(
     return _check("server_health", status, ", ".join(parts), detail=detail)
 
 
+@contextmanager
+def _isolated_env(overrides: dict[str, str | None]) -> Iterator[None]:
+    """Apply env overrides and restore the full process environment on exit.
+
+    Prevents lazy ``secrets.env`` loading inside ``file_lease_hook`` from
+    mutating ``os.environ`` for subsequent in-process callers or tests.
+    """
+    saved = os.environ.copy()
+    for key, val in overrides.items():
+        if val is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = val
+    try:
+        yield
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
+
+
+def _required_lease_fix(reason: str, url: str) -> str:
+    if reason == "bearer_rejected":
+        return f"Lease plane at {url} rejected the bearer; update LEASE_PLANE_BEARER_TOKEN to match the running service."
+    if reason == "no_bearer":
+        return f"Configure LEASE_PLANE_BEARER_TOKEN for {url} (required mode denies edits without a valid bearer)."
+    if reason == "insecure_transport":
+        if url.startswith("unix://"):
+            return "Ensure the Unix socket is a non-symlink AF_UNIX socket owned by the current user with 0600 permissions."
+        return (
+            "Use HTTPS or UNITARES_LEASE_PLANE_UNIX_SOCKET, or set "
+            "UNITARES_ALLOW_INSECURE_LOOPBACK_LEASE_HTTP=1 for local loopback development."
+        )
+    if reason == "not_a_lease_plane":
+        return f"Point LEASE_PLANE_BASE_URL at a v1 UNITARES lease plane ({url} did not answer as one)."
+    return (
+        f"Start or restore the UNITARES lease plane at {url} "
+        "(UNITARES_FILE_LEASES_REQUIRED=1 is fail-closed and overrides UNITARES_FILE_LEASES_ENABLED=0)."
+    )
+
+
 def check_lease_plane(
     lease_url: str | None,
     *,
@@ -435,16 +464,16 @@ def check_lease_plane(
     no_network: bool,
 ) -> dict[str, Any]:
     clamped = _clamp_timeout(timeout)
-    # Load secrets.env first so UNITARES_FILE_LEASES_REQUIRED and any default
-    # socket/URL settings are visible before applying explicit --lease-url overrides.
-    file_lease_hook._load_env_file()
+    # Mirror file_lease_hook's exact policy order: read REQUIRED from process env
+    # before any lazy secrets.env load, and use empty-string overrides for explicit
+    # --lease-url so _load_env_file() does not repopulate socket/URL keys.
     required = _is_truthy(os.environ.get("UNITARES_FILE_LEASES_REQUIRED"))
     overrides: dict[str, str | None] = {}
     if lease_url:
         overrides["LEASE_PLANE_BASE_URL"] = lease_url.strip().rstrip("/")
         overrides["UNITARES_LEASE_PLANE_URL"] = ""
         overrides["UNITARES_LEASE_PLANE_UNIX_SOCKET"] = ""
-    with _temp_env(overrides):
+    with _isolated_env(overrides):
         effective_raw = file_lease_hook._base_url()
         safe_url = _redact_url(effective_raw)
         if no_network:
@@ -483,11 +512,14 @@ def check_lease_plane(
         if required
         else "fail-open: edits proceed without cross-agent file leases"
     )
-    sanitized_result = dict(result)
-    sanitized_result["url"] = reported_url
-    fix = file_lease_hook._status_line(sanitized_result) or (
-        "Start the lease plane or check LEASE_PLANE_BASE_URL and LEASE_PLANE_BEARER_TOKEN."
-    )
+    if required:
+        fix = _required_lease_fix(reason, reported_url)
+    else:
+        sanitized_result = dict(result)
+        sanitized_result["url"] = reported_url
+        fix = file_lease_hook._status_line(sanitized_result) or (
+            "Start the lease plane or check LEASE_PLANE_BASE_URL and LEASE_PLANE_BEARER_TOKEN."
+        )
     return _check(
         "lease_plane",
         status,
@@ -504,13 +536,18 @@ def _gitignore_ignores_cache(gitignore: Path) -> bool:
         lines = gitignore.read_text(encoding="utf-8").splitlines()
     except (OSError, UnicodeError):
         return False
+    ignored = False
     for raw in lines:
         entry = raw.strip()
-        if not entry or entry.startswith("#") or entry.startswith("!"):
+        if not entry or entry.startswith("#"):
+            continue
+        if entry.startswith("!"):
+            if ignored:
+                return False
             continue
         if entry in ("*", "/*", "*.json", "session*.json", "session-*.json"):
-            return True
-    return False
+            ignored = True
+    return ignored
 
 
 def check_workspace_cache(workspace: Path) -> dict[str, Any]:

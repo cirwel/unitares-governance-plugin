@@ -19,7 +19,8 @@ import install_agy_hooks  # noqa: E402
 
 @pytest.fixture(autouse=True)
 def clean_lease_and_server_env(monkeypatch, tmp_path: Path):
-    """Isolate tests from the developer's shell environment and secrets.env."""
+    """Isolate tests from the developer's shell environment and prevent env leakage."""
+    saved = os.environ.copy()
     for key in (
         "UNITARES_SERVER_URL",
         "LEASE_PLANE_BASE_URL",
@@ -31,8 +32,13 @@ def clean_lease_and_server_env(monkeypatch, tmp_path: Path):
         "UNITARES_FILE_LEASES_ENABLED",
         "UNITARES_FILE_LEASES_REQUIRED",
     ):
-        monkeypatch.delenv(key, raising=False)
-    monkeypatch.setenv("UNITARES_SECRETS_ENV", str(tmp_path / "nonexistent-secrets.env"))
+        os.environ.pop(key, None)
+    os.environ["UNITARES_SECRETS_ENV"] = str(tmp_path / "nonexistent-secrets.env")
+    try:
+        yield
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
 
 
 class _MockServer:
@@ -203,7 +209,10 @@ def test_doctor_flags_unreachable_lease_plane_fail_only_when_required(tmp_path: 
         timeout=0.3,
         python_path=Path(sys.executable),
     )
-    assert {c["name"]: c["status"] for c in fail_closed["checks"]}["lease_plane"] == "fail"
+    by_name_fc = {c["name"]: c for c in fail_closed["checks"]}
+    assert by_name_fc["lease_plane"]["status"] == "fail"
+    assert "UNITARES_FILE_LEASES_ENABLED=0" not in (by_name_fc["lease_plane"].get("fix") or "").split("(")[0]
+    assert "Edits here are not protected" not in (by_name_fc["lease_plane"].get("fix") or "")
     assert fail_closed["status"] == "fail"
 
 
@@ -218,10 +227,15 @@ def test_doctor_reports_insecure_loopback_lease_transport_actionably(live_server
     assert "UNITARES_ALLOW_INSECURE_LOOPBACK_LEASE_HTTP" in (res.get("fix") or "")
 
 
-def test_doctor_handles_bad_scheme_and_non_loopback_http_server():
+def test_doctor_handles_bad_scheme_userinfo_and_non_loopback_http_server():
     no_scheme = doctor.check_server_health("localhost:8767", timeout=0.5, no_network=False)
     assert no_scheme["status"] == "fail"
     assert "scheme" in no_scheme["summary"]
+
+    userinfo = doctor.check_server_health("https://user:secretpass@gov.example.com:8767", timeout=0.5, no_network=False)
+    assert userinfo["status"] == "fail"
+    assert "userinfo" in userinfo["summary"]
+    assert "secretpass" not in json.dumps(userinfo)
 
     non_loopback = doctor.check_server_health("http://example.invalid:8767", timeout=0.5, no_network=False)
     assert non_loopback["status"] == "fail"
@@ -313,30 +327,34 @@ def test_doctor_server_health_strips_mcp_before_query_and_clamps_timeout(live_se
     assert "top-secret-query" not in json.dumps(res)
 
 
-def test_doctor_lease_url_override_beats_secrets_env_socket_and_reads_required(tmp_path: Path, live_servers, monkeypatch):
+def test_doctor_lease_url_override_beats_secrets_env_socket_without_leaking_env(tmp_path: Path, live_servers, monkeypatch):
     _, lease = live_servers
     secrets = tmp_path / "secrets.env"
     secrets.write_text(
         "\n".join([
             "LEASE_PLANE_BEARER_TOKEN=from-secrets-file",
             "UNITARES_LEASE_PLANE_UNIX_SOCKET=/nonexistent/should-be-overridden.sock",
-            "UNITARES_FILE_LEASES_REQUIRED=1",
             "UNITARES_ALLOW_INSECURE_LOOPBACK_LEASE_HTTP=1",
         ]) + "\n",
         encoding="utf-8",
     )
     monkeypatch.setenv("UNITARES_SECRETS_ENV", str(secrets))
     monkeypatch.setenv("UNITARES_FILE_LEASES_ENABLED", "1")
+    monkeypatch.setenv("UNITARES_FILE_LEASES_REQUIRED", "1")
 
     ok = doctor.check_lease_plane(lease.url, timeout=1.0, no_network=False)
     assert ok["status"] == "ok"
     assert ok["detail"]["url"] == lease.url
     assert ok["detail"]["required"] is True
     assert "from-secrets-file" not in json.dumps(ok)
+    # check_lease_plane must not leak keys loaded from secrets.env into os.environ.
+    assert "LEASE_PLANE_BEARER_TOKEN" not in os.environ
+    assert "UNITARES_LEASE_PLANE_UNIX_SOCKET" not in os.environ
 
     fail = doctor.check_lease_plane("http://127.0.0.1:1", timeout=0.3, no_network=False)
     assert fail["status"] == "fail"
     assert fail["detail"]["required"] is True
+    assert "Edits here are not protected" not in (fail.get("fix") or "")
 
 
 def test_doctor_codex_empty_or_unreadable_receipt_warns_and_text_report_works(tmp_path: Path, capsys):
