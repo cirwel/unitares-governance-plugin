@@ -1009,8 +1009,9 @@ def test_advisory_review_script_help_dry_run_and_cli_invocation(tmp_path):
 
     # agy shim advertising --mode + --sandbox runs with full read-only flags
     agy_argv_file = tmp_path / "agy_argv.txt"
+    agy_home_file = tmp_path / "agy_home.txt"
     agy_shim.write_text(
-        f"#!/usr/bin/env bash\nif [[ \"${{1:-}}\" == \"--help\" ]]; then echo 'flags: --mode --sandbox'; exit 0; fi\nprintf '%s\\n' \"$@\" > {str(agy_argv_file)!r}\ncat >/dev/null\necho 'CLEAN'\n",
+        f"#!/usr/bin/env bash\nif [[ \"${{1:-}}\" == \"--help\" ]]; then echo 'flags: --mode --sandbox'; exit 0; fi\nprintf '%s\\0' \"$@\" > {str(agy_argv_file)!r}\nprintf '%s' \"$HOME\" > {str(agy_home_file)!r}\ncat >/dev/null\necho 'CLEAN'\n",
         encoding="utf-8",
     )
     res_agy_safe = subprocess.run(
@@ -1029,9 +1030,19 @@ def test_advisory_review_script_help_dry_run_and_cli_invocation(tmp_path):
         check=False,
     )
     assert res_agy_safe.returncode == 0
-    agy_argv = agy_argv_file.read_text(encoding="utf-8").splitlines()
-    for tok in ("-p", "--mode", "plan", "--sandbox", "--disable-slash-commands"):
-        assert tok in agy_argv
+    agy_argv = agy_argv_file.read_text(encoding="utf-8").split("\0")[:-1]
+    # The prompt rides on -p= itself: agy 1.5.16 reads a bare `-p --mode`
+    # as the prompt "--mode" and ignores the real one.
+    assert agy_argv[0].startswith("-p=Review this unitares-governance-plugin diff")
+    assert "=== git diff" in agy_argv[0]
+    assert "-p" not in agy_argv
+    assert agy_argv[1:4] == ["--mode", "plan", "--sandbox"]
+    # It turns plan mode off, so it must not come back.
+    assert "--disable-slash-commands" not in agy_argv
+    # The reviewer never sees the caller's HOME (its ~/.gemini grants and hooks).
+    agy_home = agy_home_file.read_text(encoding="utf-8")
+    assert agy_home and agy_home != str(tmp_path)
+    assert not Path(agy_home).exists()  # temporary HOME is removed afterwards
 
     # gemini shim lacking read-only flags in --help fails closed with exit 2
     gem_unsafe = shim_dir / "gemini"
