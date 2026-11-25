@@ -1035,6 +1035,9 @@ def test_advisory_review_script_help_dry_run_and_cli_invocation(tmp_path):
     # as the prompt "--mode" and ignores the real one.
     assert agy_argv[0].startswith("-p=Review this unitares-governance-plugin diff")
     assert "=== git diff" in agy_argv[0]
+    # Headless agy ends the run with no output if the model asks for a shell
+    # (#455), so the prompt says the diff is complete and there is no shell.
+    assert "There is no shell" in agy_argv[0]
     assert "-p" not in agy_argv
     assert agy_argv[1:4] == ["--mode", "plan", "--sandbox"]
     # It turns plan mode off, so it must not come back.
