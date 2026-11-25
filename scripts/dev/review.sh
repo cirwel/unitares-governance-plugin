@@ -216,9 +216,26 @@ case "${REVIEWER}" in
         AGY_HELP="$(agy --help 2>&1 || true)"
         if grep -qE -- '(^|[^[:alnum:]_-])--mode([^[:alnum:]_-]|$)' <<<"${AGY_HELP}" \
             && grep -qE -- '(^|[^[:alnum:]_-])--sandbox([^[:alnum:]_-]|$)' <<<"${AGY_HELP}"; then
-            CMD=(agy -p --mode plan --sandbox --disable-slash-commands)
+            # The boundary is a fresh HOME holding only a link to the login
+            # keychain (so the subscription login still works). With the real
+            # HOME, agy loads ~/.gemini: standing permission grants, MCP
+            # servers and user hooks, which headless mode does not deny.
+            # Same rule as unitares scripts/dev/review_gate.py.
+            # --mode plan and --sandbox are defence in depth. The prompt is
+            # attached as -p=..., because agy 1.5.16 otherwise reads the next
+            # flag as the prompt. No --disable-slash-commands: agy turns
+            # plan mode off with it.
+            AGY_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/review-agy.XXXXXX")"
+            trap 'rm -rf "${AGY_ROOT}"' EXIT
+            AGY_HOME="${AGY_ROOT}/home"
+            mkdir -m 700 "${AGY_HOME}"
+            if [[ -d "${HOME}/Library/Keychains" ]]; then
+                mkdir -m 700 "${AGY_HOME}/Library"
+                ln -s "${HOME}/Library/Keychains" "${AGY_HOME}/Library/Keychains"
+            fi
+            CMD=(agy "-p=$(build_input)" --mode plan --sandbox)
             [[ -n "${MODEL}" ]] && CMD+=(--model "${MODEL}")
-            build_input | "${CMD[@]}"
+            HOME="${AGY_HOME}" "${CMD[@]}" </dev/null
         else
             die "agy CLI does not advertise verified read-only flags (--mode plan + --sandbox); refusing to run unrestricted tools on untrusted diff"
         fi
