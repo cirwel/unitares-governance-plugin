@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import tempfile
 import time
 from contextlib import contextmanager
@@ -31,8 +32,116 @@ def read_cache_generation_unlocked(path: Path) -> int:
     return max(0, generation)
 
 
+_CACHE_DIR_NAME = ".unitares"
+_CACHE_IGNORE = b"# Written by the UNITARES plugin: these session caches stay out of git.\n*\n"
+
+
+def ensure_cache_dir_ignored(directory: Path) -> None:
+    """Give a workspace ``.unitares/`` a self-ignoring ``.gitignore``.
+
+    Only a real directory named ``.unitares`` (not a symlink) that is not
+    ``~/.unitares`` (the home mirror, outside any project) gets one. The caches
+    here carry the session's ``client_session_id``; without this a routine
+    ``git add -A`` in the user's project commits them.
+
+    The directory is opened without following a symlink and the file is
+    created relative to that handle, so a directory swapped in after the
+    checks is not written into. The file is created exclusively and never
+    follows a symlink. An existing ``.gitignore`` is never replaced or
+    deleted: it is only completed when it is a regular file holding a strict
+    prefix of this content, which is what an interrupted earlier write leaves.
+    Best effort: any failure leaves the cache write itself unaffected.
+    """
+    try:
+        if directory.name != _CACHE_DIR_NAME or os.path.islink(directory):
+            return
+        try:
+            # Same file, not same spelling: case-insensitive volumes and
+            # symlinked homes spell one directory several ways.
+            if os.path.samefile(directory, Path.home() / _CACHE_DIR_NAME):
+                return
+        except OSError:
+            pass  # no home mirror (or no directory): nothing to compare
+        # O_BINARY: on Windows a plain os.open is text mode and would write CRLF.
+        nofollow = (getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+                    | getattr(os, "O_BINARY", 0))
+        dir_fd = None
+        if os.open in os.supports_dir_fd and hasattr(os, "O_DIRECTORY"):
+            try:
+                dir_fd = os.open(str(directory), os.O_RDONLY | os.O_DIRECTORY | nofollow)
+            except OSError:
+                return
+            # Re-check the home mirror against the directory actually opened,
+            # so a swap after the samefile() check above cannot slip past it.
+            try:
+                opened = os.fstat(dir_fd)
+                mirror = os.stat(Path.home() / _CACHE_DIR_NAME)
+                if (opened.st_dev, opened.st_ino) == (mirror.st_dev, mirror.st_ino):
+                    os.close(dir_fd)
+                    return
+            except OSError:
+                pass
+        try:
+            def _open(flags: int) -> int:
+                if dir_fd is not None:
+                    return os.open(".gitignore", flags, 0o644, dir_fd=dir_fd)
+                return os.open(os.path.join(directory, ".gitignore"), flags, 0o644)
+
+            try:
+                fd = _open(os.O_CREAT | os.O_EXCL | os.O_WRONLY | nofollow)
+                done = 0
+            except FileExistsError:
+                # Repair only where the open cannot follow a symlink.
+                if not hasattr(os, "O_NOFOLLOW"):
+                    return
+                try:
+                    fd = _open(os.O_RDWR | getattr(os, "O_NONBLOCK", 0) | nofollow)
+                except OSError:
+                    return
+                existing = None
+                size = -1
+                try:
+                    info = os.fstat(fd)
+                    # A hard-linked file is shared with a path outside this
+                    # directory, so it is not ours to complete.
+                    if stat.S_ISREG(info.st_mode) and info.st_nlink == 1:
+                        size = info.st_size
+                        existing = os.read(fd, len(_CACHE_IGNORE))
+                except OSError:
+                    existing = None
+                if (existing is None or len(existing) != size
+                        or len(existing) >= len(_CACHE_IGNORE)
+                        or not _CACHE_IGNORE.startswith(existing)):
+                    os.close(fd)
+                    return
+                done = len(existing)
+            except OSError:
+                return
+            try:
+                os.lseek(fd, done, os.SEEK_SET)
+                remaining = memoryview(_CACHE_IGNORE)[done:]
+                while remaining:
+                    written = os.write(fd, remaining)
+                    if written <= 0:
+                        break
+                    remaining = remaining[written:]
+            except OSError:
+                pass
+            finally:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+        finally:
+            if dir_fd is not None:
+                os.close(dir_fd)
+    except Exception:
+        return
+
+
 def _atomic_write_bytes(path: Path, data: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_cache_dir_ignored(path.parent)
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
     try:
         try:
@@ -98,6 +207,7 @@ def session_cache_lock(
     ``session-<slot>.lock`` instead and leaves that sidecar in place.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_cache_dir_ignored(path.parent)
     lock_path = path.with_suffix(".lock")
     flags = os.O_CREAT | os.O_RDWR
     if hasattr(os, "O_BINARY"):
@@ -558,3 +668,15 @@ def clear_session_cache(path: Path, *, home_path: Path | None = None) -> None:
                 pass
         advance_cache_generation_unlocked(path)
         path.unlink(missing_ok=True)
+
+
+if __name__ == "__main__":
+    # `python3 _session_cache_io.py ensure-ignored <dir>`: the SessionStart
+    # hook's entry to ensure_cache_dir_ignored, so bash shares one
+    # implementation instead of redirecting into the path itself.
+    import sys
+
+    if len(sys.argv) != 3 or sys.argv[1] != "ensure-ignored":
+        print("usage: _session_cache_io.py ensure-ignored <directory>", file=sys.stderr)
+        sys.exit(2)
+    ensure_cache_dir_ignored(Path(sys.argv[2]))

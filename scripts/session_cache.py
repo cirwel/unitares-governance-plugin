@@ -52,7 +52,9 @@ from typing import Any, Iterator
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _session_cache_io import (  # noqa: E402
+    _CACHE_IGNORE,
     clear_session_cache,
+    ensure_cache_dir_ignored as _ensure_cache_dir_ignored,
     reserve_session_cache_snapshot,
     update_session_cache,
 )
@@ -131,6 +133,7 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
     than left as a turd in the cache directory.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_cache_dir_ignored(path.parent)
     data = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
     try:
@@ -178,6 +181,7 @@ def _cache_lock(
     predecessor.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_cache_dir_ignored(path.parent)
     lock_path = path.with_suffix(".lock")
     flags = os.O_CREAT | os.O_RDWR
     if hasattr(os, "O_BINARY"):

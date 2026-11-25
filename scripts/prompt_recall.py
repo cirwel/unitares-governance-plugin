@@ -32,6 +32,7 @@ import urllib.error
 from pathlib import Path
 
 import kg_recall
+from _session_cache_io import ensure_cache_dir_ignored as _ensure_cache_dir_ignored
 
 MIN_TASK_TERMS = 3
 DEFAULT_TTL_S = 3600.0
@@ -89,6 +90,7 @@ def write_marker(marker: Path | None, query: str) -> None:
         return
     try:
         marker.parent.mkdir(parents=True, exist_ok=True)
+        _ensure_cache_dir_ignored(marker.parent)
         marker.write_text(
             json.dumps(
                 {
