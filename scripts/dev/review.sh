@@ -233,9 +233,20 @@ case "${REVIEWER}" in
                 mkdir -m 700 "${AGY_HOME}/Library"
                 ln -s "${HOME}/Library/Keychains" "${AGY_HOME}/Library/Keychains"
             fi
-            CMD=(agy "-p=$(build_input)" --mode plan --sandbox)
+            # Headless agy ends the run with no output when the model asks for
+            # a tool it cannot be granted (a shell command, #455). The whole
+            # diff is in the prompt, so say there is no shell, and run in an
+            # empty workspace: the checkout could carry .agents/ rules or
+            # hooks that agy would load from its cwd.
+            AGY_WORK="${AGY_ROOT}/workspace"
+            mkdir -m 700 "${AGY_WORK}"
+            AGY_NOTE="The complete diff is included below; nothing outside it exists in your working directory. There is no shell: grep, find, ls, cat, git and every other command are denied, so review from the diff text alone and do not request any tool."
+            AGY_INPUT="$(build_input)"
+            AGY_PREFIX="${REVIEW_PROMPT} ${AGY_NOTE}"
+            AGY_INPUT="${AGY_PREFIX}${AGY_INPUT#"${REVIEW_PROMPT}"}"
+            CMD=(agy "-p=${AGY_INPUT}" --mode plan --sandbox)
             [[ -n "${MODEL}" ]] && CMD+=(--model "${MODEL}")
-            HOME="${AGY_HOME}" "${CMD[@]}" </dev/null
+            (cd "${AGY_WORK}" && HOME="${AGY_HOME}" "${CMD[@]}" </dev/null)
         else
             die "agy CLI does not advertise verified read-only flags (--mode plan + --sandbox); refusing to run unrestricted tools on untrusted diff"
         fi
