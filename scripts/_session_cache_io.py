@@ -71,6 +71,16 @@ def ensure_cache_dir_ignored(directory: Path) -> None:
                 dir_fd = os.open(str(directory), os.O_RDONLY | os.O_DIRECTORY | nofollow)
             except OSError:
                 return
+            # Re-check the home mirror against the directory actually opened,
+            # so a swap after the samefile() check above cannot slip past it.
+            try:
+                opened = os.fstat(dir_fd)
+                mirror = os.stat(Path.home() / _CACHE_DIR_NAME)
+                if (opened.st_dev, opened.st_ino) == (mirror.st_dev, mirror.st_ino):
+                    os.close(dir_fd)
+                    return
+            except OSError:
+                pass
         try:
             def _open(flags: int) -> int:
                 if dir_fd is not None:
