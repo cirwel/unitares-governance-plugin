@@ -1809,12 +1809,13 @@ def _assert_agy_contract(out: dict) -> None:
     assert isinstance(out, dict), out
     assert out.get("decision") in _AGY_ALLOWED_DECISIONS, out
     assert not (_AGY_FORBIDDEN_KEYS & set(out)), out
-    assert "auto_approve" not in json.dumps(out), out
-    assert set(out) <= {"decision", "reason", "overwrite"}, out
-    if "overwrite" in out:
-        assert out["decision"] == "allow", out
     if out["decision"] == "deny":
-        assert isinstance(out.get("reason"), str) and out["reason"], out
+        assert set(out) == {"decision", "reason"}, out
+        assert isinstance(out["reason"], str) and out["reason"], out
+    else:
+        assert set(out) <= {"decision", "overwrite"}, out
+        if "overwrite" in out:
+            assert isinstance(out["overwrite"], dict) and out["overwrite"], out
 
 
 def test_agy_pre_tool_use_never_emits_auto_approve_or_permission_overrides(tmp_path):
@@ -1845,11 +1846,24 @@ def test_agy_pre_tool_use_never_emits_auto_approve_or_permission_overrides(tmp_p
         mcp("unitares-governance", "start_session", "{not json"),
         mcp("unitares-governance", "identity", {}),
         mcp("unitares-governance", "unknown_tool", {"x": 1}),
+        mcp("unitares-governance", "use_tool", {"tool_name": "start_session", "arguments": {}}),
+        mcp("unitares-governance", "use_tool", {"tool_name": "start_session", "arguments": "{bad"}),
+        mcp("unitares-governance", "use_tool", {"tool_name": "sync_state", "arguments": {}}),
+        _agy_pre_tool_payload(
+            conv_id, tool_name="mcp_unitares-governance_sync_state", args={"response_text": "d"}
+        ),
+        _agy_pre_tool_payload(
+            conv_id, tool_name="mcp_unitares-governance_start_session", args={}
+        ),
     ]
+    seen: set[str] = set()
     for payload in payloads:
         for via_hook in (False, True):
             out = _run_inject_agy(payload, home_dir=home_dir, via_hook=via_hook)
             _assert_agy_contract(out)
+            seen.add("overwrite" if "overwrite" in out else out["decision"])
+    # The sweep must reach every response shape, or it proves nothing.
+    assert seen == {"allow", "overwrite", "deny"}, seen
 
     # The rewrite keeps every unrelated argument (overwrite is a shallow merge
     # into toolCall.args, so Arguments is replaced wholesale).
@@ -1882,14 +1896,21 @@ def test_agy_wrapper_fallback_prints_plain_allow(tmp_path, helper):
     elif helper == "crash":
         helper_path.write_text("raise SystemExit(3)\n", encoding="utf-8")
 
+    # On a bound slot the real helper denies a bare start_session, so plain
+    # `allow` here can only come from the wrapper's own fallback.
+    home_dir = tmp_path / "home"
+    conv_id = "agy-conv-wrapper"
+    _write_slot_cache(home_dir, conv_id, uuid=UUID_A, csid=CSID_A)
     payload = _agy_pre_tool_payload(
-        "agy-conv-wrapper",
-        args={"ServerName": "github", "ToolName": "create_issue", "Arguments": {}},
+        conv_id,
+        args={"ServerName": "unitares-governance", "ToolName": "start_session", "Arguments": {}},
     )
+    real = _run_inject_agy(payload, home_dir=home_dir, via_hook=True)
+    assert real["decision"] == "deny", real
     res = subprocess.run(
         [str(wrapper), "--host", "agy"],
         input=json.dumps(payload),
-        env={"PATH": "/usr/bin:/bin:/usr/local/bin", "HOME": str(tmp_path / "home")},
+        env={"PATH": "/usr/bin:/bin:/usr/local/bin", "HOME": str(home_dir)},
         capture_output=True,
         text=True,
         timeout=15,

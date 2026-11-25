@@ -72,8 +72,10 @@ Contract:
   `permissionOverrides`. `overwrite` is merged shallowly into the tool args,
   so a call_mcp_tool rewrite returns the whole updated `Arguments` object, in
   its original dict or JSON-string form. Fail-open is not fail-closed for
-  identity: a call_mcp_tool whose `Arguments` cannot be parsed loses its
-  target and is allowed. The manifest matches only `call_mcp_tool`, so
+  identity: when a call_mcp_tool's `Arguments` does not decode to an object,
+  _extract_agy_call drops the server/tool it has already matched and the
+  call is allowed, even for start_session. The use_tool gateway route denies
+  the same case. The manifest matches only `call_mcp_tool`, so
   eagerly loaded `mcp_<server>_<tool>` calls never reach this hook (#445).
 
 Known residual (KNOWINGLY ACCEPTED, council-reviewed 2026-06-12): both this
