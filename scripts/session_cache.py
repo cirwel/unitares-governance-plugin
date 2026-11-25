@@ -52,7 +52,9 @@ from typing import Any, Iterator
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _session_cache_io import (  # noqa: E402
+    _CACHE_IGNORE,
     clear_session_cache,
+    ensure_cache_dir_ignored as _ensure_cache_dir_ignored,
     reserve_session_cache_snapshot,
     update_session_cache,
 )
@@ -115,45 +117,6 @@ def _read_json(path: Path) -> dict[str, Any]:
     except Exception:
         return {}
     return data if isinstance(data, dict) else {}
-
-
-_CACHE_IGNORE = b"# Written by the UNITARES plugin: these session caches stay out of git.\n*\n"
-
-
-def _ensure_cache_dir_ignored(directory: Path) -> None:
-    """Give a workspace ``.unitares/`` a self-ignoring ``.gitignore``.
-
-    ``~/.unitares`` (the home mirror, outside any project) is left alone. The
-    caches carry the session's ``client_session_id``; without this a
-    routine ``git add -A`` in the user's project commits them. Never replaces
-    an existing file and never follows a symlink; best effort. Kept in step
-    with the twin in ``_session_cache_io.py`` (this module stays
-    dependency-free).
-    """
-    try:
-        if directory.name != CACHE_DIR:
-            return
-        if os.path.realpath(directory) == os.path.realpath(Path.home() / CACHE_DIR):
-            return
-        target = os.path.join(directory, ".gitignore")
-        if os.path.lexists(target):
-            return
-        # Write the whole file under a temporary name, then publish it with
-        # link(): it fails if anything (a file, a symlink, a FIFO) already has
-        # the name, never follows one, and never leaves a partial file there.
-        fd, tmp = tempfile.mkstemp(dir=str(directory), prefix=".gitignore.", suffix=".tmp")
-        try:
-            with os.fdopen(fd, "wb") as handle:
-                handle.write(_CACHE_IGNORE)
-            os.chmod(tmp, 0o644)
-            os.link(tmp, target)
-        finally:
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
-    except Exception:
-        return
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:

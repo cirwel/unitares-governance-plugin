@@ -38,8 +38,8 @@ _CACHE_IGNORE = b"# Written by the UNITARES plugin: these session caches stay ou
 def ensure_cache_dir_ignored(directory: Path) -> None:
     """Give a workspace ``.unitares/`` a self-ignoring ``.gitignore``.
 
-    Only a directory named ``.unitares`` that is not ``~/.unitares`` (the
-    home mirror, outside any project) gets one. The caches here carry the session's ``client_session_id``; without this a
+    Only a real directory named ``.unitares`` (not a symlink) that is not
+    ``~/.unitares`` (the home mirror, outside any project) gets one. The caches here carry the session's ``client_session_id``; without this a
     routine ``git add -A`` in the user's project commits them. Never replaces
     an existing file, never follows a symlink and never leaves a partial file.
     Best effort: any failure leaves the cache write itself unaffected.
@@ -47,23 +47,41 @@ def ensure_cache_dir_ignored(directory: Path) -> None:
     try:
         if directory.name != _CACHE_DIR_NAME:
             return
+        # A symlinked .unitares would carry the rule into its target (for
+        # example `.unitares -> src`), ignoring that directory's new files.
+        if os.path.islink(directory):
+            return
         if os.path.realpath(directory) == os.path.realpath(Path.home() / _CACHE_DIR_NAME):
             return
         target = os.path.join(directory, ".gitignore")
-        if os.path.lexists(target):
-            return
-        # Write the whole file under a temporary name, then publish it with
-        # link(): it fails if anything (a file, a symlink, a FIFO) already has
-        # the name, never follows one, and never leaves a partial file there.
-        fd, tmp = tempfile.mkstemp(dir=str(directory), prefix=".gitignore.", suffix=".tmp")
+        # O_CREAT|O_EXCL refuses any existing entry (file, symlink, FIFO) and
+        # never follows one; the content goes through this descriptor only,
+        # so no later path lookup can be redirected. No hard links needed.
+        flags = (os.O_CREAT | os.O_EXCL | os.O_WRONLY
+                 | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0))
         try:
-            with os.fdopen(fd, "wb") as handle:
-                handle.write(_CACHE_IGNORE)
-            os.chmod(tmp, 0o644)
-            os.link(tmp, target)
+            fd = os.open(target, flags, 0o644)
+        except OSError:
+            return
+        remaining = memoryview(_CACHE_IGNORE)
+        try:
+            while remaining:
+                written = os.write(fd, remaining)
+                if written <= 0:
+                    break
+                remaining = remaining[written:]
+        except OSError:
+            pass
         finally:
             try:
-                os.unlink(tmp)
+                os.close(fd)
+            except OSError:
+                pass
+        if remaining:
+            # A short or failed write: remove our partial file so a later call
+            # can write it whole instead of keeping a truncated rule forever.
+            try:
+                os.unlink(target)
             except OSError:
                 pass
     except Exception:
@@ -607,5 +625,7 @@ if __name__ == "__main__":
     # implementation instead of redirecting into the path itself.
     import sys
 
-    if len(sys.argv) == 3 and sys.argv[1] == "ensure-ignored":
-        ensure_cache_dir_ignored(Path(sys.argv[2]))
+    if len(sys.argv) != 3 or sys.argv[1] != "ensure-ignored":
+        print("usage: _session_cache_io.py ensure-ignored <directory>", file=sys.stderr)
+        sys.exit(2)
+    ensure_cache_dir_ignored(Path(sys.argv[2]))

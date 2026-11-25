@@ -1279,9 +1279,9 @@ ESCAPED_CONTEXT="$(escape_for_json "${CONTEXT}")"
 # commits without asking anyone to edit their own ignore files. An existing
 # file is never replaced.
 ensure_workspace_cache_ignored() {
-  # One implementation for every writer: the Python helper publishes the file
-  # with an exclusive link(), so a symlink, FIFO or partial file is never
-  # written through or left behind, and it skips the resolved home mirror.
+  # One implementation for every writer: the Python helper creates the file
+  # with O_CREAT|O_EXCL|O_NOFOLLOW, so a symlink or FIFO is never written
+  # through, a short write is removed, and the resolved home mirror is skipped.
   python3 "${PLUGIN_ROOT}/scripts/_session_cache_io.py" ensure-ignored "$1" \
     </dev/null >/dev/null 2>&1 || true
 }

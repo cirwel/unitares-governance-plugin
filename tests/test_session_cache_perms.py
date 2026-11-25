@@ -245,28 +245,48 @@ def test_cli_lock_alone_ignores_its_directory(tmp_path: Path, monkeypatch) -> No
     assert not cache.exists()
 
 
-def test_symlinked_ignore_to_a_device_is_left_alone(tmp_path: Path) -> None:
-    # A symlink (here to /dev/null) already holds the name: nothing is written
-    # through it and nothing replaces it.
+def test_symlinked_ignore_is_never_written_through(tmp_path: Path) -> None:
+    # A symlink already holds the name: its target's content and mode stay
+    # exactly as they were, and the symlink is not replaced.
     io = _io_module()
     cache_dir = tmp_path / ".unitares"
     cache_dir.mkdir()
-    (cache_dir / ".gitignore").symlink_to("/dev/null")
+    target = tmp_path / "private.txt"
+    target.write_text("secret\n")
+    target.chmod(0o600)
+    (cache_dir / ".gitignore").symlink_to(target)
     io.ensure_cache_dir_ignored(cache_dir)
-    assert os.readlink(cache_dir / ".gitignore") == "/dev/null"
+    assert target.read_text() == "secret\n"
+    assert _stat.S_IMODE(os.stat(target).st_mode) == 0o600
+    assert os.readlink(cache_dir / ".gitignore") == str(target)
 
 
-def test_failed_publish_leaves_no_partial_or_temporary_file(tmp_path: Path, monkeypatch) -> None:
+def test_short_write_leaves_no_partial_ignore(tmp_path: Path, monkeypatch) -> None:
     io = _io_module()
     cache_dir = tmp_path / ".unitares"
     cache_dir.mkdir()
+    real_write = os.write
+    calls = []
 
-    def refuse(*_args, **_kwargs):
-        raise OSError("link refused")
+    def short(fd, data):
+        calls.append(len(data))
+        return real_write(fd, bytes(data[:8])) if len(calls) == 1 else 0
 
-    monkeypatch.setattr(io.os, "link", refuse)
+    monkeypatch.setattr(io.os, "write", short)
     io.ensure_cache_dir_ignored(cache_dir)  # must not raise
-    assert list(cache_dir.iterdir()) == []
+    assert not (cache_dir / ".gitignore").exists()
+    monkeypatch.setattr(io.os, "write", real_write)
+    io.ensure_cache_dir_ignored(cache_dir)  # a later call writes it whole
+    assert (cache_dir / ".gitignore").read_bytes() == io._CACHE_IGNORE
+
+
+def test_cli_atomic_writer_alone_ignores_its_directory(tmp_path: Path, monkeypatch) -> None:
+    # _write_json without the lock, so only its own call can create the file.
+    sc = _cli_module()
+    monkeypatch.setenv("HOME", str(tmp_path / "h"))
+    cache = tmp_path / "proj" / ".unitares" / "last-milestone.json"
+    sc._write_json(cache, {"edits": 1})
+    assert (cache.parent / ".gitignore").read_bytes() == sc._CACHE_IGNORE
 
 
 def test_symlinked_home_mirror_directory_is_skipped(tmp_path: Path) -> None:
@@ -287,3 +307,27 @@ def test_symlinked_home_mirror_directory_is_skipped(tmp_path: Path) -> None:
     )
     subprocess.run(["bash", "-c", script], check=True, env={**os.environ, "HOME": str(home)})
     assert not (storage / ".gitignore").exists()
+
+
+def test_symlinked_cache_directory_gets_no_ignore(tmp_path: Path, monkeypatch) -> None:
+    # `.unitares -> src`: the rule must not land in src/, which would ignore
+    # every new file there. Covers the CLI writer too, which shares the helper.
+    io = _io_module()
+    sc = _cli_module()
+    monkeypatch.setenv("HOME", str(tmp_path / "h"))
+    project = tmp_path / "proj"
+    src = project / "src"
+    src.mkdir(parents=True)
+    (project / ".unitares").symlink_to(src)
+    io.ensure_cache_dir_ignored(project / ".unitares")
+    sc._write_json(project / ".unitares" / "last-milestone.json", {"edits": 1})
+    assert not (src / ".gitignore").exists()
+
+
+def test_ensure_ignored_cli_rejects_misuse(tmp_path: Path) -> None:
+    script = SCRIPT.parent / "_session_cache_io.py"
+    for argv in ([], ["ensure-ignored"], ["ensure-ignore", str(tmp_path)],
+                 ["ensure-ignored", str(tmp_path), "extra"]):
+        result = subprocess.run([sys.executable, str(script), *argv], capture_output=True, text=True)
+        assert result.returncode == 2
+        assert "usage:" in result.stderr
