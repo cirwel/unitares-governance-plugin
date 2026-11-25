@@ -63,6 +63,20 @@ Contract:
   pass; other aliases are not checked because their transport is configured
   outside this plugin.
 - Fails open: any error or missing cache → no output, tool runs untouched.
+  Antigravity (--host agy) is different because its hook reference requires
+  a `decision` in every PreToolUse response. There, "untouched" is printed as
+  {"decision": "allow"}. Per that reference, `allow` defers to the next hook
+  or the default policy and does not approve on the user's behalf; only
+  `auto_approve` skips a prompt. The agy path prints only `allow`, `allow`
+  with `overwrite`, or `deny`, and never `auto_approve` or
+  `permissionOverrides`. `overwrite` is merged shallowly into the tool args,
+  so a call_mcp_tool rewrite returns the whole updated `Arguments` object, in
+  its original dict or JSON-string form. Fail-open is not fail-closed for
+  identity: when a call_mcp_tool's `Arguments` does not decode to an object,
+  _extract_agy_call drops the server/tool it has already matched and the
+  call is allowed, even for start_session. The use_tool gateway route denies
+  the same case. The manifest matches only `call_mcp_tool`, so
+  eagerly loaded `mcp_<server>_<tool>` calls never reach this hook (#445).
 
 Known residual (KNOWINGLY ACCEPTED, council-reviewed 2026-06-12): both this
 guard and server #604 key on spawn_reason=="subagent" being DECLARED, and a

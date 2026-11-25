@@ -7,7 +7,11 @@
 # scripts/governance_call_inject.py (suffix allowlist, minting-tool
 # exclusion, proof-field skip, fail-open). Claude preserves its normal
 # permission flow; Codex explicitly allows rewritten UNITARES calls because
-# Codex otherwise discards updatedInput.
+# Codex otherwise discards updatedInput. Antigravity requires a `decision` in
+# every response, so when the agy helper is missing or prints nothing the
+# wrapper prints {"decision":"allow"} itself. Antigravity documents `allow` as
+# deferring to the default policy, not auto-approving (`auto_approve` does
+# that). Never emit `auto_approve` here (#445).
 set -uo pipefail
 
 HOOK_HOST="claude"
