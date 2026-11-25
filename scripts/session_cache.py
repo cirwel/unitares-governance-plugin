@@ -123,13 +123,14 @@ _CACHE_IGNORE = b"# Written by the UNITARES plugin: these session caches stay ou
 def _ensure_cache_dir_ignored(directory: Path) -> None:
     """Give a workspace ``.unitares/`` a self-ignoring ``.gitignore``.
 
-    The caches carry the session's ``client_session_id``; without this a
+    ``~/.unitares`` (the home mirror, outside any project) is left alone. The
+    caches carry the session's ``client_session_id``; without this a
     routine ``git add -A`` in the user's project commits them. Never replaces
     an existing file and never follows a symlink; best effort. Kept in step
     with the twin in ``_session_cache_io.py`` (this module stays
     dependency-free).
     """
-    if directory.name != CACHE_DIR:
+    if directory.name != CACHE_DIR or directory == Path.home() / CACHE_DIR:
         return
     flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
@@ -204,6 +205,7 @@ def _cache_lock(
     predecessor.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_cache_dir_ignored(path.parent)
     lock_path = path.with_suffix(".lock")
     flags = os.O_CREAT | os.O_RDWR
     if hasattr(os, "O_BINARY"):

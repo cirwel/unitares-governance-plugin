@@ -1274,21 +1274,22 @@ ${TRANSPORT_WARNING}"
 fi
 
 ESCAPED_CONTEXT="$(escape_for_json "${CONTEXT}")"
-# Persist delivery state only after stdout accepts the serialized response. If
-# the host kills SessionStart or closes the pipe first, the next run must still
-# show the full first-turn nudge.
 # The workspace .unitares/ holds session caches that carry this session's
 # client_session_id. A self-ignoring .gitignore keeps them out of the user's
 # commits without asking anyone to edit their own ignore files. An existing
 # file is never replaced.
 ensure_workspace_cache_ignored() {
   local dir="$1"
-  [[ -d "${dir}" && ! -e "${dir}/.gitignore" && ! -L "${dir}/.gitignore" ]] || return 0
+  [[ -d "${dir}" && "${dir}" != "${HOME}/.unitares" ]] || return 0
+  [[ ! -e "${dir}/.gitignore" && ! -L "${dir}/.gitignore" ]] || return 0
   ( set -o noclobber
     printf '# Written by the UNITARES plugin: these session caches stay out of git.\n*\n' \
       >"${dir}/.gitignore" ) 2>/dev/null || true
 }
 
+# Persist delivery state only after stdout accepts the serialized response. If
+# the host kills SessionStart or closes the pipe first, the next run must still
+# show the full first-turn nudge.
 if cat <<ENDJSON
 {
   "hookSpecificOutput": {

@@ -35,15 +35,16 @@ _CACHE_DIR_NAME = ".unitares"
 _CACHE_IGNORE = b"# Written by the UNITARES plugin: these session caches stay out of git.\n*\n"
 
 
-def _ensure_cache_dir_ignored(directory: Path) -> None:
+def ensure_cache_dir_ignored(directory: Path) -> None:
     """Give a workspace ``.unitares/`` a self-ignoring ``.gitignore``.
 
-    The caches here carry the session's ``client_session_id``; without this a
+    Only a directory named ``.unitares`` that is not ``~/.unitares`` (the
+    home mirror, outside any project) gets one. The caches here carry the session's ``client_session_id``; without this a
     routine ``git add -A`` in the user's project commits them. Never replaces
     an existing file and never follows a symlink. Best effort: a failure
     leaves the cache write itself unaffected.
     """
-    if directory.name != _CACHE_DIR_NAME:
+    if directory.name != _CACHE_DIR_NAME or directory == Path.home() / _CACHE_DIR_NAME:
         return
     flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
@@ -58,7 +59,7 @@ def _ensure_cache_dir_ignored(directory: Path) -> None:
 
 def _atomic_write_bytes(path: Path, data: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    _ensure_cache_dir_ignored(path.parent)
+    ensure_cache_dir_ignored(path.parent)
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
     try:
         try:
@@ -124,7 +125,7 @@ def session_cache_lock(
     ``session-<slot>.lock`` instead and leaves that sidecar in place.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    _ensure_cache_dir_ignored(path.parent)
+    ensure_cache_dir_ignored(path.parent)
     lock_path = path.with_suffix(".lock")
     flags = os.O_CREAT | os.O_RDWR
     if hasattr(os, "O_BINARY"):

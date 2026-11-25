@@ -93,3 +93,55 @@ def test_existing_cache_ignore_file_is_left_alone(tmp_path: Path) -> None:
     (cache_dir / ".gitignore").write_text("mine\n")
     _run(["bump-edit", "--file-path", "/w/a.py"], tmp_path)
     assert (cache_dir / ".gitignore").read_text() == "mine\n"
+
+
+def _io_module():
+    import importlib
+    scripts = str(SCRIPT.parent)
+    if scripts not in sys.path:
+        sys.path.insert(0, scripts)
+    return importlib.import_module("_session_cache_io")
+
+
+def test_shared_writer_ignores_workspace_cache_but_not_others(tmp_path: Path, monkeypatch) -> None:
+    io = _io_module()
+    cache_dir = tmp_path / "proj" / ".unitares"
+    cache_dir.mkdir(parents=True)
+    io.ensure_cache_dir_ignored(cache_dir)
+    assert (cache_dir / ".gitignore").read_text().splitlines()[-1] == "*"
+    # A directory with another name is not touched.
+    other = tmp_path / "proj" / "cache"
+    other.mkdir()
+    io.ensure_cache_dir_ignored(other)
+    assert not (other / ".gitignore").exists()
+    # The home mirror sits outside any project and is left alone.
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    home_cache = tmp_path / "home" / ".unitares"
+    home_cache.mkdir(parents=True)
+    io.ensure_cache_dir_ignored(home_cache)
+    assert not (home_cache / ".gitignore").exists()
+
+
+def test_shared_writer_does_not_follow_a_symlinked_ignore(tmp_path: Path) -> None:
+    io = _io_module()
+    cache_dir = tmp_path / ".unitares"
+    cache_dir.mkdir()
+    target = tmp_path / "elsewhere"
+    (cache_dir / ".gitignore").symlink_to(target)
+    io.ensure_cache_dir_ignored(cache_dir)
+    assert not target.exists()
+
+
+def test_session_start_helper_writes_and_respects_existing(tmp_path: Path) -> None:
+    hook = SCRIPT.parents[1] / "hooks" / "session-start"
+    cache_dir = tmp_path / ".unitares"
+    cache_dir.mkdir()
+    script = (
+        f"eval \"$(sed -n '/^ensure_workspace_cache_ignored()/,/^}}/p' '{hook}')\"\n"
+        f"ensure_workspace_cache_ignored '{cache_dir}'\n"
+    )
+    subprocess.run(["bash", "-c", script], check=True, env={**os.environ, "HOME": str(tmp_path / "h")})
+    assert (cache_dir / ".gitignore").read_text().splitlines()[-1] == "*"
+    (cache_dir / ".gitignore").write_text("mine\n")
+    subprocess.run(["bash", "-c", script], check=True, env={**os.environ, "HOME": str(tmp_path / "h")})
+    assert (cache_dir / ".gitignore").read_text() == "mine\n"

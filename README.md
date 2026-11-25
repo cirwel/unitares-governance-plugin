@@ -63,8 +63,8 @@ and register an HTTPS MCP server as described in
 
 If your local server is on another port (for example a Docker stack moved with
 `GOVERNANCE_HOST_PORT` and `LEASE_PLANE_HOST_PORT`), set the base URLs in the
-environment you start `claude` from. Both the MCP client and the hooks read
-them:
+environment you start `claude` from. The MCP client and the hooks read
+`UNITARES_SERVER_URL`; the hooks alone read `LEASE_PLANE_BASE_URL`:
 
 ```sh
 export UNITARES_SERVER_URL=http://127.0.0.1:18767    # no /mcp/ suffix
