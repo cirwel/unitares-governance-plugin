@@ -130,7 +130,9 @@ def _ensure_cache_dir_ignored(directory: Path) -> None:
     with the twin in ``_session_cache_io.py`` (this module stays
     dependency-free).
     """
-    if directory.name != CACHE_DIR or directory == Path.home() / CACHE_DIR:
+    if directory.name != CACHE_DIR:
+        return
+    if os.path.realpath(directory) == os.path.realpath(Path.home() / CACHE_DIR):
         return
     flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
     try:

@@ -145,3 +145,46 @@ def test_session_start_helper_writes_and_respects_existing(tmp_path: Path) -> No
     (cache_dir / ".gitignore").write_text("mine\n")
     subprocess.run(["bash", "-c", script], check=True, env={**os.environ, "HOME": str(tmp_path / "h")})
     assert (cache_dir / ".gitignore").read_text() == "mine\n"
+
+
+def test_home_mirror_is_skipped_through_a_symlinked_home(tmp_path: Path, monkeypatch) -> None:
+    io = _io_module()
+    real_home = tmp_path / "real-home"
+    (real_home / ".unitares").mkdir(parents=True)
+    link_home = tmp_path / "link-home"
+    link_home.symlink_to(real_home)
+    monkeypatch.setenv("HOME", str(link_home))
+    io.ensure_cache_dir_ignored(real_home / ".unitares")
+    assert not (real_home / ".unitares" / ".gitignore").exists()
+    # The CLI writer's twin skips the home mirror too.
+    env = {**os.environ, "HOME": str(link_home)}
+    subprocess.run(
+        [sys.executable, str(SCRIPT), "bump-edit", "--file-path", "/w/a.py", "--workspace", str(link_home)],
+        check=True, capture_output=True, env=env,
+    )
+    assert not (real_home / ".unitares" / ".gitignore").exists()
+
+
+def test_session_start_helper_skips_the_home_mirror(tmp_path: Path) -> None:
+    hook = SCRIPT.parents[1] / "hooks" / "session-start"
+    home = tmp_path / "home"
+    (home / ".unitares").mkdir(parents=True)
+    script = (
+        f"eval \"$(sed -n '/^ensure_workspace_cache_ignored()/,/^}}/p' '{hook}')\"\n"
+        f"ensure_workspace_cache_ignored '{home}/.unitares'\n"
+    )
+    subprocess.run(["bash", "-c", script], check=True, env={**os.environ, "HOME": str(home)})
+    assert not (home / ".unitares" / ".gitignore").exists()
+
+
+def test_prompt_recall_marker_dir_ignores_itself(tmp_path: Path, monkeypatch) -> None:
+    import importlib
+    scripts = str(SCRIPT.parent)
+    if scripts not in sys.path:
+        sys.path.insert(0, scripts)
+    prompt_recall = importlib.import_module("prompt_recall")
+    monkeypatch.setenv("HOME", str(tmp_path / "h"))
+    marker = tmp_path / "proj" / ".unitares" / "prompt-kg-recall-s1.json"
+    prompt_recall.write_marker(marker, "flaky upload retry")
+    assert marker.exists()
+    assert (marker.parent / ".gitignore").read_text().splitlines()[-1] == "*"

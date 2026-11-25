@@ -1280,7 +1280,11 @@ ESCAPED_CONTEXT="$(escape_for_json "${CONTEXT}")"
 # file is never replaced.
 ensure_workspace_cache_ignored() {
   local dir="$1"
-  [[ -d "${dir}" && "${dir}" != "${HOME}/.unitares" ]] || return 0
+  [[ -d "${dir}" ]] || return 0
+  local real_dir real_home
+  real_dir="$(cd "${dir}" 2>/dev/null && pwd -P)" || return 0
+  real_home="$(cd "${HOME}" 2>/dev/null && pwd -P)" || real_home=""
+  [[ -z "${real_home}" || "${real_dir}" != "${real_home}/.unitares" ]] || return 0
   [[ ! -e "${dir}/.gitignore" && ! -L "${dir}/.gitignore" ]] || return 0
   ( set -o noclobber
     printf '# Written by the UNITARES plugin: these session caches stay out of git.\n*\n' \

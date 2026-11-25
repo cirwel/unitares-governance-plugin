@@ -44,7 +44,9 @@ def ensure_cache_dir_ignored(directory: Path) -> None:
     an existing file and never follows a symlink. Best effort: a failure
     leaves the cache write itself unaffected.
     """
-    if directory.name != _CACHE_DIR_NAME or directory == Path.home() / _CACHE_DIR_NAME:
+    if directory.name != _CACHE_DIR_NAME:
+        return
+    if os.path.realpath(directory) == os.path.realpath(Path.home() / _CACHE_DIR_NAME):
         return
     flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
