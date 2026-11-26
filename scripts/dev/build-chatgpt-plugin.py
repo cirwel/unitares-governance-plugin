@@ -14,6 +14,7 @@ import json
 from pathlib import Path
 import re
 import shutil
+import sys
 from urllib.parse import urlsplit
 import zipfile
 
@@ -97,19 +98,58 @@ def _plugin_manifest(*, app_reference: bool) -> dict:
     }
 
 
+def _ignore_symlinks(directory: str, names: list[str]) -> set[str]:
+    base = Path(directory)
+    return {name for name in names if (base / name).is_symlink()}
+
+
+def _copy_skill_references(skill_dir: Path, target: Path) -> None:
+    refs_dir = skill_dir / "references"
+    if not refs_dir.exists() and not refs_dir.is_symlink():
+        return
+    if refs_dir.is_symlink() or not refs_dir.is_dir():
+        print(
+            f"warning: skipping non-directory or symlinked references path: {refs_dir}",
+            file=sys.stderr,
+        )
+        return
+    refs_root = refs_dir.resolve(strict=True)
+    ref_files: list[Path] = []
+    for entry in sorted(refs_dir.iterdir(), key=lambda p: p.name):
+        if (
+            entry.is_symlink()
+            or not entry.is_file()
+            or entry.suffix != ".md"
+            or entry.resolve(strict=True).parent != refs_root
+        ):
+            print(
+                f"warning: skipping unsupported skill reference entry: {entry}",
+                file=sys.stderr,
+            )
+            continue
+        ref_files.append(entry)
+    if not ref_files:
+        return
+    target_refs = target / "references"
+    target_refs.mkdir()
+    for ref in ref_files:
+        shutil.copy2(ref, target_refs / ref.name)
+
+
 def _copy_skills(output: Path) -> None:
     destination = output / "skills"
     destination.mkdir()
     for skill_dir in sorted((ROOT / "skills").iterdir()):
         skill_file = skill_dir / "SKILL.md"
-        if not skill_dir.is_dir() or not skill_file.is_file():
+        if not skill_dir.is_dir() or skill_dir.is_symlink() or not skill_file.is_file() or skill_file.is_symlink():
             continue
         target = destination / skill_dir.name
         target.mkdir()
         shutil.copy2(skill_file, target / "SKILL.md")
+        _copy_skill_references(skill_dir, target)
 
     setup_source = ROOT / "packaging" / "chatgpt" / "skills" / "setup-unitares"
-    shutil.copytree(setup_source, destination / "setup-unitares")
+    shutil.copytree(setup_source, destination / "setup-unitares", ignore=_ignore_symlinks)
 
 
 def _write_registered_app(output: Path, app_id: str) -> None:
