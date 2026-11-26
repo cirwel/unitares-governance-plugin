@@ -235,6 +235,20 @@ Hermes-native lifecycle bindings live in
 Adding a direct MCP connection to Hermes exposes tools but does not by itself
 install lifecycle automation.
 
+## Setup check (`doctor`)
+
+Verify `/usr/bin/python3`, plugin manifests, Antigravity hook sync, server `/health`,
+lease-plane `/v1/health`, Codex hook receipts, and local `.unitares/` cache hygiene
+in one read-only command (never prints tokens or raw session IDs):
+
+```bash
+python3 scripts/doctor.py --workspace "$PWD"
+```
+
+Pass `--host claude|codex|agy` to scope host checks, `--no-network` for offline
+checks, or `--json` for machine-readable output (e.g.
+`scripts/doctor.py --workspace "$PWD" --no-network --json`).
+
 ## Codex hook report
 
 The installed Codex plugin records a local receipt when one of its hook
