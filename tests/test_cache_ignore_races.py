@@ -656,12 +656,13 @@ def test_an_unrecognised_file_at_the_record_name_is_left_alone(tmp_path: Path, i
         assert ignore.read_bytes() == io._CACHE_IGNORE
 
 
-@pytest.mark.parametrize("code", [errno.EIO, errno.ENOSPC, errno.EMLINK, errno.EPERM])
+@pytest.mark.parametrize("code", [errno.EIO, errno.ENOSPC, errno.EMLINK])
 def test_a_transient_or_ambiguous_link_failure_never_writes_at_the_live_name(
         tmp_path: Path, monkeypatch, code: int) -> None:
     # Only a positively unsupported link falls back to an in-place create.
-    # EPERM is ambiguous (sandbox or policy, not only vfat). Any such failure
-    # leaves nothing, and a later run publishes by link.
+    # Any such failure leaves nothing, and a later run publishes by link.
+    # EPERM, which on Linux routes to the no-replace rename, has its own
+    # tests below, both where that rename publishes and where it must not.
     io = _io()
     cache_dir = tmp_path / ".unitares"
     cache_dir.mkdir()
