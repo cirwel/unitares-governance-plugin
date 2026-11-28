@@ -3,9 +3,13 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
+import re
+import secrets
 import stat
+import sys
 import tempfile
 import time
 from contextlib import contextmanager
@@ -34,6 +38,393 @@ def read_cache_generation_unlocked(path: Path) -> int:
 
 _CACHE_DIR_NAME = ".unitares"
 _CACHE_IGNORE = b"# Written by the UNITARES plugin: these session caches stay out of git.\n*\n"
+_IGNORE_NAME = ".gitignore"
+
+# Test seam: called with a step name between the helper's filesystem steps, so
+# a test can run a concurrent writer at exactly that point. None in production.
+_race_hook: Callable[[str], None] | None = None
+
+
+def _race_point(step: str) -> None:
+    if _race_hook is not None:
+        _race_hook(step)
+
+
+class _CacheDir:
+    """Filesystem calls relative to one opened cache directory.
+
+    With a directory handle every call resolves names against the inode that
+    was opened and checked, never against the path again, so renaming the
+    directory or an ancestor afterwards cannot redirect a later step. Without
+    one (Windows) the calls fall back to joined paths.
+    """
+
+    def __init__(self, path: Path, fd: int | None) -> None:
+        self.path = path
+        self.fd = fd
+
+    def _name(self, name: str) -> str:
+        return name if self.fd is not None else os.path.join(self.path, name)
+
+    def open(self, name: str, flags: int) -> int:
+        if self.fd is not None:
+            return os.open(name, flags, 0o644, dir_fd=self.fd)
+        return os.open(self._name(name), flags, 0o644)
+
+    def link(self, src: str, dst: str) -> None:
+        """Hard-link ``src`` as ``dst``; never replaces an existing ``dst``."""
+        kwargs: dict[str, Any] = {}
+        if self.fd is not None:
+            kwargs.update(src_dir_fd=self.fd, dst_dir_fd=self.fd)
+        if os.link in os.supports_follow_symlinks:
+            kwargs["follow_symlinks"] = False
+        os.link(self._name(src), self._name(dst), **kwargs)
+
+    def rename(self, src: str, dst: str) -> None:
+        if self.fd is not None:
+            os.rename(src, dst, src_dir_fd=self.fd, dst_dir_fd=self.fd)
+        else:
+            os.rename(self._name(src), self._name(dst))
+
+    def lstat(self, name: str) -> os.stat_result:
+        if self.fd is not None:
+            return os.stat(name, dir_fd=self.fd, follow_symlinks=False)
+        return os.stat(self._name(name), follow_symlinks=False)
+
+    def unlink_quietly(self, name: str) -> None:
+        try:
+            if self.fd is not None:
+                os.unlink(name, dir_fd=self.fd)
+            else:
+                os.unlink(self._name(name))
+        except OSError:
+            pass
+
+
+def _write_all(fd: int, data: bytes) -> bool:
+    remaining = memoryview(data)
+    while remaining:
+        written = os.write(fd, remaining)
+        if written <= 0:
+            return False
+        remaining = remaining[written:]
+    return True
+
+
+def _scratch_name(kind: str) -> str:
+    # Inside .unitares, so the published `*` covers any a killed run leaves.
+    return f"{_IGNORE_NAME}.{secrets.token_hex(8)}.{kind}"
+
+
+def _is_repair_candidate(info: os.stat_result) -> bool:
+    # A hard-linked file is shared with a path outside this directory, so it
+    # is not ours to complete.
+    return (stat.S_ISREG(info.st_mode) and info.st_nlink == 1
+            and info.st_size < len(_CACHE_IGNORE))
+
+
+def _read_partial_ignore(fd: int, info: os.stat_result) -> bytes | None:
+    """The file's bytes when ``fd`` is a single-link regular file holding a
+    strict prefix of the plugin's content, which is what an interrupted write
+    leaves; otherwise None."""
+    if not _is_repair_candidate(info):
+        return None
+    existing = os.pread(fd, len(_CACHE_IGNORE), 0)
+    if len(existing) != info.st_size or not _CACHE_IGNORE.startswith(existing):
+        return None
+    return existing
+
+
+def _create_in_place(cache_dir: _CacheDir, flags: int) -> None:
+    """Fallback where hard links are unavailable: exclusive create, then write.
+
+    A run killed mid-write can leave a partial file here. Repair needs hard
+    links too, so on such a filesystem that partial stays as it is.
+    """
+    fd = cache_dir.open(_IGNORE_NAME, os.O_CREAT | os.O_EXCL | os.O_WRONLY | flags)
+    try:
+        _write_all(fd, _CACHE_IGNORE)
+    finally:
+        os.close(fd)
+
+
+# Errors that positively report "this filesystem cannot hard-link at all"
+# (exFAT, some network shares), as opposed to a failure that may pass or is
+# ambiguous, such as EIO, ENOSPC, EDQUOT, EMLINK or EPERM (a sandbox or policy
+# refusal looks the same as Linux vfat). Only these fall back to writing at
+# the live name; anything else writes nothing and a later run retries.
+_LINK_UNSUPPORTED_ERRNOS = frozenset(
+    code for code in (getattr(errno, "ENOTSUP", None), getattr(errno, "EOPNOTSUPP", None))
+    if code is not None
+)
+# Windows: ERROR_INVALID_FUNCTION (FAT) and ERROR_NOT_SUPPORTED.
+_LINK_UNSUPPORTED_WINERRORS = frozenset({1, 50})
+
+
+def _link_unsupported(exc: OSError) -> bool:
+    return (exc.errno in _LINK_UNSUPPORTED_ERRNOS
+            or getattr(exc, "winerror", None) in _LINK_UNSUPPORTED_WINERRORS)
+
+
+# Linux vfat refuses every hard link with EPERM but supports renameat2's
+# RENAME_NOREPLACE (since Linux 4.9; see rename(2)). On Linux an EPERM from
+# the staged link therefore gets one no-replace rename of the complete staged
+# file instead. Elsewhere, and on any failure of that rename, nothing is
+# written.
+_RENAMEAT2_PLATFORM = sys.platform.startswith("linux")
+_RENAME_NOREPLACE = 1
+
+
+def _renameat2_noreplace(dir_fd: int, src: str, dst: str) -> int:
+    """``renameat2(dir_fd, src, dir_fd, dst, RENAME_NOREPLACE)`` through libc.
+
+    Returns 0 on success or the errno: EEXIST when ``dst`` exists, which is
+    left untouched; EINVAL when the filesystem does not support the flag;
+    ENOSYS when libc has no ``renameat2`` symbol. Never an overwriting rename.
+    """
+    try:
+        import ctypes
+
+        renameat2 = ctypes.CDLL(None, use_errno=True).renameat2
+    except (ImportError, OSError, AttributeError):
+        return errno.ENOSYS
+    renameat2.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint)
+    renameat2.restype = ctypes.c_int
+    if renameat2(dir_fd, os.fsencode(src), dir_fd, os.fsencode(dst), _RENAME_NOREPLACE) == 0:
+        return 0
+    return ctypes.get_errno() or errno.EIO
+
+
+# A repair's transaction record. Published (by a no-replace link) before the
+# repair touches anything, it names that repair's own probe and capture, two
+# fresh random names, and is removed once neither remains. A later run acts
+# only on a record it can parse, so a file a user happens to keep under this
+# name is never taken for one: it is left alone and repairs stop.
+_JOURNAL_NAME = f"{_IGNORE_NAME}.unitares-repair"
+_JOURNAL_RE = re.compile(
+    rb"unitares \.gitignore repair v1\n"
+    rb"probe (\.gitignore\.[0-9a-f]{16}\.probe)\n"
+    rb"capture (\.gitignore\.[0-9a-f]{16}\.capture)\n"
+)
+_JOURNAL_MAX = 256
+_REPAIR_LOCK_TIMEOUT_S = 1.0
+# flock errors positively meaning the filesystem has no such locks, so no
+# repair can run on it either. Anything else, ENOLCK included (a transient
+# shortage of lock records), counts as contention and the run backs off.
+_LOCK_UNSUPPORTED_ERRNOS = _LINK_UNSUPPORTED_ERRNOS
+
+
+def _journal_bytes(probe: str, capture: str) -> bytes:
+    return (b"unitares .gitignore repair v1\nprobe " + probe.encode("ascii")
+            + b"\ncapture " + capture.encode("ascii") + b"\n")
+
+
+def _lstat_or_none(cache_dir: _CacheDir, name: str) -> os.stat_result | None:
+    try:
+        return cache_dir.lstat(name)
+    except FileNotFoundError:
+        return None
+
+
+def _same_inode(a: os.stat_result | None, b: os.stat_result | None) -> bool:
+    return a is not None and b is not None and (a.st_dev, a.st_ino) == (b.st_dev, b.st_ino)
+
+
+def _lock_repairs(cache_dir: _CacheDir) -> str:
+    """Serialize repair, recovery and creation in one cache directory.
+
+    Takes an exclusive flock on the opened directory handle itself, so no
+    lock file is created and a killed holder releases it with its process.
+    Closing the handle releases it. Returns ``"held"``, ``"busy"`` (another
+    run holds it past the timeout, or the lock failed) or ``"none"`` (no
+    handle, or the filesystem reports flock unsupported, so no repair can
+    hold one either).
+    """
+    if cache_dir.fd is None:
+        return "none"
+    try:
+        import fcntl
+    except ImportError:
+        return "none"
+    deadline = time.monotonic() + _REPAIR_LOCK_TIMEOUT_S
+    while True:
+        try:
+            fcntl.flock(cache_dir.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return "held"
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                return "busy"
+            time.sleep(0.01)
+        except OSError as exc:
+            return "none" if exc.errno in _LOCK_UNSUPPORTED_ERRNOS else "busy"
+
+
+def _publish_journal(cache_dir: _CacheDir, probe: str, capture: str, flags: int) -> bool:
+    """Publish the transaction record whole, never over an existing entry."""
+    tmp = _scratch_name("tmp")
+    fd = cache_dir.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY | flags)
+    try:
+        try:
+            complete = _write_all(fd, _journal_bytes(probe, capture))
+        finally:
+            os.close(fd)
+        if not complete:
+            return False
+        try:
+            cache_dir.link(tmp, _JOURNAL_NAME)
+        except OSError:
+            return False
+        return True
+    finally:
+        cache_dir.unlink_quietly(tmp)
+
+
+def _read_journal(cache_dir: _CacheDir, flags: int) -> tuple[str, str] | None:
+    """The (probe, capture) names of a record this helper wrote, else None."""
+    try:
+        fd = cache_dir.open(_JOURNAL_NAME, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | flags)
+    except OSError:
+        return None
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > _JOURNAL_MAX:
+            return None
+        data = os.read(fd, _JOURNAL_MAX + 1)
+    finally:
+        os.close(fd)
+    match = _JOURNAL_RE.fullmatch(data)
+    if match is None:
+        return None
+    return match.group(1).decode("ascii"), match.group(2).decode("ascii")
+
+
+def _restore_capture(cache_dir: _CacheDir, capture: str) -> bool:
+    """Put a captured entry back at ``.gitignore`` without replacing anything.
+
+    True once the entry is live again and its capture name is gone. A link
+    never replaces an entry, so a file saved at ``.gitignore`` since the
+    capture wins and the capture is kept. An entry that cannot be linked, such
+    as a directory, is kept under its capture name: renaming it back could
+    replace an empty directory created at the name meanwhile.
+    """
+    try:
+        cache_dir.link(capture, _IGNORE_NAME)
+        _race_point("restore-linked")
+    except FileExistsError:
+        pass  # a run that died right after linking it back leaves this
+    except OSError:
+        return False
+    if not _same_inode(_lstat_or_none(cache_dir, _IGNORE_NAME), _lstat_or_none(cache_dir, capture)):
+        return False
+    cache_dir.unlink_quietly(capture)
+    return _lstat_or_none(cache_dir, capture) is None
+
+
+def _resolve_journal(cache_dir: _CacheDir, flags: int) -> str:
+    """Finish or undo an interrupted repair. Needs the directory lock.
+
+    Returns ``"clean"`` (no record: repair and creation may proceed),
+    ``"create-only"`` (a record or a probe is kept, so no new repair, but
+    publishing a missing ``.gitignore`` strands nothing) or ``"done"`` (a
+    capture was found: restored, or kept because it could not be). After
+    ``"done"`` the run ends, so an editor's save just restored, which may well
+    be a strict prefix too, is never taken for this helper's partial in the
+    same run.
+    """
+    if _lstat_or_none(cache_dir, _JOURNAL_NAME) is None:
+        return "clean"
+    names = _read_journal(cache_dir, flags)
+    if names is None:
+        return "create-only"  # not a record this helper wrote: left alone
+    probe, capture = names
+    kept = False
+    probed = _lstat_or_none(cache_dir, probe)
+    if probed is not None:
+        if _same_inode(probed, _lstat_or_none(cache_dir, _IGNORE_NAME)):
+            # Only a second link to the live file: dropping it loses nothing
+            # and gives the file back the single link a repair requires.
+            cache_dir.unlink_quietly(probe)
+            kept = _lstat_or_none(cache_dir, probe) is not None
+        else:
+            kept = True
+    found = _lstat_or_none(cache_dir, capture) is not None
+    if found:
+        _race_point("recover-found")
+        kept = not _restore_capture(cache_dir, capture) or kept
+    if not kept:
+        cache_dir.unlink_quietly(_JOURNAL_NAME)
+    if found:
+        return "done"
+    return "create-only" if kept else "clean"
+
+
+def _repair_partial_ignore(cache_dir: _CacheDir, staged: str, flags: int) -> None:
+    """Replace an interrupted plugin write with the full content.
+
+    The caller holds the directory lock and found no transaction record.
+    Nothing is written into the existing file. A record naming a fresh probe
+    and capture is published first. The entry is then moved to the capture by
+    one rename, which takes exactly whatever holds the name at that instant,
+    and checked again through the handle opened before: same inode, same size
+    and modification time, same bytes. Only then is the staged full copy
+    linked into place and the capture dropped. In every other outcome,
+    including a check that raises, ``_resolve_journal`` puts the capture back;
+    a run killed before that leaves the record for the next run, which does
+    the same before anything is published. A link never replaces an entry, so
+    a file someone else saved in the meantime wins.
+    """
+    if cache_dir.fd is None or not hasattr(os, "O_NOFOLLOW"):
+        return
+    try:
+        # O_RDWR although nothing is written: a file the user cannot write,
+        # such as a read-only opt-out, is left as it is.
+        fd = cache_dir.open(_IGNORE_NAME, os.O_RDWR | getattr(os, "O_NONBLOCK", 0) | flags)
+    except OSError:
+        return
+    try:
+        checked = os.fstat(fd)
+        content = _read_partial_ignore(fd, checked)
+        if content is None:
+            return
+        probe, capture = _scratch_name("probe"), _scratch_name("capture")
+        if not _publish_journal(cache_dir, probe, capture, flags):
+            return
+        try:
+            # Move the entry only once it is known it can be linked back.
+            # Probing the entry itself also covers filesystems without hard
+            # links and Linux's fs.protected_hardlinks.
+            try:
+                cache_dir.link(_IGNORE_NAME, probe)
+            except OSError:
+                return
+            _race_point("repair-probed")
+            try:
+                probed = cache_dir.lstat(probe)
+            finally:
+                cache_dir.unlink_quietly(probe)
+            if not _same_inode(probed, checked):
+                return
+            _race_point("repair-checked")
+            cache_dir.rename(_IGNORE_NAME, capture)
+            _race_point("repair-captured")
+            moved = cache_dir.lstat(capture)
+            now = os.fstat(fd)
+            # ctime is not compared: the rename itself changes it.
+            if (_same_inode(moved, checked)
+                    and (now.st_size, now.st_mtime_ns) == (checked.st_size, checked.st_mtime_ns)
+                    and _read_partial_ignore(fd, now) == content):
+                try:
+                    cache_dir.link(staged, _IGNORE_NAME)
+                except FileExistsError:
+                    pass  # a file saved at the name meanwhile wins
+                _race_point("repair-published")
+                # The capture is the verified partial: drop it.
+                cache_dir.unlink_quietly(capture)
+        finally:
+            # Clears the record, or restores the capture if it is still there.
+            _resolve_journal(cache_dir, flags)
+    finally:
+        os.close(fd)
 
 
 def ensure_cache_dir_ignored(directory: Path) -> None:
@@ -44,12 +435,65 @@ def ensure_cache_dir_ignored(directory: Path) -> None:
     here carry the session's ``client_session_id``; without this a routine
     ``git add -A`` in the user's project commits them.
 
-    The directory is opened without following a symlink and the file is
-    created relative to that handle, so a directory swapped in after the
-    checks is not written into. The file is created exclusively and never
-    follows a symlink. An existing ``.gitignore`` is never replaced or
-    deleted: it is only completed when it is a regular file holding a strict
-    prefix of this content, which is what an interrupted earlier write leaves.
+    The directory is opened without following a symlink and every later step
+    is relative to that handle, so a directory or ancestor swapped in after the
+    open is not written into. The full content is written to a scratch file
+    first and published by a hard link, which never replaces an entry, so no
+    reader ever sees a partial ``.gitignore`` and a killed run leaves none.
+    Only where the filesystem reports hard links unsupported (ENOTSUP) does
+    it fall back to an exclusive create. On Linux an EPERM from the link, as
+    vfat gives for every link, instead publishes the complete staged file by
+    ``renameat2(RENAME_NOREPLACE)``, which also never replaces an entry. Any
+    other link failure, or a failure of that rename, writes nothing and a
+    later run retries.
+
+    An existing ``.gitignore`` is never written into. It is replaced only when
+    it is a single-link regular file holding a strict prefix of this content,
+    which is what an interrupted write by an earlier version leaves, and only
+    by the compare-and-swap in ``_repair_partial_ignore``.
+
+    Creation, repair and recovery run under an exclusive flock on the opened
+    directory handle. Before it moves anything, a repair publishes a record,
+    ``.gitignore.unitares-repair``, naming its own probe and capture
+    (``.gitignore.<random>.probe`` and ``.capture``). If the repair fails or
+    its process dies, the capture is put back by a no-replace hard link, in
+    the same run or the next, before anything new is published, and that run
+    then ends. A newer save at ``.gitignore`` always wins; the capture, and
+    the record naming it, are then kept, never deleted. These are guarantees
+    against an interrupted process, not power loss: nothing is fsynced. The
+    lock serializes runs on the same host only; flock over a network
+    filesystem need not exclude a run on another machine.
+
+    Deliberately not handled (issue #460):
+
+    - An ancestor swapped *before* the open. A symlinked ancestor is ordinary
+      (``/tmp`` and ``/var`` on macOS, projects on another volume), so walking
+      the path with ``O_NOFOLLOW`` would refuse real setups, and resolving it
+      first is itself the step such a swap races. The cache writers resolve
+      the same path, so the file lands beside the caches it covers.
+    - A writer that opened the partial file before the repair and writes
+      through that handle after the repair's final check. Its bytes go to the
+      moved-aside copy. Closing that window needs a lock every editor honours.
+    - An entry that cannot be hard-linked (a directory, or another user's
+      file under ``fs.protected_hardlinks``) swapped in between the repair's
+      probe and its rename. It is kept under the capture name the record
+      gives, not deleted or renamed back, and no new ``.gitignore`` is
+      published while the record stands.
+    - Writers that do not take the lock. Editors never do; a link never
+      replaces their file, so the cost is a capture kept beside their save.
+      Where flock is reported unsupported no repair or recovery runs at all.
+    - The capture rename itself cannot refuse to replace an entry (Python has
+      no portable RENAME_NOREPLACE). Its target is a fresh random name, so
+      only an entry created under that exact name in the instant between
+      choosing it and the rename could be replaced.
+    - The fallbacks are publication only. Repair needs hard links, so where
+      they are refused (vfat, exFAT, some shares) a partial ``.gitignore``
+      left by an older version stays as it is. The ENOTSUP exclusive create
+      writes at the live name, so a run killed mid-write there can still
+      leave a partial file; the vfat rename and the hard link cannot. Without
+      ``dir_fd`` (Windows) there is no lock, no repair and no rename
+      fallback, only the link or the exclusive create.
+
     Best effort: any failure leaves the cache write itself unaffected.
     """
     try:
@@ -63,12 +507,12 @@ def ensure_cache_dir_ignored(directory: Path) -> None:
         except OSError:
             pass  # no home mirror (or no directory): nothing to compare
         # O_BINARY: on Windows a plain os.open is text mode and would write CRLF.
-        nofollow = (getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
-                    | getattr(os, "O_BINARY", 0))
+        flags = (getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+                 | getattr(os, "O_BINARY", 0))
         dir_fd = None
         if os.open in os.supports_dir_fd and hasattr(os, "O_DIRECTORY"):
             try:
-                dir_fd = os.open(str(directory), os.O_RDONLY | os.O_DIRECTORY | nofollow)
+                dir_fd = os.open(str(directory), os.O_RDONLY | os.O_DIRECTORY | flags)
             except OSError:
                 return
             # Re-check the home mirror against the directory actually opened,
@@ -82,56 +526,57 @@ def ensure_cache_dir_ignored(directory: Path) -> None:
             except OSError:
                 pass
         try:
-            def _open(flags: int) -> int:
-                if dir_fd is not None:
-                    return os.open(".gitignore", flags, 0o644, dir_fd=dir_fd)
-                return os.open(os.path.join(directory, ".gitignore"), flags, 0o644)
-
-            try:
-                fd = _open(os.O_CREAT | os.O_EXCL | os.O_WRONLY | nofollow)
-                done = 0
-            except FileExistsError:
-                # Repair only where the open cannot follow a symlink.
-                if not hasattr(os, "O_NOFOLLOW"):
-                    return
-                try:
-                    fd = _open(os.O_RDWR | getattr(os, "O_NONBLOCK", 0) | nofollow)
-                except OSError:
-                    return
-                existing = None
-                size = -1
-                try:
-                    info = os.fstat(fd)
-                    # A hard-linked file is shared with a path outside this
-                    # directory, so it is not ours to complete.
-                    if stat.S_ISREG(info.st_mode) and info.st_nlink == 1:
-                        size = info.st_size
-                        existing = os.read(fd, len(_CACHE_IGNORE))
-                except OSError:
-                    existing = None
-                if (existing is None or len(existing) != size
-                        or len(existing) >= len(_CACHE_IGNORE)
-                        or not _CACHE_IGNORE.startswith(existing)):
-                    os.close(fd)
-                    return
-                done = len(existing)
-            except OSError:
+            _race_point("dir-opened")
+            cache_dir = _CacheDir(directory, dir_fd)
+            present = _lstat_or_none(cache_dir, _IGNORE_NAME)
+            journal = _lstat_or_none(cache_dir, _JOURNAL_NAME)
+            if journal is None and present is not None and not _is_repair_candidate(present):
+                return  # the usual case, a complete file: nothing is written
+            lock = _lock_repairs(cache_dir)
+            if lock == "busy":
+                return  # another run is mid-repair; it or a later run finishes
+            may_repair = lock == "held"
+            if may_repair:
+                state = _resolve_journal(cache_dir, flags)
+                if state == "done":
+                    return  # a capture was restored, or kept: nothing more this run
+                may_repair = state == "clean"
+            elif journal is not None:
+                return  # unrecoverable without the lock: never publish over it
+            present = _lstat_or_none(cache_dir, _IGNORE_NAME)
+            if present is not None and not (may_repair and _is_repair_candidate(present)):
                 return
+            staged = _scratch_name("tmp")
+            fd = cache_dir.open(staged, os.O_CREAT | os.O_EXCL | os.O_WRONLY | flags)
             try:
-                os.lseek(fd, done, os.SEEK_SET)
-                remaining = memoryview(_CACHE_IGNORE)[done:]
-                while remaining:
-                    written = os.write(fd, remaining)
-                    if written <= 0:
-                        break
-                    remaining = remaining[written:]
-            except OSError:
-                pass
-            finally:
                 try:
+                    complete = _write_all(fd, _CACHE_IGNORE)
+                finally:
                     os.close(fd)
-                except OSError:
-                    pass
+                if not complete:
+                    return
+                _race_point("staged")
+                try:
+                    cache_dir.link(staged, _IGNORE_NAME)
+                except FileExistsError:
+                    if may_repair:
+                        _repair_partial_ignore(cache_dir, staged, flags)
+                except NotImplementedError:
+                    _create_in_place(cache_dir, flags)
+                except OSError as exc:
+                    # A transient failure leaves nothing; a later run retries
+                    # through the staged path rather than writing in place.
+                    if _link_unsupported(exc):
+                        _create_in_place(cache_dir, flags)
+                    elif (exc.errno == errno.EPERM and _RENAMEAT2_PLATFORM
+                          and cache_dir.fd is not None):
+                        # Linux vfat: publish the complete staged file by a
+                        # rename that never replaces; any failure writes nothing.
+                        if _renameat2_noreplace(cache_dir.fd, staged, _IGNORE_NAME) == 0:
+                            staged = None
+            finally:
+                if staged is not None:
+                    cache_dir.unlink_quietly(staged)
         finally:
             if dir_fd is not None:
                 os.close(dir_fd)

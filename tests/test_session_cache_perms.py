@@ -261,9 +261,10 @@ def test_symlinked_ignore_is_never_written_through(tmp_path: Path) -> None:
     assert os.readlink(cache_dir / ".gitignore") == str(target)
 
 
-def test_short_write_is_completed_by_the_next_call(tmp_path: Path, monkeypatch) -> None:
-    # Nothing is ever deleted (another writer may own the name by then); the
-    # partial prefix this content left is completed on the next call.
+def test_short_write_never_publishes_a_partial_ignore(tmp_path: Path, monkeypatch) -> None:
+    # The content is staged in a scratch file and only published once whole,
+    # so a stalled write leaves no .gitignore at all, and no scratch file; the
+    # next call writes it in full.
     io = _io_module()
     cache_dir = tmp_path / ".unitares"
     cache_dir.mkdir()
@@ -276,10 +277,11 @@ def test_short_write_is_completed_by_the_next_call(tmp_path: Path, monkeypatch) 
 
     monkeypatch.setattr(io.os, "write", short)
     io.ensure_cache_dir_ignored(cache_dir)  # must not raise
-    assert (cache_dir / ".gitignore").read_bytes() == io._CACHE_IGNORE[:8]
+    assert os.listdir(cache_dir) == []
     monkeypatch.setattr(io.os, "write", real_write)
     io.ensure_cache_dir_ignored(cache_dir)
     assert (cache_dir / ".gitignore").read_bytes() == io._CACHE_IGNORE
+    assert os.listdir(cache_dir) == [".gitignore"]
 
 
 def test_interrupted_write_left_by_a_killed_process_is_repaired(tmp_path: Path) -> None:
