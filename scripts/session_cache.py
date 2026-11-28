@@ -207,7 +207,7 @@ def _cache_lock(
                 except OSError:
                     if time.monotonic() >= deadline:
                         raise TimeoutError(f"{label} lock timed out: {lock_path}")
-                    time.sleep(0.025)
+                    time.sleep(min(0.005, max(0.0, deadline - time.monotonic())))
         else:
             import fcntl
 
@@ -218,7 +218,7 @@ def _cache_lock(
                 except BlockingIOError:
                     if time.monotonic() >= deadline:
                         raise TimeoutError(f"{label} lock timed out: {lock_path}")
-                    time.sleep(0.025)
+                    time.sleep(min(0.005, max(0.0, deadline - time.monotonic())))
         yield
     finally:
         if acquired:

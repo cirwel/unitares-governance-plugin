@@ -1,7 +1,7 @@
 # UNITARES for Claude Code, Codex, and ChatGPT
 
 [![CI](https://github.com/cirwel/unitares-governance-plugin/actions/workflows/ci.yml/badge.svg)](https://github.com/cirwel/unitares-governance-plugin/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-0.4.38-blue.svg)](.claude-plugin/plugin.json)
+[![Version](https://img.shields.io/badge/version-0.4.40-blue.svg)](.claude-plugin/plugin.json)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
 Connect **Claude Code, Codex, and ChatGPT** to
@@ -234,6 +234,20 @@ Hermes-native lifecycle bindings live in
 [`unitares-host-adapter`](https://github.com/cirwel/unitares-host-adapter).
 Adding a direct MCP connection to Hermes exposes tools but does not by itself
 install lifecycle automation.
+
+## Setup check (`doctor`)
+
+Verify `/usr/bin/python3`, plugin manifests, Antigravity hook sync, server `/health`,
+lease-plane `/v1/health`, Codex hook receipts, and local `.unitares/` cache hygiene
+in one read-only command (never prints tokens or raw session IDs):
+
+```bash
+python3 scripts/doctor.py --workspace "$PWD"
+```
+
+Pass `--host claude|codex|agy` to scope host checks, `--no-network` for offline
+checks, or `--json` for machine-readable output (e.g.
+`scripts/doctor.py --workspace "$PWD" --no-network --json`).
 
 ## Codex hook report
 

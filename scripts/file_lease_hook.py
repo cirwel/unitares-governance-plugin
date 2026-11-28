@@ -49,10 +49,11 @@ DEFAULT_BASE_URL = "http://127.0.0.1:8788"
 # The bearer the UNITARES Docker Compose stack gives its lease plane when .env
 # sets none (docker-compose `LEASE_PLANE_BEARER_TOKEN` default). It is a
 # published constant, not a secret: the Compose lease plane publishes on
-# loopback only. It is tried only for a loopback lease plane and only when no
-# bearer is configured, so a default Compose install gets file leases with no
-# setup; a lease plane with its own bearer rejects it and the hook fails open.
-# Required mode (UNITARES_FILE_LEASES_REQUIRED) never uses it.
+# loopback only. It is tried only for a loopback lease plane when no bearer is
+# configured, so a default Compose install gets file leases with no setup; a
+# lease plane with its own bearer rejects it and the hook fails open. Configured
+# explicitly, it is sent to a loopback lease plane the same way. Required mode
+# (UNITARES_FILE_LEASES_REQUIRED) never uses it without the transport opt-in.
 COMPOSE_DEFAULT_BEARER = "unitares-local-lease-plane"
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 # Leases are released in PostToolUse right after each edit, so this TTL is now
@@ -653,6 +654,18 @@ def _bearer_token_with_source() -> tuple[str, str]:
             and insecure_loopback_opt_in
         ):
             return token, "configured"
+        # The published Compose bearer is no secret, so writing it down
+        # explicitly must not change what the unset fallback below already
+        # sends over loopback HTTP. Refusing it here turned leases off for an
+        # operator who copied the Compose default into their environment
+        # (#453). Required mode keeps refusing it without the opt-in.
+        if (
+            token == COMPOSE_DEFAULT_BEARER
+            and scheme == "http"
+            and _is_loopback_url(url)
+            and not _required()
+        ):
+            return token, "compose_default"
         return "", "insecure_transport"
     # Required mode is an explicit fail-closed policy; it names its bearer
     # rather than inheriting a development default.
