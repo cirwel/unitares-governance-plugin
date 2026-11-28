@@ -17,6 +17,19 @@ wrote on your machine also stay until you remove them.
 From a terminal, `claude plugin uninstall unitares-governance@unitares-governance`
 does the same. Start a new session afterwards.
 
+If you followed [Server connections](configuration.md#server-connections) and
+registered a separate authenticated server with Claude, uninstalling the plugin
+leaves that registration and its bearer header in place. Remove it under the
+name you registered it with, which `claude mcp list` shows:
+
+```bash
+claude mcp list
+claude mcp remove <name>            # add --scope local|user|project if it is in several
+```
+
+Then unset `UNITARES_HTTP_API_TOKEN` if nothing else uses it (see
+[Remove local state](#remove-local-state)).
+
 **Codex.**
 
 ```bash
@@ -63,7 +76,8 @@ another host or another UNITARES tool still uses them.
   `~/.config/cirwel/secrets.env`), if you created it only for the plugin's
   lease-plane bearer.
 - **Environment variables** you exported for the plugin, such as
-  `UNITARES_SERVER_URL`, `LEASE_PLANE_BASE_URL`, `LEASE_PLANE_BEARER_TOKEN` and
+  `UNITARES_SERVER_URL`, `UNITARES_HTTP_API_TOKEN`, `LEASE_PLANE_BASE_URL`,
+  `LEASE_PLANE_BEARER_TOKEN` and
   `UNITARES_FILE_LEASES_REQUIRED`, in your shell profile.
 
 A file lease an edit held when you uninstalled expires on its own after

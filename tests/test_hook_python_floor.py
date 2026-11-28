@@ -5,7 +5,8 @@ every hook runs /usr/bin/python3 from the Command Line Tools, which is Python
 3.9, whatever else is installed (#453). The test suite runs on 3.12, so
 nothing caught syntax the hooks' interpreter cannot parse. These tests pin
 Python 3.9 as the syntax floor for every script a hook can run and every
-quoted Python heredoc in the hook scripts.
+quoted Python heredoc in the hook scripts, and flag a python3 heredoc the scan
+cannot read.
 
 They check syntax, not runtime APIs: a 3.10+ standard-library call would still
 pass here.
@@ -25,13 +26,47 @@ ROOT = Path(__file__).resolve().parents[1]
 FLOOR = (3, 9)
 SYSTEM_PYTHON = Path("/usr/bin/python3")
 
-# A heredoc whose delimiter is quoted is passed to Python verbatim. A comment
-# line that quotes the pattern does not start one.
-_HEREDOC = re.compile(
-    r"^(?![ \t]*#)[^\n]*python3\b[^\n]*<<\s*'(?P<tag>[A-Z_]+)'[^\n]*\n"
-    r"(?P<body>.*?)\n(?P=tag)\n",
-    re.S | re.M,
+# A heredoc whose delimiter is quoted ('PY' or "PY") is passed to Python
+# verbatim. With `<<-` the shell also strips leading tabs from each body line
+# and from the terminator, so the scan strips them too before parsing. A
+# comment line that quotes the pattern does not start one.
+_HEREDOC_OPEN = re.compile(
+    r"""^(?![ \t]*#).*\bpython3\b.*?<<(?P<dash>-?)[ \t]*(?P<q>['"])(?P<tag>[A-Za-z_][A-Za-z0-9_]*)(?P=q)"""
 )
+# Any python3 heredoc at all, quoted or not, so an opener the scan above would
+# miss (an unquoted delimiter lets the shell expand the body) is flagged.
+_ANY_PYTHON_HEREDOC = re.compile(r"^(?![ \t]*#).*\bpython3\b.*?<<(?!<)")
+
+
+def _extract_heredocs(text: str) -> tuple[list[str], list[str]]:
+    """Return (bodies, problems) for the python3 heredocs in a shell script."""
+    lines = text.split("\n")
+    bodies: list[str] = []
+    problems: list[str] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        opener = _HEREDOC_OPEN.match(line)
+        if opener is None:
+            if _ANY_PYTHON_HEREDOC.match(line):
+                problems.append(f"line {i + 1}: python3 heredoc without a quoted delimiter")
+            i += 1
+            continue
+        strip_tabs = opener.group("dash") == "-"
+        tag = opener.group("tag")
+        body: list[str] = []
+        j = i + 1
+        while j < len(lines):
+            candidate = lines[j].lstrip("\t") if strip_tabs else lines[j]
+            if candidate == tag:
+                break
+            body.append(candidate)
+            j += 1
+        else:
+            problems.append(f"line {i + 1}: heredoc {tag!r} is never terminated")
+        bodies.append("\n".join(body) + "\n")
+        i = j + 1
+    return bodies, problems
 
 
 def _hook_scripts() -> list[Path]:
@@ -40,20 +75,60 @@ def _hook_scripts() -> list[Path]:
     return scripts
 
 
+def _hook_files() -> list[Path]:
+    return [
+        hook
+        for hook in sorted((ROOT / "hooks").iterdir())
+        if hook.is_file() and hook.suffix != ".json"
+    ]
+
+
 def _hook_heredocs() -> list[tuple[str, str]]:
     blocks = []
-    for hook in sorted((ROOT / "hooks").iterdir()):
-        if not hook.is_file() or hook.suffix == ".json":
-            continue
-        text = hook.read_text(encoding="utf-8")
-        for n, match in enumerate(_HEREDOC.finditer(text)):
-            blocks.append((f"{hook.name}#{n}", match.group("body")))
+    for hook in _hook_files():
+        bodies, _ = _extract_heredocs(hook.read_text(encoding="utf-8"))
+        blocks.extend((f"{hook.name}#{n}", body) for n, body in enumerate(bodies))
     return blocks
 
 
 def test_the_heredoc_scan_finds_the_hook_python() -> None:
     names = {name.split("#")[0] for name, _ in _hook_heredocs()}
     assert {"session-start", "post-identity", "post-checkin"} <= names
+
+
+def test_every_python_heredoc_in_the_hooks_is_scanned() -> None:
+    problems = []
+    for hook in _hook_files():
+        _, found = _extract_heredocs(hook.read_text(encoding="utf-8"))
+        problems.extend(f"{hook.name} {p}" for p in found)
+    assert problems == [], problems
+
+
+def test_the_scan_reads_quoted_tab_stripping_heredocs() -> None:
+    text = (
+        "x=$(python3 - <<-'PY'\n"
+        "\timport sys\n"
+        "\tif True:\n"
+        "\t    print(sys.argv)\n"
+        "\tPY\n"
+        ")\n"
+        'y=$(python3 - <<"END"\n'
+        "print(1)\n"
+        "END\n"
+        ")\n"
+    )
+    bodies, problems = _extract_heredocs(text)
+    assert problems == []
+    assert bodies == ["import sys\nif True:\n    print(sys.argv)\n", "print(1)\n"]
+    for body in bodies:
+        ast.parse(body, feature_version=FLOOR)
+
+
+def test_the_scan_flags_unquoted_and_unterminated_heredocs() -> None:
+    _, problems = _extract_heredocs("python3 - <<PY\nprint(1)\nPY\n")
+    assert problems and "without a quoted delimiter" in problems[0]
+    _, problems = _extract_heredocs("python3 - <<'PY'\nprint(1)\n")
+    assert problems and "never terminated" in problems[0]
 
 
 @pytest.mark.parametrize("path", _hook_scripts(), ids=lambda p: p.name)
@@ -86,15 +161,9 @@ def _system_python_version() -> tuple[int, int] | None:
     return int(parts[0]), int(parts[1])
 
 
-def test_scripts_compile_under_the_system_python(tmp_path: Path) -> None:
-    """Where /usr/bin/python3 is older than the suite's interpreter (macOS),
-    compile each hook script with it as well, since ast's feature_version is
-    best effort."""
-    version = _system_python_version()
-    if version is None or version >= sys.version_info[:2]:
-        pytest.skip("no older /usr/bin/python3 to compile with")
+def _system_python_failures(sources: list[tuple[str, Path]], tmp_path: Path) -> list[str]:
     failures = []
-    for n, path in enumerate(_hook_scripts()):
+    for n, (name, path) in enumerate(sources):
         result = subprocess.run(
             [
                 str(SYSTEM_PYTHON),
@@ -108,6 +177,32 @@ def test_scripts_compile_under_the_system_python(tmp_path: Path) -> None:
             timeout=30,
         )
         if result.returncode != 0:
-            failures.append(f"{path.name}: {result.stderr.strip().splitlines()[-1:]}")
-    assert failures == [], failures
+            failures.append(f"{name}: {result.stderr.strip().splitlines()[-1:]}")
+    return failures
 
+
+def _require_older_system_python() -> None:
+    version = _system_python_version()
+    if version is None or version >= sys.version_info[:2]:
+        pytest.skip("no older /usr/bin/python3 to compile with")
+
+
+def test_scripts_compile_under_the_system_python(tmp_path: Path) -> None:
+    """Where /usr/bin/python3 is older than the suite's interpreter (macOS),
+    compile each hook script with it as well, since ast's feature_version is
+    best effort."""
+    _require_older_system_python()
+    sources = [(path.name, path) for path in _hook_scripts()]
+    assert _system_python_failures(sources, tmp_path) == []
+
+
+def test_heredocs_compile_under_the_system_python(tmp_path: Path) -> None:
+    """The same check for the Python each hook passes on stdin."""
+    _require_older_system_python()
+    sources = []
+    for n, (name, body) in enumerate(_hook_heredocs()):
+        path = tmp_path / f"heredoc_{n}.py"
+        path.write_text(body, encoding="utf-8")
+        sources.append((name, path))
+    assert sources
+    assert _system_python_failures(sources, tmp_path) == []

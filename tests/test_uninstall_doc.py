@@ -50,7 +50,17 @@ def test_antigravity_hook_group_matches_the_installer() -> None:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     assert f'"{module.HOOK_GROUP_KEY}"' in _doc()
-    assert "~/.gemini/config/hooks.json" in _doc()
+    documented = "~/" + module.DEFAULT_TARGET.relative_to(Path.home()).as_posix()
+    assert f"`{documented}`" in _doc()
+
+
+def test_claude_authenticated_server_removal_is_documented() -> None:
+    config = " ".join((ROOT / "docs" / "configuration.md").read_text(encoding="utf-8").split())
+    assert "register the HTTPS endpoint with Claude" in config
+    text = _doc()
+    assert "claude mcp list" in text
+    assert "claude mcp remove <name>" in text
+    assert "UNITARES_HTTP_API_TOKEN" in text
 
 
 def test_named_state_paths_are_ones_the_hooks_use() -> None:
