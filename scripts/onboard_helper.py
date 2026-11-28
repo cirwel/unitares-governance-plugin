@@ -369,6 +369,36 @@ def _identity_fingerprint(payload: dict[str, Any]) -> tuple[str, ...]:
 _HOST_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 
 
+HARNESS_ONBOARDING_DECLINED = "harness_onboarding_declined"
+SPAWNED_UNDER_ENV = "UNITARES_SPAWNED_UNDER"
+_SPAWNED_UNDER_RE = re.compile(r"agent:[/_]thread-[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+
+
+def is_harness_onboarding_declined(parsed: Any) -> bool:
+    """True when the server answered that it creates identities only for
+    agents that claim one. A policy answer from the server's operator, not a
+    failure: nothing is retried and nothing is cached."""
+    return (
+        isinstance(parsed, dict)
+        and parsed.get("refused") is True
+        and parsed.get("status") == HARNESS_ONBOARDING_DECLINED
+    )
+
+
+def _spawned_under(value: str | None = None) -> dict[str, str] | None:
+    """The ``spawned_under`` declaration for a fresh mint, or None.
+
+    ``hooks/run-hook.cmd`` sets ``UNITARES_SPAWNED_UNDER`` when it strips a
+    thread anchor this process inherited and does not own: the conversation
+    this process was started inside. It is declared as context. It is not
+    lineage and is never sent as ``parent_agent_id``.
+    """
+    anchor = (value if value is not None else os.environ.get(SPAWNED_UNDER_ENV, "")).strip()
+    if not anchor or not _SPAWNED_UNDER_RE.fullmatch(anchor):
+        return None
+    return {"anchor": anchor}
+
+
 def _host_session(
     harness: str | None, session_id: str | None, session_dir: Path | None
 ) -> dict[str, str] | None:
@@ -407,6 +437,7 @@ def run_onboard(
     force_new: bool = False,
     client_session_id: str | None = None,
     orchestrated: bool = False,
+    harness_request: bool = False,
     auth_token: str | None = None,
     timeout: float = DEFAULT_TIMEOUT,
     initial_state: dict | None = None,
@@ -495,9 +526,35 @@ def run_onboard(
         host_session = _host_session(host_harness, host_session_id, host_session_dir)
         if host_session:
             arguments["host_session"] = host_session
+        spawned_under = _spawned_under()
+        if spawned_under:
+            arguments["spawned_under"] = spawned_under
+
+    # A hook asking on a session's behalf says so, and the server's operator
+    # decides whether it creates identities for a harness. Resuming an
+    # existing identity is not affected. The sidecar's explicit start route
+    # does not pass this, and behaves as it did.
+    if harness_request:
+        arguments["harness_request"] = True
 
     raw = post_json(url, {"name": "onboard", "arguments": arguments}, timeout, auth_token)
     parsed = unwrap_tool_response(raw)
+
+    if is_harness_onboarding_declined(parsed):
+        if not resume:
+            # Let this slot's later hooks stop asking for a while. An anchor
+            # is not marked: its agent may claim an identity this turn, and
+            # the next hook must ask again to resume it.
+            try:
+                from harness_decline_marker import record_decline
+
+                record_decline(slot, server_url)
+            except Exception:
+                pass
+        return {
+            "status": "harness_declined",
+            "error": "the server creates identities only for agents that claim one",
+        }
 
     if not is_successful_onboard(parsed):
         # Per 718ccd3: never auto-retry with a weaker/different identity
@@ -683,6 +740,8 @@ def main(argv: list[str] | None = None) -> int:
         force_new=args.force_new,
         client_session_id=client_session_id,
         orchestrated=args.orchestrated,
+        # Every command-line caller is a hook acting for a session.
+        harness_request=True,
         auth_token=auth_token,
         timeout=args.timeout,
         bootstrap=args.bootstrap,

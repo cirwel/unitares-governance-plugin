@@ -279,39 +279,30 @@ fi
 # force_new=true, per-slot name scoping, lineage via parent_agent_id, no
 # persisted continuity token.
 CHECKINS_MODE="$(printf '%s' "${UNITARES_CHECKINS:-on}" | tr '[:upper:]' '[:lower:]')"
-AUTO_ONBOARD_MODE="$(printf '%s' "${UNITARES_AUTO_ONBOARD:-off}" | tr '[:upper:]' '[:lower:]')"
-DISABLE_AUTO_ONBOARD="$(printf '%s' "${UNITARES_DISABLE_AUTO_ONBOARD:-0}" | tr '[:upper:]' '[:lower:]')"
-# `anchored` opts in for one process only: the one that owns an orchestrated
-# thread anchor. Everything else, including a CLI that process starts and that
-# inherits this variable, is treated as off. `on` would mint an identity for
-# each of those children.
-# Any word this hook does not know counts as on, so `anchored` is recognised
-# with space around it too; no other value is read differently than before.
-AUTO_ONBOARD_WORD="${AUTO_ONBOARD_MODE#"${AUTO_ONBOARD_MODE%%[![:space:]]*}"}"
-AUTO_ONBOARD_WORD="${AUTO_ONBOARD_WORD%"${AUTO_ONBOARD_WORD##*[![:space:]]}"}"
-if [[ "${AUTO_ONBOARD_WORD}" == "anchored" ]]; then
-  if [[ "${ANCHOR_RESUME_ENABLED:-0}" == "1" ]]; then
-    AUTO_ONBOARD_MODE="on"
-  else
-    AUTO_ONBOARD_MODE="off"
-  fi
+# Whether to ask the server for an identity is decided in one place, for this
+# hook and for the session-start text that tells the agent what will happen
+# (scripts/auto_onboard_decision.py): off, anchored (only the owner of a
+# thread anchor), or on (the default). A missing helper means do not ask.
+AUTO_ONBOARD_DECISION="skip:error"
+if [[ -f "${PLUGIN_ROOT}/scripts/auto_onboard_decision.py" ]]; then
+  AUTO_ONBOARD_DECISION="$(python3 "${PLUGIN_ROOT}/scripts/auto_onboard_decision.py" \
+    "--mode=${UNITARES_AUTO_ONBOARD:-}" \
+    "--disable=${UNITARES_DISABLE_AUTO_ONBOARD:-}" \
+    "--checkins=${UNITARES_CHECKINS:-on}" \
+    "--owns-anchor=${ANCHOR_RESUME_ENABLED:-0}" \
+    "--server-url=${SERVER_URL}" \
+    "--slot=${RAW_SLOT:-}" 2>/dev/null)" || AUTO_ONBOARD_DECISION="skip:error"
 fi
 ANCHOR_REPORT="${PLUGIN_ROOT}/scripts/anchor_bind_report.py"
 ANCHOR_BIND_TRIED=0
-ANCHOR_UNBOUND_WHY="auto-onboarding is off"
-if [[ "${CHECKINS_MODE}" == "off" ]]; then
-  ANCHOR_UNBOUND_WHY="check-ins are off"
-fi
+case "${AUTO_ONBOARD_DECISION}" in
+  skip:checkins_off) ANCHOR_UNBOUND_WHY="check-ins are off" ;;
+  skip:insecure_transport) ANCHOR_UNBOUND_WHY="the server is neither on this machine nor reached over HTTPS" ;;
+  *) ANCHOR_UNBOUND_WHY="auto-onboarding is off" ;;
+esac
 if [[ -z "${CSID:-}" && -n "${RAW_SLOT:-}" \
       && ( "${HOOK_MODE}" != "session_start" || "${ANCHOR_RESUME_ENABLED}" == "1" ) \
-      && "${CHECKINS_MODE}" != "off" \
-      && "${AUTO_ONBOARD_MODE}" != "0" \
-      && "${AUTO_ONBOARD_MODE}" != "off" \
-      && "${AUTO_ONBOARD_MODE}" != "false" \
-      && "${AUTO_ONBOARD_MODE}" != "no" \
-      && "${DISABLE_AUTO_ONBOARD}" != "1" \
-      && "${DISABLE_AUTO_ONBOARD}" != "true" \
-      && "${DISABLE_AUTO_ONBOARD}" != "on" ]]; then
+      && "${AUTO_ONBOARD_DECISION}" == "bind" ]]; then
   ONBOARD_HELPER="${PLUGIN_ROOT}/scripts/onboard_helper.py"
   ANCHOR_UNBOUND_WHY="the onboarding helper is missing from this install"
   if [[ -f "${ONBOARD_HELPER}" ]]; then

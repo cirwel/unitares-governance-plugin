@@ -263,7 +263,13 @@ class TestSessionStartContext:
         assert payload["hookSpecificOutput"]["additionalContext"]
 
     def test_online_context_offers_start_session_with_lazy_onboard_fallback(self, tmp_path):
-        stdout, _ = _serve_and_run(tmp_path)
+        # The Stop hook binds into a session slot, so the promise is made only
+        # to a session whose host gave an id. Eager binding is off here so the
+        # context is the one shown before any identity exists.
+        stdout, _ = _serve_and_run(
+            tmp_path, claude_session_id="lazy-fallback-slot",
+            extra_env={"UNITARES_EAGER_BIND": "off"},
+        )
         ctx = _context(stdout)
         assert "UNITARES Governance: ONLINE" in ctx
         assert "Identity attribution" in ctx
@@ -272,11 +278,11 @@ class TestSessionStartContext:
         assert "onboard(" in ctx
         assert "Stop hook will lazily create a slot-scoped identity" in ctx
 
-    def test_default_does_not_promise_lazy_onboarding(self, tmp_path):
-        # UNITARES_AUTO_ONBOARD unset: the shipped default is off, so the note
-        # must not tell the agent an identity will appear at turn stop.
+    def test_off_does_not_promise_lazy_onboarding(self, tmp_path):
+        # With onboarding by the hooks off, the note must not tell the agent
+        # an identity will appear at turn stop.
         stdout, _ = _serve_and_run(
-            tmp_path, extra_env={"UNITARES_AUTO_ONBOARD": None}
+            tmp_path, extra_env={"UNITARES_AUTO_ONBOARD": "off"}
         )
         ctx = _context(stdout)
         assert "lazily create" not in ctx

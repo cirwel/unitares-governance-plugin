@@ -166,7 +166,6 @@ def test_on_still_binds_a_process_that_owns_no_anchor(tmp_path):
 
 
 @pytest.mark.parametrize("env,why", [
-    ({}, "auto-onboarding is off"),
     ({"UNITARES_AUTO_ONBOARD": "off"}, "auto-onboarding is off"),
     ({"UNITARES_AUTO_ONBOARD": "anchored", "UNITARES_DISABLE_AUTO_ONBOARD": "1"}, "auto-onboarding is off"),
     ({"UNITARES_AUTO_ONBOARD": "anchored", "UNITARES_CHECKINS": "off"}, "check-ins are off"),
