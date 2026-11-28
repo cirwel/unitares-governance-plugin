@@ -104,3 +104,23 @@ def test_governance_start_leaves_the_slot_write_to_the_hook() -> None:
     text = _flat(ROOT / "commands" / "governance-start.md")
     assert "do not write the session cache yourself" in text
     assert "--slot=<client_session_id>" not in text
+
+
+def test_governance_start_checks_for_an_already_bound_process() -> None:
+    # #453: the command always led to a force_new mint, which the
+    # pre-governance-call guard refuses in an already bound process. The
+    # command now tells the agent to keep that identity, and recognises it by
+    # the wording the hooks actually emit, so those strings must stay in sync.
+    text = _flat(ROOT / "commands" / "governance-start.md")
+    assert "First check whether **this process** is already bound" in text
+    assert "A slot cache in the workspace is not that evidence" in text
+
+    session_start = _flat(ROOT / "hooks" / "session-start")
+    assert "this ${HOOK_HOST} process is already bound to governance" in session_start
+    assert '"this claude process is already bound to governance"' in text
+
+    guard = (ROOT / "scripts" / "governance_call_inject.py").read_text(encoding="utf-8")
+    assert '"This process is already bound to governance as agent_uuid' in guard
+    assert '"This process is already bound"' in text
+    assert 'spawn_reason=\\"explicit\\"' in guard
+    assert '`spawn_reason="explicit"` as the refusal says' in text

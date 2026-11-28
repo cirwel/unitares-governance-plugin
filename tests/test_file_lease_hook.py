@@ -2270,6 +2270,58 @@ def test_configured_bearer_wins_over_the_compose_default(tmp_path, monkeypatch, 
     assert file_lease_hook._bearer_token_with_source() == ("operator-token", "configured")
 
 
+def test_configured_compose_default_is_sent_like_the_unset_fallback(
+    tmp_path, monkeypatch, lease_server
+):
+    """#453: copying the published Compose bearer into the environment turned
+    leases off, while leaving it unset sent the same value over the same
+    loopback HTTP. The explicit value must behave like the fallback."""
+    _no_configured_bearer(monkeypatch, tmp_path)
+    monkeypatch.delenv("UNITARES_ALLOW_INSECURE_LOOPBACK_LEASE_HTTP", raising=False)
+    monkeypatch.delenv("UNITARES_LEASE_PLANE_UNIX_SOCKET", raising=False)
+    monkeypatch.setenv("LEASE_PLANE_BASE_URL", f"http://127.0.0.1:{lease_server.server_address[1]}")
+    monkeypatch.setenv("LEASE_PLANE_BEARER_TOKEN", file_lease_hook.COMPOSE_DEFAULT_BEARER)
+
+    assert file_lease_hook._bearer_token_with_source() == (
+        file_lease_hook.COMPOSE_DEFAULT_BEARER,
+        "compose_default",
+    )
+    rc = file_lease_hook.main(
+        ["pre-edit", "--workspace", str(tmp_path)],
+        stdin_text=_payload(tool_use_id="toolu_configured_compose_default"),
+    )
+
+    assert rc == 0
+    acquires = [c for c in LeaseHandler.calls if c["path"] == "/v1/lease/acquire"]
+    assert acquires
+    assert acquires[0]["authorization"] == f"Bearer {file_lease_hook.COMPOSE_DEFAULT_BEARER}"
+
+
+@pytest.mark.parametrize(
+    "token,url,required",
+    [
+        # Any other bearer is a secret: still not sent over cleartext.
+        ("operator-token", "http://127.0.0.1:8788", False),
+        # The published value goes only to a loopback lease plane.
+        ("unitares-local-lease-plane", "http://lease.example.com:8788", False),
+        # Required mode still names its transport opt-in.
+        ("unitares-local-lease-plane", "http://127.0.0.1:8788", True),
+    ],
+)
+def test_configured_compose_default_exception_stays_narrow(
+    tmp_path, monkeypatch, token, url, required
+):
+    _no_configured_bearer(monkeypatch, tmp_path)
+    monkeypatch.delenv("UNITARES_ALLOW_INSECURE_LOOPBACK_LEASE_HTTP", raising=False)
+    monkeypatch.delenv("UNITARES_LEASE_PLANE_UNIX_SOCKET", raising=False)
+    monkeypatch.setenv("LEASE_PLANE_BASE_URL", url)
+    monkeypatch.setenv("LEASE_PLANE_BEARER_TOKEN", token)
+    if required:
+        monkeypatch.setenv("UNITARES_FILE_LEASES_REQUIRED", "1")
+
+    assert file_lease_hook._bearer_token_with_source() == ("", "insecure_transport")
+
+
 def test_remote_lease_plane_never_gets_the_compose_default(tmp_path, monkeypatch):
     _no_configured_bearer(monkeypatch, tmp_path)
     monkeypatch.setenv("LEASE_PLANE_BASE_URL", "https://lease.example.com")

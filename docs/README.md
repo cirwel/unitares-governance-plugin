@@ -11,6 +11,7 @@ configuration, and the day-to-day workflow, start with the
 |---|---|---|
 | Project overview and install | [`README.md`](../README.md) | What the plugin adds, host setup, and the core workflow |
 | Configuration reference | [`configuration.md`](./configuration.md) | Remote servers, authentication, environment variables, and kill switches |
+| Uninstall | [`uninstall.md`](./uninstall.md) | Remove the plugin from each host and clean up the local state its hooks leave |
 | Codex/ChatGPT quickstart | [`CODEX_START.md`](../CODEX_START.md) | The preferred entry path — modes, recommended flow, continuity cache |
 | ChatGPT package | [`chatgpt.md`](./chatgpt.md) | Build the hook-free portable package for a registered app or hosted OAuth MCP server |
 | Adapter reference | [`adapters.md`](./adapters.md) | Claude hooks, Codex/ChatGPT, and the local sidecar — full detail and endpoints |
