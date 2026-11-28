@@ -30,12 +30,27 @@ SYSTEM_PYTHON = Path("/usr/bin/python3")
 # verbatim. With `<<-` the shell also strips leading tabs from each body line
 # and from the terminator, so the scan strips them too before parsing. A
 # comment line that quotes the pattern does not start one.
+#
+# Shell forms the scan reads: one python3 heredoc per command, whose opener may
+# span physical lines joined by backslash-newline (the body starts after the
+# last of them). `<<` is matched only with no `<` on either side, so a `<<<`
+# here-string is not taken for a heredoc. Not modelled: several heredocs in one
+# command, a python3 command continued across a line ending in `|` or `&&`
+# without a backslash, and backslash-newline inside single quotes (where the
+# shell keeps it literally).
+_HEREDOC_OP = r"(?<!<)<<(?!<)"
 _HEREDOC_OPEN = re.compile(
-    r"""^(?![ \t]*#).*\bpython3\b.*?<<(?P<dash>-?)[ \t]*(?P<q>['"])(?P<tag>[A-Za-z_][A-Za-z0-9_]*)(?P=q)"""
+    r"^(?![ \t]*#).*\bpython3\b.*?" + _HEREDOC_OP
+    + r"""(?P<dash>-?)[ \t]*(?P<q>['"])(?P<tag>[A-Za-z_][A-Za-z0-9_]*)(?P=q)"""
 )
 # Any python3 heredoc at all, quoted or not, so an opener the scan above would
 # miss (an unquoted delimiter lets the shell expand the body) is flagged.
-_ANY_PYTHON_HEREDOC = re.compile(r"^(?![ \t]*#).*\bpython3\b.*?<<(?!<)")
+_ANY_PYTHON_HEREDOC = re.compile(r"^(?![ \t]*#).*\bpython3\b.*?" + _HEREDOC_OP)
+
+
+def _continues(line: str) -> bool:
+    """A line ending in an odd number of backslashes continues the command."""
+    return (len(line) - len(line.rstrip("\\"))) % 2 == 1
 
 
 def _extract_heredocs(text: str) -> tuple[list[str], list[str]]:
@@ -45,11 +60,18 @@ def _extract_heredocs(text: str) -> tuple[list[str], list[str]]:
     problems: list[str] = []
     i = 0
     while i < len(lines):
-        line = lines[i]
-        opener = _HEREDOC_OPEN.match(line)
+        # Join backslash-newline continuations into one logical command line.
+        first = i
+        logical = lines[i]
+        while _continues(logical) and i + 1 < len(lines):
+            i += 1
+            logical = logical[:-1] + lines[i]
+        opener = _HEREDOC_OPEN.match(logical)
         if opener is None:
-            if _ANY_PYTHON_HEREDOC.match(line):
-                problems.append(f"line {i + 1}: python3 heredoc without a quoted delimiter")
+            if _ANY_PYTHON_HEREDOC.match(logical):
+                problems.append(
+                    f"line {first + 1}: python3 heredoc without a quoted delimiter"
+                )
             i += 1
             continue
         strip_tabs = opener.group("dash") == "-"
@@ -63,7 +85,7 @@ def _extract_heredocs(text: str) -> tuple[list[str], list[str]]:
             body.append(candidate)
             j += 1
         else:
-            problems.append(f"line {i + 1}: heredoc {tag!r} is never terminated")
+            problems.append(f"line {first + 1}: heredoc {tag!r} is never terminated")
         bodies.append("\n".join(body) + "\n")
         i = j + 1
     return bodies, problems
@@ -122,6 +144,43 @@ def test_the_scan_reads_quoted_tab_stripping_heredocs() -> None:
     assert bodies == ["import sys\nif True:\n    print(sys.argv)\n", "print(1)\n"]
     for body in bodies:
         ast.parse(body, feature_version=FLOOR)
+
+
+def test_the_scan_follows_backslash_newline_continuations() -> None:
+    text = (
+        'out=$(python3 - "${A}" \\\n'
+        '  "${B}" \\\n'
+        "  <<'PY' 2>/dev/null || true\n"
+        "import sys\n"
+        "PY\n"
+        ")\n"
+        "python3 - \\\n"
+        "  <<PY\n"
+        "print(1)\n"
+        "PY\n"
+    )
+    bodies, problems = _extract_heredocs(text)
+    assert bodies == ["import sys\n"]
+    assert problems == ["line 7: python3 heredoc without a quoted delimiter"]
+
+
+def test_an_escaped_backslash_does_not_continue_the_line() -> None:
+    bodies, problems = _extract_heredocs("python3 - x\\\\\n<<'PY'\nprint(1)\nPY\n")
+    assert bodies == [] and problems == []
+
+
+def test_a_here_string_is_not_a_heredoc() -> None:
+    text = (
+        "python3 - <<<\"${x}\"\n"
+        "python3 - <<<'print(1)'\n"
+        "read -r a b <<<\"${line}\"\n"
+        "python3 - <<<\"${x}\" <<'PY'\n"
+        "print(2)\n"
+        "PY\n"
+    )
+    bodies, problems = _extract_heredocs(text)
+    assert problems == []
+    assert bodies == ["print(2)\n"]
 
 
 def test_the_scan_flags_unquoted_and_unterminated_heredocs() -> None:
