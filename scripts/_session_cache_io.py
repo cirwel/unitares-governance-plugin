@@ -9,6 +9,7 @@ import os
 import re
 import secrets
 import stat
+import sys
 import tempfile
 import time
 from contextlib import contextmanager
@@ -163,6 +164,35 @@ _LINK_UNSUPPORTED_WINERRORS = frozenset({1, 50})
 def _link_unsupported(exc: OSError) -> bool:
     return (exc.errno in _LINK_UNSUPPORTED_ERRNOS
             or getattr(exc, "winerror", None) in _LINK_UNSUPPORTED_WINERRORS)
+
+
+# Linux vfat refuses every hard link with EPERM but supports renameat2's
+# RENAME_NOREPLACE (since Linux 4.9; see rename(2)). On Linux an EPERM from
+# the staged link therefore gets one no-replace rename of the complete staged
+# file instead. Elsewhere, and on any failure of that rename, nothing is
+# written.
+_RENAMEAT2_PLATFORM = sys.platform.startswith("linux")
+_RENAME_NOREPLACE = 1
+
+
+def _renameat2_noreplace(dir_fd: int, src: str, dst: str) -> int:
+    """``renameat2(dir_fd, src, dir_fd, dst, RENAME_NOREPLACE)`` through libc.
+
+    Returns 0 on success or the errno: EEXIST when ``dst`` exists, which is
+    left untouched; EINVAL when the filesystem does not support the flag;
+    ENOSYS when libc has no ``renameat2`` symbol. Never an overwriting rename.
+    """
+    try:
+        import ctypes
+
+        renameat2 = ctypes.CDLL(None, use_errno=True).renameat2
+    except (ImportError, OSError, AttributeError):
+        return errno.ENOSYS
+    renameat2.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint)
+    renameat2.restype = ctypes.c_int
+    if renameat2(dir_fd, os.fsencode(src), dir_fd, os.fsencode(dst), _RENAME_NOREPLACE) == 0:
+        return 0
+    return ctypes.get_errno() or errno.EIO
 
 
 # A repair's transaction record. Published (by a no-replace link) before the
@@ -410,8 +440,11 @@ def ensure_cache_dir_ignored(directory: Path) -> None:
     open is not written into. The full content is written to a scratch file
     first and published by a hard link, which never replaces an entry, so no
     reader ever sees a partial ``.gitignore`` and a killed run leaves none.
-    Only where the filesystem reports hard links unsupported does it fall
-    back to an exclusive create; any other link failure writes nothing and a
+    Only where the filesystem reports hard links unsupported (ENOTSUP) does
+    it fall back to an exclusive create. On Linux an EPERM from the link, as
+    vfat gives for every link, instead publishes the complete staged file by
+    ``renameat2(RENAME_NOREPLACE)``, which also never replaces an entry. Any
+    other link failure, or a failure of that rename, writes nothing and a
     later run retries.
 
     An existing ``.gitignore`` is never written into. It is replaced only when
@@ -427,7 +460,9 @@ def ensure_cache_dir_ignored(directory: Path) -> None:
     the same run or the next, before anything new is published, and that run
     then ends. A newer save at ``.gitignore`` always wins; the capture, and
     the record naming it, are then kept, never deleted. These are guarantees
-    against an interrupted process, not power loss: nothing is fsynced.
+    against an interrupted process, not power loss: nothing is fsynced. The
+    lock serializes runs on the same host only; flock over a network
+    filesystem need not exclude a run on another machine.
 
     Deliberately not handled (issue #460):
 
@@ -451,6 +486,13 @@ def ensure_cache_dir_ignored(directory: Path) -> None:
       no portable RENAME_NOREPLACE). Its target is a fresh random name, so
       only an entry created under that exact name in the instant between
       choosing it and the rename could be replaced.
+    - The fallbacks are publication only. Repair needs hard links, so where
+      they are refused (vfat, exFAT, some shares) a partial ``.gitignore``
+      left by an older version stays as it is. The ENOTSUP exclusive create
+      writes at the live name, so a run killed mid-write there can still
+      leave a partial file; the vfat rename and the hard link cannot. Without
+      ``dir_fd`` (Windows) there is no lock, no repair and no rename
+      fallback, only the link or the exclusive create.
 
     Best effort: any failure leaves the cache write itself unaffected.
     """
@@ -526,8 +568,15 @@ def ensure_cache_dir_ignored(directory: Path) -> None:
                     # through the staged path rather than writing in place.
                     if _link_unsupported(exc):
                         _create_in_place(cache_dir, flags)
+                    elif (exc.errno == errno.EPERM and _RENAMEAT2_PLATFORM
+                          and cache_dir.fd is not None):
+                        # Linux vfat: publish the complete staged file by a
+                        # rename that never replaces; any failure writes nothing.
+                        if _renameat2_noreplace(cache_dir.fd, staged, _IGNORE_NAME) == 0:
+                            staged = None
             finally:
-                cache_dir.unlink_quietly(staged)
+                if staged is not None:
+                    cache_dir.unlink_quietly(staged)
         finally:
             if dir_fd is not None:
                 os.close(dir_fd)

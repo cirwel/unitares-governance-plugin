@@ -692,3 +692,131 @@ def test_an_unsupported_link_falls_back_to_an_exclusive_create(tmp_path: Path, m
     io.ensure_cache_dir_ignored(cache_dir)
     assert (cache_dir / ".gitignore").read_bytes() == io._CACHE_IGNORE
     assert _scratch(cache_dir) == []
+
+
+# --- Linux vfat: EPERM link, no-replace rename publish ----------------------
+
+def _eperm_links(io, monkeypatch) -> None:
+    def refused(*args, **kwargs):
+        raise PermissionError(errno.EPERM, "Operation not permitted")
+
+    monkeypatch.setattr(io.os, "link", refused)
+    monkeypatch.setattr(io, "_create_in_place", lambda *a: pytest.fail("wrote in place"))
+
+
+def _fake_renameat2(calls: list, before=None, result=None):
+    """Stands in for the libc call only: no-replace rename relative to dir_fd."""
+    def fake(dir_fd: int, src: str, dst: str) -> int:
+        calls.append((src, dst))
+        if before is not None:
+            before()
+        if result is not None:
+            return result
+        try:
+            os.stat(dst, dir_fd=dir_fd, follow_symlinks=False)
+            return errno.EEXIST
+        except FileNotFoundError:
+            os.rename(src, dst, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+            return 0
+    return fake
+
+
+def test_on_linux_an_eperm_link_publishes_by_noreplace_rename(tmp_path: Path, monkeypatch) -> None:
+    io = _io()
+    cache_dir = tmp_path / ".unitares"
+    cache_dir.mkdir()
+    _eperm_links(io, monkeypatch)
+    calls: list = []
+    monkeypatch.setattr(io, "_RENAMEAT2_PLATFORM", True)
+    monkeypatch.setattr(io, "_renameat2_noreplace", _fake_renameat2(calls))
+    io.ensure_cache_dir_ignored(cache_dir)
+    assert (cache_dir / ".gitignore").read_bytes() == io._CACHE_IGNORE
+    assert len(calls) == 1 and calls[0][1] == ".gitignore" and calls[0][0].endswith(".tmp")
+    assert _scratch(cache_dir) == []
+
+
+def test_the_noreplace_rename_never_overwrites_a_concurrent_save(tmp_path: Path, monkeypatch) -> None:
+    io = _io()
+    cache_dir = tmp_path / ".unitares"
+    cache_dir.mkdir()
+    ignore = cache_dir / ".gitignore"
+    _eperm_links(io, monkeypatch)
+    calls: list = []
+    monkeypatch.setattr(io, "_RENAMEAT2_PLATFORM", True)
+    monkeypatch.setattr(io, "_renameat2_noreplace",
+                        _fake_renameat2(calls, before=lambda: ignore.write_bytes(b"mine\n")))
+    io.ensure_cache_dir_ignored(cache_dir)
+    assert ignore.read_bytes() == b"mine\n"
+    assert len(calls) == 1
+    assert _scratch(cache_dir) == []
+
+
+@pytest.mark.parametrize("code", [errno.EINVAL, errno.ENOSYS, errno.EPERM, errno.EACCES])
+def test_a_refused_noreplace_rename_writes_nothing(tmp_path: Path, monkeypatch, code: int) -> None:
+    # No flag support, no libc symbol, or a policy refusal: fail closed, and
+    # never fall back to an ordinary (overwriting) rename.
+    io = _io()
+    cache_dir = tmp_path / ".unitares"
+    cache_dir.mkdir()
+    _eperm_links(io, monkeypatch)
+    calls: list = []
+    monkeypatch.setattr(io, "_RENAMEAT2_PLATFORM", True)
+    monkeypatch.setattr(io, "_renameat2_noreplace", _fake_renameat2(calls, result=code))
+    monkeypatch.setattr(io.os, "rename", lambda *a, **k: pytest.fail("ordinary rename"))
+    monkeypatch.setattr(io.os, "replace", lambda *a, **k: pytest.fail("ordinary replace"))
+    io.ensure_cache_dir_ignored(cache_dir)
+    assert len(calls) == 1
+    assert os.listdir(cache_dir) == []
+
+
+@pytest.mark.parametrize("case", ["not-linux", "no-dir-fd", "other-errno"])
+def test_the_noreplace_rename_is_only_routed_for_linux_eperm_with_dir_fd(
+        tmp_path: Path, monkeypatch, case: str) -> None:
+    io = _io()
+    cache_dir = tmp_path / ".unitares"
+    cache_dir.mkdir()
+    code = errno.EIO if case == "other-errno" else errno.EPERM
+
+    def refused(*args, **kwargs):
+        raise OSError(code, os.strerror(code))
+
+    monkeypatch.setattr(io.os, "link", refused)
+    monkeypatch.setattr(io, "_create_in_place", lambda *a: pytest.fail("wrote in place"))
+    monkeypatch.setattr(io, "_RENAMEAT2_PLATFORM", case != "not-linux")
+    monkeypatch.setattr(io, "_renameat2_noreplace", lambda *a: pytest.fail("renameat2 routed"))
+    if case == "no-dir-fd":
+        monkeypatch.setattr(io.os, "supports_dir_fd", set())
+    io.ensure_cache_dir_ignored(cache_dir)
+    assert os.listdir(cache_dir) == []
+
+
+@pytest.mark.skipif(sys.platform.startswith("linux"), reason="checks the missing-symbol path")
+def test_without_a_libc_renameat2_the_helper_fails_closed(tmp_path: Path) -> None:
+    # The real helper, unmocked: off Linux libc has no renameat2 symbol.
+    io = _io()
+    (tmp_path / "src").write_bytes(b"a")
+    dir_fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        assert io._renameat2_noreplace(dir_fd, "src", "dst") != 0
+    finally:
+        os.close(dir_fd)
+    assert sorted(os.listdir(tmp_path)) == ["src"]
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="real renameat2 needs Linux")
+def test_real_renameat2_moves_when_free_and_refuses_when_taken(tmp_path: Path) -> None:
+    io = _io()
+    (tmp_path / "src").write_bytes(b"new")
+    (tmp_path / "taken").write_bytes(b"old")
+    dir_fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        result = io._renameat2_noreplace(dir_fd, "src", "taken")
+        if result in (errno.ENOSYS, errno.EINVAL):
+            pytest.skip("no renameat2 or RENAME_NOREPLACE here")
+        assert result == errno.EEXIST
+        assert (tmp_path / "taken").read_bytes() == b"old"
+        assert io._renameat2_noreplace(dir_fd, "src", "free") == 0
+    finally:
+        os.close(dir_fd)
+    assert (tmp_path / "free").read_bytes() == b"new"
+    assert not (tmp_path / "src").exists()
