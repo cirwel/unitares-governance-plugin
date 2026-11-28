@@ -95,7 +95,7 @@ spec.loader.exec_module(module)
 original_read = module._read_json
 def slow_read(path):
     payload = original_read(path)
-    time.sleep(0.05)
+    time.sleep(0.02)
     return payload
 module._read_json = slow_read
 
@@ -111,6 +111,8 @@ args = argparse.Namespace(
 )
 raise SystemExit(module.cmd_bump_edit(args))
 """
+    worker_env = os.environ.copy()
+    worker_env.pop("UNITARES_MILESTONE_LOCK_TIMEOUT_S", None)
     processes = [
         subprocess.Popen(
             [
@@ -126,6 +128,7 @@ raise SystemExit(module.cmd_bump_edit(args))
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            env=worker_env,
         )
         for worker_id in range(worker_count)
     ]
@@ -144,7 +147,7 @@ raise SystemExit(module.cmd_bump_edit(args))
             stdout, stderr = process.communicate(timeout=20)
             if process.returncode != 0:
                 failures.append((process.returncode, stdout, stderr))
-        assert not failures
+        assert not failures, failures
     finally:
         start_gate.unlink(missing_ok=True)
         for process in processes:
