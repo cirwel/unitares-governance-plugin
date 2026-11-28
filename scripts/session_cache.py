@@ -64,7 +64,7 @@ CACHE_FILES = {
     "session": "session.json",
     "milestone": "last-milestone.json",
 }
-DEFAULT_MILESTONE_LOCK_TIMEOUT_S = 4.0
+DEFAULT_MILESTONE_LOCK_TIMEOUT_S = 2.0
 DEFAULT_MILESTONE_DELIVERY_CLAIM_TTL_S = 30.0
 MIN_MILESTONE_DELIVERY_CLAIM_TTL_S = 30.0
 DEFAULT_MILESTONE_SNAPSHOT_MAX_AGE_S = 900.0
@@ -154,7 +154,7 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
 def _bounded_lock_timeout_s(env_name: str, default: float) -> float:
     raw = os.environ.get(env_name, str(default))
     try:
-        return min(10.0, max(0.05, float(raw)))
+        return min(4.0, max(0.05, float(raw)))
     except ValueError:
         return default
 

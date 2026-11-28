@@ -112,7 +112,7 @@ args = argparse.Namespace(
 raise SystemExit(module.cmd_bump_edit(args))
 """
     worker_env = os.environ.copy()
-    worker_env["UNITARES_MILESTONE_LOCK_TIMEOUT_S"] = "8.0"
+    worker_env.pop("UNITARES_MILESTONE_LOCK_TIMEOUT_S", None)
     processes = [
         subprocess.Popen(
             [
