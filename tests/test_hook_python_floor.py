@@ -39,6 +39,7 @@ SYSTEM_PYTHON = Path("/usr/bin/python3")
 # without a backslash, and backslash-newline inside single quotes (where the
 # shell keeps it literally).
 _HEREDOC_OP = r"(?<!<)<<(?!<)"
+_COMMENT_LINE = re.compile(r"^[ \t]*#")
 _HEREDOC_OPEN = re.compile(
     r"^(?![ \t]*#).*\bpython3\b.*?" + _HEREDOC_OP
     + r"""(?P<dash>-?)[ \t]*(?P<q>['"])(?P<tag>[A-Za-z_][A-Za-z0-9_]*)(?P=q)"""
@@ -60,6 +61,11 @@ def _extract_heredocs(text: str) -> tuple[list[str], list[str]]:
     problems: list[str] = []
     i = 0
     while i < len(lines):
+        # A full-line comment ends at its newline, even after a trailing
+        # backslash, so it is skipped before any continuation join.
+        if _COMMENT_LINE.match(lines[i]):
+            i += 1
+            continue
         # Join backslash-newline continuations into one logical command line.
         first = i
         logical = lines[i]
@@ -167,6 +173,13 @@ def test_the_scan_follows_backslash_newline_continuations() -> None:
 def test_an_escaped_backslash_does_not_continue_the_line() -> None:
     bodies, problems = _extract_heredocs("python3 - x\\\\\n<<'PY'\nprint(1)\nPY\n")
     assert bodies == [] and problems == []
+
+
+def test_a_comment_ending_in_a_backslash_does_not_continue() -> None:
+    text = "# see notes \\\npython3 - <<'PY'\nprint(1)\nPY\n"
+    bodies, problems = _extract_heredocs(text)
+    assert problems == []
+    assert bodies == ["print(1)\n"]
 
 
 def test_a_here_string_is_not_a_heredoc() -> None:
